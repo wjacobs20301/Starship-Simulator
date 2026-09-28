@@ -23,7 +23,7 @@ export interface Settings {
   weather: StarbaseWeather;
 }
 
-const DEFAULTS: Settings = { shipSerial: 'SN44', muted: false, renderScale: 'auto', clouds: true, weather: 'partly' };
+const DEFAULTS: Settings = { shipSerial: 'SN41', muted: false, renderScale: 'auto', clouds: true, weather: 'partly' };
 const STORAGE_KEY = 'starship-sim.settings';
 
 function load(): Settings {

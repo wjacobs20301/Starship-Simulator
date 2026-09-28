@@ -440,13 +440,18 @@
 
       /* --- Loading screen --- */
       /* --- Compatibility check (boot.ts) --- */
-      #compat { position: fixed; inset: 0; z-index: 60; background: #000; color: var(--text); display: flex; flex-direction: column;
-        align-items: center; justify-content: center; padding: 24px; text-align: center; font-family: var(--font); overflow: auto; }
+      #compat { position: fixed; inset: 0; z-index: 60; background: #000; color: var(--text); font-family: var(--font); overflow: hidden; }
+      #compat .cp-bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+      #compat .cp-shade { position: absolute; inset: 0; pointer-events: none;
+        background: radial-gradient(ellipse at 50% 45%, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0.35) 45%, rgba(0,0,0,0.7) 100%); }
+      #compat .cp-body { position: relative; height: 100%; display: flex; flex-direction: column; align-items: center;
+        justify-content: center; padding: 24px; text-align: center; overflow: auto; box-sizing: border-box;
+        text-shadow: 0 1px 12px rgba(0,0,0,0.8); }
       #compat .cp-name { font-size: clamp(34px, 7vw, 64px); font-weight: 700; letter-spacing: .5em; margin-right: -.5em; }
       #compat .cp-sub { font-size: 12px; font-weight: 500; letter-spacing: .42em; color: rgba(255,255,255,0.6); margin: 10px 0 34px; }
-      #compat .cp-item { max-width: 520px; border-top: 1px solid rgba(255,255,255,0.18); padding: 18px 0 4px; }
+      #compat .cp-item { max-width: 520px; border-top: 1px solid rgba(255,255,255,0.3); padding: 18px 0 4px; }
       #compat .cp-title { font-size: 15px; font-weight: 600; letter-spacing: .24em; text-transform: uppercase; }
-      #compat p { font-size: 15px; line-height: 1.55; color: rgba(255,255,255,0.75); margin: 10px 0 12px; }
+      #compat p { font-size: 15px; line-height: 1.55; color: rgba(255,255,255,0.85); margin: 10px 0 12px; }
       #compat .cp-go { margin-top: 18px; padding: 12px 28px; background: #fff; color: #000; border: 0; font: 600 13px var(--font);
         letter-spacing: .3em; text-transform: uppercase; cursor: pointer; }
       #loading { position: fixed; inset: 0; z-index: 20; display: flex; flex-direction: column; align-items: center; justify-content: center;

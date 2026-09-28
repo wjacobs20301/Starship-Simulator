@@ -1,0 +1,44 @@
+TITLE
+Starship Flight Simulator | Launch, Catch the Booster, Reentry | Play Free in Your Browser
+
+DESCRIPTION
+Fly SpaceX's Starship and Super Heavy from the pad to orbit and back, free in your browser.
+
+▶ Play now (on a computer): https://starship.wjacobs.space
+
+Launch from Starbase, hand-fly the ascent through max-Q or let the autopilot fly, hot stage,
+catch Super Heavy with the chopsticks, reach orbit, survive reentry and bring the ship home to
+the tower. Everything in this trailer is real gameplay, recorded in the game.
+
+• Full 6-DOF flight physics: thrust, drag, gravity, staging, heating
+• The real Starbase: aerial imagery, elevation and buildings of both pads
+• 9 missions, hand-flown or autopilot, plus free roam
+• Catch the booster and the ship with the tower's chopsticks
+• Reentry heating, belly flop, flip and landing burn
+• Webcast-style telemetry, a navball cockpit and a planning map with maneuver nodes
+• A full 24-hour day and night cycle
+
+Needs a desktop or laptop computer with a keyboard, and a recent Chrome, Edge, Firefox or Safari.
+
+CREDITS
+Launch tower, chopsticks and mount: "Starship Launch Tower & Launch Pad with Functional
+Chopsticks" by MikeNotBrick (https://www.thingiverse.com/thing:5908857), CC BY 4.0
+(https://creativecommons.org/licenses/by/4.0/). Scaled, re-assembled and re-materialed.
+Starship / Super Heavy: "SpaceX Starship Block 3" by Clarence365
+(https://sketchfab.com/3d-models/spacex-starship-block-3-6f6c6f88a3eb4b4d822fdca66733fbb2),
+CC BY 4.0. Modified.
+Aerial imagery: USDA NAIP 2022 (public domain). Satellite imagery: contains modified Copernicus
+Sentinel data 2025–2026. Global imagery: NASA Blue Marble Next Generation (public domain).
+Elevation: USGS 3D Elevation Program (public domain); Copernicus GLO-30 DEM © DLR e.V.
+2010–2014 and © Airbus Defence and Space GmbH 2014–2018, provided under COPERNICUS by the
+European Union and ESA.
+Buildings: © OpenStreetMap contributors (ODbL), https://www.openstreetmap.org/copyright
+Music: original, made for this trailer.
+
+An independent fan-made simulator, not affiliated with or endorsed by SpaceX.
+
+#Starship #SpaceX #FlightSimulator
+
+TAGS
+starship, spacex, starship simulator, starship flight simulator, super heavy, booster catch,
+chopsticks, starbase, rocket simulator, space simulator, browser game, reentry, flight test

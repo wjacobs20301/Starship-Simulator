@@ -58,15 +58,22 @@ function show(list: Problem[]): Promise<void> {
   const hard = list.some((p) => !p.soft);
   const box = document.createElement('div');
   box.id = 'compat';
+  // Behind the message, a short silent loop of the game (liftoff, the booster and the ship caught
+  // by the tower): only loaded when this screen shows, ~2 MB. Muted and inline, so phones autoplay
+  // it; where they won't (e.g. low-power mode), its poster frame stays up.
   box.innerHTML =
+    `<video class="cp-bg" src="/media/bg-loop.mp4" poster="/media/bg-poster.jpg" autoplay muted loop playsinline ` +
+    `disablepictureinpicture aria-hidden="true"></video><div class="cp-shade"></div><div class="cp-body">` +
     `<div class="cp-name">STARSHIP</div><div class="cp-sub">FLIGHT SIMULATOR</div>` +
     list.map((p) => `<div class="cp-item"><div class="cp-title">${p.title}</div><p>${p.text}</p></div>`).join('') +
-    (hard ? '' : `<button class="cp-go">Continue anyway</button>`);
+    (hard ? '' : `<button class="cp-go">Continue anyway</button>`) +
+    `</div>`;
   document.body.appendChild(box);
   // (Blocked: the loading screen goes. Otherwise it waits underneath for "Continue anyway".)
   if (hard) document.querySelector('#loading')?.remove();
   return new Promise((resolve) => {
     box.querySelector('.cp-go')?.addEventListener('click', () => {
+      box.querySelector('video')?.pause();
       box.remove();
       resolve();
     });
