@@ -129,7 +129,7 @@
       .wc-bar { width: 140px; height: 3px; background: rgba(255,255,255,.16); border-radius: 2px; overflow: hidden; }
       .wc-bar i { display: block; height: 100%; background: #fff; transform-origin: left; transition: transform .4s; }
       .wc-center { display: flex; flex-direction: column; align-items: center; }
-      .wc-timeline svg { width: 640px; height: 64px; overflow: visible; display: block; }
+      .wc-timeline svg { width: 640px; height: 90px; overflow: visible; display: block; }
       .wc-timeline .arc { fill: none; stroke: rgba(255,255,255,.32); stroke-width: 1.4; }
       .wc-timeline .arc.past { stroke: #fff; stroke-width: 2; }
       .wc-timeline .now { fill: #fff; filter: drop-shadow(0 0 3px #fff); }
@@ -147,7 +147,7 @@
         opacity: 0; transition: opacity .7s ease, transform .7s ease, bottom .5s ease; text-shadow: 0 0 3px rgba(0,0,0,.9), 0 1px 12px rgba(0,0,0,.8); white-space: nowrap; }
       #wc-caption.show { opacity: 1; transform: translate(-50%, 0); }
       @media (max-width: 1200px) {
-        .wc-timeline svg { width: 440px; height: 50px; }
+        .wc-timeline svg { width: 440px; height: 62px; }
         .wc-attitude { display: none; }
         .wc-gauge { width: 76px; height: 76px; }
         .wc-gvalue { font-size: 20px; }
@@ -273,7 +273,7 @@
       #webcast.piloting .wc-clock { font-size: 22px; margin-top: 0; }
       #webcast.piloting .wc-clock .t { font-size: 15px; margin-right: 3px; }
       /* The arc, title and mode line fold away while piloting; the cockpit takes their place. */
-      .wc-timeline, .wc-title, .wc-mode { max-height: 70px; overflow: hidden;
+      .wc-timeline, .wc-title, .wc-mode { max-height: 100px; overflow: hidden;
         transition: max-height .7s var(--ease), opacity .45s ease, margin .7s var(--ease); }
       #webcast.piloting .wc-timeline, #webcast.piloting .wc-title, #webcast.piloting .wc-mode { max-height: 0; opacity: 0; margin-top: 0; }
       .wc-readout { font-size: 10.5px; letter-spacing: .12em; color: rgba(255,255,255,0.6); padding: 2px 4px 0;

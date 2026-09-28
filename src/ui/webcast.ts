@@ -238,6 +238,8 @@ const MILESTONES = (): Milestone[] => [
 /** The arc: a wide, shallow curve; x across 0..W, rising to the middle. */
 const ARC_W = 640;
 const ARC_H = 64;
+/** Space above the arc's box for the milestone labels (viewBox units). */
+const LABEL_ROOM = 26;
 const ARC_R = 1400;
 const arcY = (x: number) => ARC_H - 6 - (Math.sqrt(ARC_R * ARC_R - (x - ARC_W / 2) ** 2) - Math.sqrt(ARC_R * ARC_R - (ARC_W / 2) ** 2));
 /** Where "now" sits along the arc, and the stretch of time the arc shows either side, s. */
@@ -253,7 +255,8 @@ class Timeline {
   constructor(private onCaption: (text: string) => void) {
     this.el = document.createElement('div');
     this.el.className = 'wc-timeline';
-    const svg = svgEl('svg', { viewBox: `0 0 ${ARC_W} ${ARC_H}` });
+    // (Room above the arc for the upper row of labels: the timeline's box clips what spills out.)
+    const svg = svgEl('svg', { viewBox: `0 ${-LABEL_ROOM} ${ARC_W} ${ARC_H + LABEL_ROOM}` });
     const path = (x0: number, x1: number) => {
       let d = '';
       for (let x = x0; x <= x1; x += 8) d += `${d ? 'L' : 'M'} ${x.toFixed(1)} ${arcY(x).toFixed(1)} `;

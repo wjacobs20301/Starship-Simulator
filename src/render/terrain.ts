@@ -419,11 +419,30 @@ export class Terrain {
     return p;
   }
 
+  /**
+   * The imagery for a tile: its own, or, for land the fine aerial survey doesn't cover (its edges,
+   * and across the border), the matching part of the nearest coarser tile that has imagery (drawn
+   * as sea, those gaps showed as blue strips along the tile edges). Open sea gets none: the water
+   * shader draws it. Returns the texture and where the tile sits in it (uv offset and scale).
+   */
+  private async imagery(t: Tile, hts: Float32Array): Promise<{ tex: THREE.Texture | null; off: [number, number]; scale: number }> {
+    if (t.hasImagery) return { tex: await this.texLoader.loadAsync(`${BASE}img/${t.key}.jpg`), off: [0, 0], scale: 1 };
+    let top = -Infinity;
+    for (const h of hts) top = Math.max(top, h);
+    if (top <= this.index.waterLevel + 0.5) return { tex: null, off: [0, 0], scale: 1 };
+    for (let d = 1; t.z - d >= this.index.minZoom; d++) {
+      const ax = t.x >> d, ay = t.y >> d;
+      if (!this.has('img', t.z - d, ax, ay)) continue;
+      const scale = 2 ** -d;
+      const tex = await this.texLoader.loadAsync(`${BASE}img/${t.z - d}/${ax}/${ay}.jpg`);
+      return { tex, off: [(t.x - (ax << d)) * scale, (t.y - (ay << d)) * scale], scale };
+    }
+    return { tex: null, off: [0, 0], scale: 1 };
+  }
+
   private async build(t: Tile): Promise<void> {
-    const [hts, tex] = await Promise.all([
-      this.heights(t),
-      t.hasImagery ? this.texLoader.loadAsync(`${BASE}img/${t.key}.jpg`) : Promise.resolve(null),
-    ]);
+    const hts = await this.heights(t);
+    const { tex, off, scale: texScale } = await this.imagery(t, hts);
     t.heights = hts;
     if (tex) {
       tex.colorSpace = THREE.SRGBColorSpace;
@@ -438,7 +457,8 @@ export class Terrain {
     const en = new Float32Array((n + skirt) * 2);
     // Runtime water colour on tiles fine enough to resolve the shoreline (z15+, ~40 m spacing).
     // Coarser imagery has its water colour baked in by the build; tiles without imagery are sea.
-    const waterWeight = new Float32Array(n + skirt).fill(!t.hasImagery ? 2 : t.z >= 15 ? 1 : 0);
+    // (Open sea, with no imagery at all: all water. Land on a coarser tile's imagery: water by height.)
+    const waterWeight = new Float32Array(n + skirt).fill(!tex ? 2 : t.z >= 15 || !t.hasImagery ? 1 : 0);
     const c = t.center;
     for (let j = 0; j < GRID; j++) {
       const v = j / (GRID - 1);
@@ -449,7 +469,7 @@ export class Terrain {
         const h = hts[k];
         const w = toWorld(lat, tileXToLon(t.x + u, t.z), h);
         pos.set([w[0] - c[0], w[1] - c[1], w[2] - c[2]], k * 3);
-        uv.set([u, 1 - v], k * 2);
+        uv.set([off[0] + u * texScale, 1 - (off[1] + v * texScale)], k * 2);
         hAttr[k] = h - PAD.groundAlt;
         en.set([w[0], -w[2]], k * 2);
       }
@@ -476,7 +496,11 @@ export class Terrain {
       }
     }
     const surfaceCount = idx.length;
-    for (let s = 0; s < edge.length; s++) {
+    // Tiles reaching into the region's fade band blend with the globe below. (No skirts there:
+    // they showed through the part-transparent ground as dark lines along the tile edges.)
+    const reach = Math.max(Math.abs(c[0]), Math.abs(c[2])) + t.size * 0.75;
+    const fading = reach > REGION_HALF_M - EDGE_FADE_M;
+    for (let s = 0; s < (fading ? 0 : edge.length); s++) {
       const a = edge[s], b = edge[(s + 1) % edge.length];
       const a2 = n + s, b2 = n + ((s + 1) % edge.length);
       idx.push(a, b, a2, b, b2, a2, a, a2, b, b, a2, b2); // both windings: skirts are seen from either side
@@ -498,9 +522,7 @@ export class Terrain {
     // (Tile centre in pad east / north: world x = east, z = -north.)
     const holes = TRENCHES.some((tr) => Math.hypot(tr.center[0] - c[0], tr.center[1] + c[2]) < t.size * 0.75 + Math.hypot(tr.half[0], tr.half[1]) + 5);
     const material = makeMaterial(tex, holes);
-    // Tiles reaching into the region's fade band blend with the globe below.
-    const reach = Math.max(Math.abs(c[0]), Math.abs(c[2])) + t.size * 0.75;
-    if (reach > REGION_HALF_M - EDGE_FADE_M) material.transparent = true;
+    if (fading) material.transparent = true;
     const mesh = new THREE.Mesh(g, material);
     mesh.receiveShadow = true;
     mesh.frustumCulled = false;

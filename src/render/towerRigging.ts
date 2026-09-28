@@ -77,8 +77,8 @@ export class TowerRigging {
    * fall: the tower's toppling group (everything here lives in it); carriage: the carriage node
    * (slides up and down in the fall group); frame: a part of the carriage whose top the block
    * sits on (the arms); tower: the lattice
-   * mesh; front: a point in front of the tower (where the arms reach); groundY: the pad ground
-   * in the fall group's frame.
+   * mesh; front: a point in front of the tower (where the arms reach); _groundY: the pad ground
+   * in the fall group's frame (unused since the ground-level drawworks went).
    */
   constructor(
     fall: THREE.Object3D,
@@ -86,7 +86,7 @@ export class TowerRigging {
     frame: THREE.Object3D,
     tower: THREE.Object3D,
     front: THREE.Vector3,
-    groundY: number,
+    _groundY: number,
     spec: RiggingSpec,
   ) {
     this.group.name = 'Rigging';
@@ -120,7 +120,6 @@ export class TowerRigging {
     const sizeX = topBox.max.x - topBox.min.x;
     const sizeZ = topBox.max.z - topBox.min.z;
     const half = (Math.abs(fwd.x) * sizeX + Math.abs(fwd.z) * sizeZ) / 2;
-    const halfAcross = (Math.abs(this.across.x) * sizeX + Math.abs(this.across.z) * sizeZ) / 2;
     const top = towerBox.max.y;
     const at = (out: number, y: number, side = 0) =>
       new THREE.Vector3(towerC.x + fwd.x * out + this.across.x * side, y, towerC.z + fwd.z * out + this.across.z * side);
@@ -350,66 +349,17 @@ export class TowerRigging {
       this.falls.push({ mesh, offset: -width / 2 + i * SHEAVE_PITCH });
     }
 
-    // --- Fast and dead lines: from the crown into the tower, down inside it, out its back face
-    //     low down, to the drawworks and the deadline anchor on the ground behind the base -----
+    // --- Fast and dead lines: from the crown into the tower and down inside it. (Where they leave
+    //     the tower, the drawworks and the deadline anchor on the ground behind the base are left
+    //     out: they read as clutter beside the tower.) -----------------------------------------
     const exitY = towerBox.min.y + spec.exitSection * SECTION;
-    const behind = half + 11;
-    const drawworksAt = at(-behind, groundY, halfAcross * 0.6);
-    const anchorAt = at(-behind + 2, groundY, -halfAcross * 0.6);
-    const line = (side: number, end: THREE.Vector3) => {
+    const line = (side: number) => {
       const s = side * (width / 2 + 0.3);
-      const pts = [
-        this.crownAxle.clone().addScaledVector(this.across, s),
-        at(half - 1.2, top - 1, s),
-        at(half - 1.2, exitY + 3, s),
-        at(-half + 0.6, exitY, s),
-        end,
-      ];
+      const pts = [this.crownAxle.clone().addScaledVector(this.across, s), at(half - 1.2, top - 1, s), at(half - 1.2, exitY + 3, s)];
       for (let i = 0; i < pts.length - 1; i++) this.segment(pts[i], pts[i + 1], rope);
     };
-    line(1, drawworksAt.clone().add(new THREE.Vector3(0, 3.2, 0)));
-    line(-1, anchorAt.clone().add(new THREE.Vector3(0, 2.2, 0)));
-
-    // Drawworks: a winch drum and its motors on a skid, under a shelter.
-    const dw = new THREE.Group();
-    dw.position.copy(drawworksAt);
-    this.group.add(dw);
-    face(dw);
-    const skid = new THREE.Mesh(new THREE.BoxGeometry(8, 1, 5), steel);
-    skid.position.y = 0.5;
-    const drumGeo = new THREE.CylinderGeometry(1.3, 1.3, 4.4, 28);
-    drumGeo.rotateZ(Math.PI / 2);
-    const drum = new THREE.Mesh(drumGeo, dark);
-    drum.position.y = 2.4;
-    dw.add(skid, drum);
-    for (const x of [-3.2, 3.2]) {
-      const motor = new THREE.Mesh(new THREE.BoxGeometry(1.5, 2.2, 2.4), steel);
-      motor.position.set(x, 2.1, -0.4);
-      dw.add(motor);
-    }
-    const roof = new THREE.Mesh(new THREE.BoxGeometry(9, 0.3, 6), cladding);
-    roof.position.y = 5.2;
-    dw.add(roof);
-    for (const x of [-4.2, 4.2]) {
-      for (const z of [-2.7, 2.7]) {
-        const post = new THREE.Mesh(new THREE.BoxGeometry(0.3, 4.8, 0.3), steel);
-        post.position.set(x, 2.8, z);
-        dw.add(post);
-      }
-    }
-
-    // Dead spool and deadline anchor.
-    const an = new THREE.Group();
-    an.position.copy(anchorAt);
-    this.group.add(an);
-    face(an);
-    const base = new THREE.Mesh(new THREE.BoxGeometry(3.6, 1.2, 3), steel);
-    base.position.y = 0.6;
-    const spoolGeo = new THREE.CylinderGeometry(0.9, 0.9, 2.2, 24);
-    spoolGeo.rotateZ(Math.PI / 2);
-    const spool = new THREE.Mesh(spoolGeo, dark);
-    spool.position.y = 2.0;
-    an.add(base, spool);
+    line(1);
+    line(-1);
 
     for (const g of [this.group, this.block]) {
       g.traverse((o) => {
