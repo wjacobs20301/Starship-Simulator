@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { type ReturnTarget, greatCircleKm } from '../src/sim/shipReturn';
+import { MU } from '../src/sim/constants';
 import { Simulation } from '../src/sim/simulation';
+import type { V3 } from '../src/sim/math';
 
 /** Nominal flight to a minute after SECO, then the return command; runs (auto-warping) to the end. */
 function fly(target: ReturnTarget, prep?: (sim: Simulation) => void) {
@@ -58,6 +60,50 @@ describe('ship return (autopilot home)', () => {
     sim.find('ship')!.stages[0].prop = 40e3;
     sim.commandReturn({ kind: 'tower', pad: -1 });
     expect(sim.mission.shipReturn).toBeNull();
-    expect(sim.events.some((e) => /Can't return: needs \d+ m\/s but only \d+ m\/s/.test(e.text))).toBe(true);
+    expect(sim.events.some((e) => /Can't return: needs \d+ m\/s.* but only \d+ m\/s/.test(e.text))).toBe(true);
+  });
+});
+
+/** Put the ship on an orbit (perigee / apogee km, inclination / node / true anomaly deg), as a player might have flown it. */
+function orbit(pe: number, ap: number, inc: number, node: number, nu: number, propT?: number) {
+  return (sim: Simulation) => {
+    const ship = sim.find('ship')!;
+    const R = 6378e3;
+    const [rp, ra] = [R + pe * 1e3, R + ap * 1e3];
+    const e = (ra - rp) / (ra + rp);
+    const p = ((rp + ra) / 2) * (1 - e * e);
+    const D = Math.PI / 180;
+    const r = p / (1 + e * Math.cos(nu * D));
+    const rot = ([x, y]: number[]): V3 => {
+      const [ci, si, cO, sO] = [Math.cos(inc * D), Math.sin(inc * D), Math.cos(node * D), Math.sin(node * D)];
+      return [x * cO - y * ci * sO, x * sO + y * ci * cO, y * si];
+    };
+    ship.r = rot([r * Math.cos(nu * D), r * Math.sin(nu * D)]);
+    ship.v = rot([-Math.sqrt(MU / p) * Math.sin(nu * D), Math.sqrt(MU / p) * (e + Math.cos(nu * D))]);
+    if (propT !== undefined) ship.stages[0].prop = propT * 1e3;
+  };
+}
+
+describe('ship return from an orbit the player flew', () => {
+  it('a 45 deg orbit: phases onto a pass over the tower and is caught', { timeout: 300_000 }, () => {
+    const { sim, ship } = fly({ kind: 'tower', pad: -1 }, orbit(300, 300, 45, 30, 0));
+    expect(sim.events.some((e) => /Return to Pad 2 tower planned: phasing/.test(e.text))).toBe(true);
+    expect(ship.status).toBe('caught');
+  });
+
+  it('a long eccentric orbit with full-ish tanks: lowers it, vents what it won\'t need, and is caught', { timeout: 300_000 }, () => {
+    const { sim, ship } = fly({ kind: 'tower', pad: -1 }, orbit(160, 2500, 27, 200, 90, 250));
+    expect(sim.events.some((e) => /planned: lower orbit/.test(e.text))).toBe(true);
+    expect(sim.events.some((e) => /Return: venting/.test(e.text))).toBe(true);
+    expect(ship.status).toBe('caught');
+  });
+
+  it('refuses rather than run dry in the final approach', { timeout: 60_000 }, () => {
+    const sim = new Simulation();
+    sim.launch();
+    while (sim.mission.phase !== 'coast') sim.step();
+    orbit(200, 200, 26.5, 0, 0, 60)(sim);
+    sim.commandReturn({ kind: 'tower', pad: -1 });
+    expect(sim.mission.shipReturn).toBeNull();
   });
 });

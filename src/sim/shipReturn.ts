@@ -2,10 +2,15 @@
 // by the chopsticks (like the booster), or to a point in the ocean. The autopilot plans and flies
 // the whole thing:
 //
-//   plan         what it takes: none (already falling toward the target), or a circularisation
-//                burn at apoapsis (from a suborbital path) and a deorbit burn timed for a pass
-//                over the target (searching the next day's orbits). Refuses if the propellant or
-//                the orbit can't do it.
+//   plan         what it takes: none (already falling toward the target), or a deorbit burn timed
+//                for a pass over the target (searching the next day's orbits), after a
+//                circularisation burn at apoapsis (from a suborbital path) or a burn at periapsis
+//                lowering a long eccentric orbit. When no pass comes soon, a phasing burn first:
+//                a slightly higher orbit's period moves where the ground track crosses the
+//                target's latitude, sized per pass to put one right over it; the quickest way
+//                home for the fuel wins. Refuses if the propellant or the orbit can't do it.
+//   vent         propellant beyond what the burns and the landing need goes overboard (a heavy
+//                ship comes in hotter).
 //   burns        each flown as a maneuver node on the vacuum engines, warping on rails between.
 //   entry        belly-first at 60 deg angle of attack, steering by banking the lift: a
 //                predictor-corrector re-plans the landing point every second, choosing how far to
@@ -54,7 +59,7 @@ export type ReturnPhase =
 
 /** A planned burn: sim time and delta-v along prograde / normal / radial (m/s). */
 export interface PlannedBurn {
-  label: 'circularize' | 'deorbit';
+  label: 'circularize' | 'lower orbit' | 'phasing' | 'deorbit';
   t: number;
   dv: V3;
 }
@@ -87,6 +92,21 @@ const SHORT_MODEL: EntryModel = { dragArea: SHIP_ENTRY_MODEL.dragArea, liftToDra
 const PLAN_ACCEPT_KM = 120;
 /** Deorbit burn size to start the search from, m/s (retrograde). */
 const DEORBIT_DV = 110;
+/**
+ * Phasing burn (prograde m/s, + raises the orbit): a slightly different period moves where the
+ * ground track crosses the target's latitude, by ~100 km an orbit per 100 m/s. Sized from a trial
+ * one of this size.
+ */
+const PHASING_TRIAL = 30;
+/** Passes this far off (km) are worth phasing onto. */
+const PHASING_REACH_KM = 2500;
+/** Largest phasing burn, m/s. */
+const PHASING_MAX = 300;
+/** How far ahead to look for a pass to phase onto, s. */
+const PHASING_WINDOW = 36 * 3600;
+/** An orbit this eccentric (apoapsis - periapsis, m) is brought down to one this much above its periapsis first. */
+const ECCENTRIC = 600e3;
+const ECCENTRIC_TO = 200e3;
 /** Perigee that counts as a stable parking orbit, m. */
 const PARK_PERIGEE = 150e3;
 /** How far ahead to look for a pass, s. */
@@ -119,6 +139,8 @@ const TRANSIT_BASE = 175;
 /** Largest lean in the final hover beside the tower, rad. */
 const TERMINAL_TILT = 15 * DEG;
 const ALPHA_BELLYFLOP = 88 * DEG;
+/** How fast the belly-flopping ship yaws its glide heading round, rad/s. */
+const GLIDE_TURN_RATE = 8 * DEG;
 
 /** Great-circle distance between two lat/lon points (deg), km. */
 export function greatCircleKm(a: { lat: number; lon: number }, b: { lat: number; lon: number }): number {
@@ -137,10 +159,18 @@ export function targetLatLon(target: ReturnTarget): { lat: number; lon: number }
   return { lat: PAD.latDeg + n / 110_800, lon: PAD.lonDeg + e / (111_320 * Math.cos(PAD.latDeg * DEG)) };
 }
 
-/** Delta-v the ship can spend on maneuvers: its main-tank propellant (the headers are kept for landing). */
+/**
+ * Propellant kept for the landing beyond the header tanks, kg: the flip and landing burn and the
+ * slow final descent onto the arms take more than the headers hold.
+ */
+const LANDING_MARGIN_PROP = 25e3;
+/** Venting rate for propellant it won't need, kg/s. */
+const VENT_RATE = 5e3;
+
+/** Delta-v the ship can spend on maneuvers: its main-tank propellant (the landing's is kept). */
 export function maneuverDeltaV(ship: Vehicle): number {
   const s = ship.stages[0];
-  const header = s.def.header?.mass ?? s.def.reserve;
+  const header = (s.def.header?.mass ?? s.def.reserve) + LANDING_MARGIN_PROP;
   const dry = s.def.dryMass;
   const vac = ship.engines.find((e) => e.place.ring === 1)?.place.type;
   const isp = vac ? vac.ispVac : 370;
@@ -153,7 +183,19 @@ export function maneuverDeltaV(ship: Vehicle): number {
  * Plan the way to the target from the ship's state now: which burns, when, how big, and whether
  * the propellant covers them.
  */
-export function planReturn(ship: Vehicle, t: number, mass: number, target: ReturnTarget): ReturnPlan {
+export function planReturn(
+  ship: Vehicle,
+  t: number,
+  mass: number,
+  target: ReturnTarget,
+  /** Consider a phasing burn first (not when re-planning a deorbit burn already lined up). */
+  options = true,
+  /**
+   * Re-planning a deorbit burn already lined up for this time: keep to that pass if it's still
+   * within the entry's reach (a little over the planning limit is fine: better than a day more).
+   */
+  keepPass?: number,
+): ReturnPlan {
   const goal = targetLatLon(target);
   const dvAvailable = maneuverDeltaV(ship);
   const land = (r: V3, v: V3, t0: number, burn?: { t: number; dv: V3 }, model = PLAN_MODEL) => {
@@ -181,11 +223,13 @@ export function planReturn(ship: Vehicle, t: number, mass: number, target: Retur
     }
   }
 
-  // Otherwise: a parking orbit first if it isn't in one, then a deorbit burn over a pass.
-  const burns: PlannedBurn[] = [];
+  // Otherwise: a parking orbit first if it isn't in one, then a deorbit burn over a pass. If no
+  // pass comes soon, a phasing burn first (a slightly higher or lower orbit: its period shifts
+  // where the ground track crosses the target's latitude, orbit by orbit).
   let r = ship.r;
   let v = ship.v;
   let t1 = t;
+  let circ: { t: number; dv: number; label: PlannedBurn['label'] } | null = null;
   if (aps.perigee < PARK_PERIGEE) {
     if (aps.apogee < PARK_PERIGEE + 20e3) return fail(`apoapsis ${Math.round(aps.apogee / 1000)} km is too low to circularise: it has to come down now`);
     // Coast to apoapsis, then prograde to a circular orbit there.
@@ -194,96 +238,250 @@ export function planReturn(ship: Vehicle, t: number, mass: number, target: Retur
     const at = propagate(r, v, t, tApo, { dragArea: 0 }, mass);
     const rn = norm(at.r);
     const vCirc = Math.sqrt(MU / rn);
-    const f = orbitalFrame(at.r, at.v);
     const vh = norm(sub(at.v, scale(normalize(at.r), dot(at.v, normalize(at.r)))));
-    const dvPro = vCirc - vh;
-    burns.push({ label: 'circularize', t: tApo, dv: [dvPro, 0, 0] });
+    circ = { t: tApo, dv: vCirc - vh, label: 'circularize' };
     r = at.r;
-    v = add(at.v, scale(f.pro, dvPro));
-    // Take out the radial speed too (at apoapsis it's ~0 anyway).
-    v = sub(v, scale(normalize(r), dot(v, normalize(r))));
-    v = scale(normalize(v), vCirc);
+    v = scale(normalize(sub(at.v, scale(normalize(at.r), dot(at.v, normalize(at.r))))), vh);
     t1 = tApo;
+  } else if (aps.apogee - aps.perigee > ECCENTRIC && options) {
+    // A long, eccentric orbit: its landings fall wherever its periapsis is, not where the burn
+    // puts them. Lower the apoapsis at periapsis first (retrograde), to a near-circular orbit.
+    const tPeri = timeToPeriapsis(r, v, t, mass);
+    if (tPeri === null) return fail('no periapsis ahead to lower the orbit at');
+    const at = propagate(r, v, t, tPeri, { dragArea: 0 }, mass);
+    const rp = norm(at.r);
+    const a = rp + ECCENTRIC_TO / 2; // (apoapsis ECCENTRIC_TO above the periapsis)
+    const vWant = Math.sqrt(MU * (2 / rp - 1 / a));
+    const vh = norm(sub(at.v, scale(normalize(at.r), dot(at.v, normalize(at.r)))));
+    circ = { t: tPeri, dv: vWant - vh, label: 'lower orbit' };
+    r = at.r;
+    v = scale(normalize(sub(at.v, scale(normalize(at.r), dot(at.v, normalize(at.r))))), vh);
+    t1 = tPeri;
+  } else {
+    // Already in orbit: any phasing burn a couple of minutes from now.
+    t1 = options ? t + 120 : t;
+    const at = propagate(r, v, t, t1, { dragArea: 0 }, mass);
+    r = at.r;
+    v = at.v;
   }
+  if (circ && Math.abs(circ.dv) + DEORBIT_DV > dvAvailable) {
+    const dvNeeded = Math.abs(circ.dv) + DEORBIT_DV;
+    return fail(`needs ${Math.round(dvNeeded)} m/s (${circ.label} ${Math.round(Math.abs(circ.dv))} + deorbit) but only ${Math.round(dvAvailable)} m/s is left above the landing reserve`, dvNeeded);
+  }
+  // (Re-planning a deorbit burn that's close: it may be only a minute or two away.)
+  const earliest = options || circ ? t1 + 300 : t + 60;
 
-  // Orbit states over the search window, and the ground track under them.
-  const states: { t: number; r: V3; v: V3; lat: number; lon: number }[] = [];
+  // Options: straight to the first pass the deorbit burn reaches; or a phasing burn at t1 (on
+  // top of any circularisation) sized to put a later pass right over the target. The quickest
+  // home wins, counting each 100 m/s spent as an hour.
+  const pro = orbitalFrame(r, v).pro;
+  const orbitWith = (phase: number): V3 | null => {
+    const vAfter = add(v, scale(pro, phase + (circ?.dv ?? 0)));
+    if ((circ || phase) && orbitApsides(r, vAfter).perigee < PARK_PERIGEE - 10e3) return null;
+    return vAfter;
+  };
+  type Option = PassResult & { phase: number; cost: number };
+  let best: Option | null = null;
+  let closest: PassResult | null = null;
+  const consider = (res: PassResult | null, phase: number) => {
+    if (!res) return;
+    if (!closest || res.miss < closest.miss) closest = res;
+    const dv = Math.abs(phase + (circ?.dv ?? 0)) + res.dv;
+    if (res.miss > PLAN_ACCEPT_KM * (keepPass !== undefined ? 1.5 : 1) || dv > dvAvailable) return;
+    // (Time home, plus fuel, plus how much the entry will have to steer: a near miss is safer.)
+    const cost = (res.landing.t - t) / 3600 + dv / 100 + res.miss / 60;
+    if (!best || cost < best.cost) best = { ...res, phase, cost };
+  };
+  const v0 = orbitWith(0)!;
+  const track0 = groundPasses(r, v0, t1, t1 + SEARCH_WINDOW, mass, goal);
+  consider(firstPass(track0, mass, goal, earliest, land, keepPass), 0);
+  if (options) {
+    // How each pass's offset from the target moves with the phasing burn (a trial one), then,
+    // pass by pass, the burn that zeroes it (a secant step or two).
+    const trial = orbitWith(PHASING_TRIAL);
+    const track1 = trial ? groundPasses(r, trial, t1, t1 + PHASING_WINDOW + 3600, mass, goal, PHASING_REACH_KM) : null;
+    const wide = track1 ? groundPasses(r, v0, t1, t1 + PHASING_WINDOW, mass, goal, PHASING_REACH_KM) : null;
+    for (const p0 of wide ? wide.passes : []) {
+      if (p0.t < earliest + 600) continue;
+      const sofar = best as Option | null;
+      if (sofar && p0.t > sofar.landing.t) break;
+      let [xa, ya] = [0, p0.offset];
+      const p1 = matchPass(track1!, p0.t, 1800);
+      if (!p1) continue;
+      let [xb, yb] = [PHASING_TRIAL, p1.offset];
+      // (The pass comes a little later on a higher orbit: where to look for it.)
+      const tPer = (p1.t - p0.t) / PHASING_TRIAL;
+      let found: { phase: number; track: Track; pass: Pass } | null = null;
+      for (let k = 0; k < 3; k++) {
+        if (Math.abs(yb - ya) < 1e-3) break;
+        const x = xb - (yb * (xb - xa)) / (yb - ya);
+        if (!Number.isFinite(x) || Math.abs(x) > PHASING_MAX) break;
+        const vx = orbitWith(x);
+        if (!vx || Math.abs(x + (circ?.dv ?? 0)) + 50 > dvAvailable) break;
+        const tAt = p0.t + tPer * x;
+        const tr = groundPasses(r, vx, t1, tAt + 3600, mass, goal, PHASING_REACH_KM);
+        const px = matchPass(tr, tAt, 1200);
+        if (!px) break;
+        found = { phase: x, track: tr, pass: px };
+        if (Math.abs(px.offset) < PLAN_ACCEPT_KM / 3) break;
+        [xa, ya, xb, yb] = [xb, yb, x, px.offset];
+      }
+      if (found) consider(refinePass(found.track, found.pass, mass, goal, earliest, land), found.phase);
+    }
+  }
+  if (!best) {
+    const c = closest as PassResult | null;
+    if (c && c.miss <= PLAN_ACCEPT_KM) {
+      const dvNeeded = Math.abs(circ?.dv ?? 0) + c.dv;
+      return fail(`needs ${Math.round(dvNeeded)} m/s but only ${Math.round(dvAvailable)} m/s is left above the landing reserve`, dvNeeded);
+    }
+    return fail(c ? `no pass in the next day comes within reach (best misses by ${Math.round(c.miss)} km)` : 'no pass over the target in the next day');
+  }
+  const b = best as Option;
+  const burns: PlannedBurn[] = [];
+  const first = b.phase + (circ?.dv ?? 0);
+  if (circ) burns.push({ label: circ.label, t: t1, dv: [first, 0, 0] });
+  else if (b.phase) burns.push({ label: 'phasing', t: t1, dv: [first, 0, 0] });
+  burns.push({ label: 'deorbit', t: b.t, dv: [-b.dv, 0, 0] });
+  const dvNeeded = burns.reduce((a, x) => a + Math.abs(x.dv[0]), 0);
+  return { ok: true, burns, landing: b.landing, missKm: b.miss, dvNeeded, dvAvailable };
+}
+
+interface PassResult {
+  /** Deorbit burn time (sim time) and size (retrograde, m/s). */
+  t: number;
+  dv: number;
+  miss: number;
+  landing: { lat: number; lon: number; t: number };
+}
+
+type LandFn = (r: V3, v: V3, t0: number, burn?: { t: number; dv: V3 }) => { lat: number; lon: number; t: number } | null;
+
+interface Pass {
+  /** Index into the track's states, and time. */
+  i: number;
+  t: number;
+  /** The target's distance from the ground track there, km: + to the left of the track. */
+  offset: number;
+}
+
+interface Track {
+  t1: number;
+  states: { t: number; r: V3; v: V3; lat: number; lon: number }[];
+  passes: Pass[];
+}
+
+const TRACK_STEP = 30;
+
+/** Orbit states from t1 to `until`, and the passes over the target (closest approaches of the ground track). */
+function groundPasses(r: V3, v: V3, t1: number, until: number, mass: number, goal: { lat: number; lon: number }, reachKm = 900): Track {
+  const states: Track['states'] = [];
   let sr = r;
   let sv = v;
-  const step = 30;
-  for (let tt = t1; tt < t1 + SEARCH_WINDOW; tt += step) {
+  for (let tt = t1; tt < until; tt += TRACK_STEP) {
     const g = ecefToGeodetic(eciToEcef(sr, tt));
     states.push({ t: tt, r: sr, v: sv, lat: g.lat / DEG, lon: g.lon / DEG });
-    const nx = propagate(sr, sv, tt, tt + step, { dragArea: 0 }, mass, 30);
+    const nx = propagate(sr, sv, tt, tt + TRACK_STEP, { dragArea: 0 }, mass, 30);
     sr = nx.r;
     sv = nx.v;
   }
-
-  // How long from a deorbit burn to landing, and how far behind the ground track's point at
-  // landing time the landing falls: measure once, from the first state.
-  const retro = (s: { r: V3; v: V3 }, dv: number) => scale(orbitalFrame(s.r, s.v).pro, -dv);
-  const s0 = states[Math.min(4, states.length - 1)];
-  const l0 = land(s0.r, s0.v, s0.t, { t: s0.t, dv: retro(s0, DEORBIT_DV) });
-  if (!l0) return fail('a deorbit burn would not bring it down');
-  const tLand = l0.t - s0.t;
-
-  // Passes: times when the ground track comes closest to the target (local minima).
-  const trackKm = states.map((s) => greatCircleKm(s, goal));
-  const passes: number[] = [];
+  const km = states.map((s) => greatCircleKm(s, goal));
+  const gE = geodeticToEcef(goal.lat * DEG, goal.lon * DEG, 0);
+  const passes: Pass[] = [];
   for (let i = 1; i < states.length - 1; i++) {
-    if (trackKm[i] <= trackKm[i - 1] && trackKm[i] < trackKm[i + 1] && trackKm[i] < 900) passes.push(i);
+    if (!(km[i] <= km[i - 1] && km[i] < km[i + 1] && km[i] < reachKm)) continue;
+    // Which side: the target against the track's direction there (Earth-fixed).
+    const a = eciToEcef(states[i - 1].r, states[i - 1].t);
+    const b = eciToEcef(states[i + 1].r, states[i + 1].t);
+    const p = eciToEcef(states[i].r, states[i].t);
+    const left = cross(normalize(p), normalize(sub(b, a)));
+    passes.push({ i, t: states[i].t, offset: km[i] * Math.sign(dot(sub(gE, p), left) || 1) });
   }
+  return { t1, states, passes };
+}
+
+/** The pass in `track` nearest in time to t (the same pass on a slightly different orbit). */
+function matchPass(track: Track, t: number, within: number): Pass | null {
+  let best: Pass | null = null;
+  for (const p of track.passes) if (Math.abs(p.t - t) < within && (!best || Math.abs(p.t - t) < Math.abs(best.t - t))) best = p;
+  return best;
+}
+
+/** The first pass that a retrograde deorbit burn brings within the entry's reach, or the closest there is. */
+function firstPass(track: Track, mass: number, goal: { lat: number; lon: number }, earliest: number, land: LandFn, keepPass?: number): PassResult | null {
+  let best: PassResult | null = null;
+  // (Keeping to a pass: the one whose deorbit burn falls nearest that time first.)
+  const passes = keepPass === undefined ? track.passes : [...track.passes].sort((a, b) => Math.abs(a.t - 1800 - keepPass) - Math.abs(b.t - 1800 - keepPass));
+  if (keepPass !== undefined) {
+    const kept = passes[0] ? refinePass(track, passes[0], mass, goal, earliest, land) : null;
+    if (kept && kept.miss < PLAN_ACCEPT_KM * 1.5) return kept;
+  }
+  for (const p of track.passes) {
+    const cur = refinePass(track, p, mass, goal, earliest, land);
+    if (!cur) continue;
+    if (!best || cur.miss < best.miss) best = cur;
+    if (cur.miss < PLAN_ACCEPT_KM) break;
+  }
+  return best;
+}
+
+/** The deorbit burn (time and size) that brings the ship down closest to the target on this pass. */
+function refinePass(track: Track, pass: Pass, mass: number, goal: { lat: number; lon: number }, earliest: number, land: LandFn): PassResult | null {
+  const { states, t1 } = track;
+  if (pass.t - earliest < 600) return null;
+  const retro = (s: { r: V3; v: V3 }, dv: number) => scale(orbitalFrame(s.r, s.v).pro, -dv);
   const stateAt = (tt: number) => {
-    const i = Math.max(0, Math.min(states.length - 1, Math.floor((tt - t1) / step)));
+    const i = Math.max(0, Math.min(states.length - 1, Math.floor((tt - t1) / TRACK_STEP)));
     const s = states[i];
     return tt > s.t ? { ...propagate(s.r, s.v, s.t, tt, { dragArea: 0 }, mass, 30), t: tt } : { r: s.r, v: s.v, t: s.t };
   };
-  const earliest = t1 + (burns.length ? 300 : 120);
-  let best: { t: number; dv: number; miss: number; landing: { lat: number; lon: number; t: number } } | null = null;
-  for (const pi of passes) {
-    const tPass = states[pi].t;
-    let tb = tPass - tLand;
-    if (tb < earliest) continue;
-    let dv = DEORBIT_DV;
-    const evalAt = (tt: number, d: number) => {
-      const s = stateAt(tt);
-      const l = land(s.r, s.v, s.t, { t: s.t, dv: retro(s, d) });
-      return l ? { miss: greatCircleKm(l, goal), l } : null;
-    };
-    // Refine: burn time (along track) then size, twice, by shrinking scans.
-    let cur = evalAt(tb, dv);
-    if (!cur) continue;
-    for (const [span, n] of [[300, 12], [60, 12], [12, 12]] as const) {
-      for (let k = -n; k <= n; k++) {
-        const tt = tb + (span * k) / n;
-        if (tt < earliest) continue;
-        const e = evalAt(tt, dv);
-        if (e && e.miss < cur.miss) {
-          cur = e;
-          tb = tt;
-        }
-      }
-      for (const dd of [-30, -15, -7, -3, 3, 7, 15, 30].map((x) => (x * span) / 300)) {
-        const d2 = clamp(dv + dd, 50, 300);
-        const e = evalAt(tb, d2);
-        if (e && e.miss < cur.miss) {
-          cur = e;
-          dv = d2;
-        }
+  const evalAt = (tt: number, d: number) => {
+    const s = stateAt(tt);
+    const l = land(s.r, s.v, s.t, { t: s.t, dv: retro(s, d) });
+    return l ? { miss: greatCircleKm(l, goal), l } : null;
+  };
+  // A burn that brings it down around the pass: the smallest of a few sizes that brings it down
+  // at all there, its timing slid until the landing falls at the pass (on an eccentric orbit,
+  // how long the fall takes depends on where the burn is).
+  let tb = 0;
+  let dv = 0;
+  let cur: ReturnType<typeof evalAt> = null;
+  for (const d of [DEORBIT_DV, 180, 260]) {
+    let tt = Math.max(earliest, pass.t - 1800);
+    let e = evalAt(tt, d);
+    for (let k = 0; k < 4 && e; k++) {
+      const shift = pass.t - e.l.t;
+      if (Math.abs(shift) < 20) break;
+      tt = Math.max(earliest, tt + shift);
+      e = evalAt(tt, d);
+    }
+    if (e) {
+      [tb, dv, cur] = [tt, d, e];
+      break;
+    }
+  }
+  if (!cur) return null;
+  // Refine: burn time (along track) then size, three times, by shrinking scans.
+  for (const [span, n] of [[300, 12], [60, 12], [12, 12]] as const) {
+    for (let k = -n; k <= n; k++) {
+      const tt = tb + (span * k) / n;
+      if (tt < earliest) continue;
+      const e = evalAt(tt, dv);
+      if (e && e.miss < cur.miss) {
+        cur = e;
+        tb = tt;
       }
     }
-    if (!best || cur.miss < best.miss) best = { t: tb, dv, miss: cur.miss, landing: cur.l };
-    if (cur.miss < PLAN_ACCEPT_KM) break;
+    for (const dd of [-30, -15, -7, -3, 3, 7, 15, 30].map((x) => (x * span) / 300)) {
+      const d2 = clamp(dv + dd, 50, 300);
+      const e = evalAt(tb, d2);
+      if (e && e.miss < cur.miss) {
+        cur = e;
+        dv = d2;
+      }
+    }
   }
-  if (!best || best.miss > PLAN_ACCEPT_KM * 3) {
-    return fail(best ? `no pass in the next day comes within reach (best misses by ${Math.round(best.miss)} km)` : 'no pass over the target in the next day');
-  }
-  burns.push({ label: 'deorbit', t: best.t, dv: [-best.dv, 0, 0] });
-  const dvNeeded = burns.reduce((a, b) => a + Math.abs(b.dv[0]), 0);
-  if (dvNeeded > dvAvailable) {
-    return { ...fail(`needs ${Math.round(dvNeeded)} m/s but only ${Math.round(dvAvailable)} m/s is left above the landing reserve`, dvNeeded) };
-  }
-  return { ok: true, burns, landing: best.landing, missKm: best.miss, dvNeeded, dvAvailable };
+  return { t: tb, dv, miss: cur.miss, landing: cur.l };
 }
 
 /** Next apoapsis time (sim time), by coasting along the orbit; null if it's falling in first. */
@@ -301,6 +499,23 @@ function timeToApoapsis(r: V3, v: V3, t: number, mass: number): number | null {
       // Interpolate the zero crossing.
       return tt + (15 * radial) / (radial - radial2);
     }
+    rr = nx.r;
+    vv = nx.v;
+    tt += 15;
+  }
+  return null;
+}
+
+/** Next periapsis time (sim time): where the radial speed turns from falling to climbing. */
+function timeToPeriapsis(r: V3, v: V3, t: number, mass: number): number | null {
+  let rr = r;
+  let vv = v;
+  let tt = t;
+  for (let i = 0; i < 2000; i++) {
+    const radial = dot(vv, rr) / norm(rr);
+    const nx = propagate(rr, vv, tt, tt + 15, { dragArea: 0 }, mass, 15);
+    const radial2 = dot(nx.v, nx.r) / norm(nx.r);
+    if (radial < 0 && radial2 >= 0) return tt + (15 * -radial) / (radial2 - radial);
     rr = nx.r;
     vv = nx.v;
     tt += 15;
@@ -338,6 +553,8 @@ export class ShipReturn {
   /** The flight's milestones already logged (entry interface, peak heating, ...), and the peak heat flux so far. */
   private milestones = new Set<string>();
   private peakHeat = 0;
+  private venting = false;
+  private vented = 0;
 
   private milestone(key: string, text: string): void {
     if (this.milestones.has(key)) return;
@@ -350,9 +567,11 @@ export class ShipReturn {
     private ship: Vehicle,
     public target: ReturnTarget,
     private log: (text: string) => void,
+    /** Consider phasing burns (off for a quick check of whether no burn is needed at all). */
+    phasing = true,
   ) {
     const mass = sim.aux.get(ship.id)?.mp.mass ?? 2e5;
-    this.plan = planReturn(ship, sim.t, mass, target);
+    this.plan = planReturn(ship, sim.t, mass, target, phasing);
     if (!this.plan.ok) {
       this.phase = 'lost';
       this.status = `Can't return: ${this.plan.reason}`;
@@ -397,7 +616,8 @@ export class ShipReturn {
 
   /** Re-plan the remaining burns from the state now (keeping the target). */
   private replan(ship: Vehicle, aux: Aux): void {
-    const p = planReturn(ship, this.sim.t, aux.mp.mass, this.target);
+    const b = this.plan.burns[this.burnIndex];
+    const p = planReturn(ship, this.sim.t, aux.mp.mass, this.target, false, b?.label === 'deorbit' ? b.t : undefined);
     if (!p.ok || !p.burns.length) {
       if (!p.ok) this.log(`Return: re-plan failed (${p.reason}), keeping the old plan`);
       return;
@@ -474,6 +694,13 @@ export class ShipReturn {
 
     switch (this.phase) {
       case 'burn': {
+        // Propellant beyond what the burns and the landing need goes overboard first: a heavy
+        // ship comes in hotter (and the plan is re-made for the lighter ship after the burn).
+        if (this.burnIndex === 0 && !this.burning && this.ventExcess(ship, dt)) {
+          this.sim.waitUntil = null;
+          applyControl(ship, aux, axis, dt);
+          break;
+        }
         // Fly the planned maneuver nodes on the vacuum engines.
         const node = this.sim.node;
         const snap = this.sim.nodeSnapshot();
@@ -594,7 +821,7 @@ export class ShipReturn {
           const a = aT + clamp(d, -60 * DEG, 60 * DEG);
           wantDir = normalize(fr.dir([Math.cos(a), Math.sin(a), 0]));
         }
-        this.glideHeading = turnToward(this.glideHeading ?? heading, wantDir, up, 4 * DEG * dt);
+        this.glideHeading = turnToward(this.glideHeading ?? heading, wantDir, up, GLIDE_TURN_RATE * dt);
         // Along the heading: nose down to speed toward it, flat (or a touch nose up) to let drag
         // brake it; it can't turn round to brake. Level out approaching the flip.
         const hd = fr.dirIn(this.glideHeading);
@@ -624,6 +851,36 @@ export class ShipReturn {
         applyControl(ship, aux, null, dt);
         break;
     }
+  }
+
+  /**
+   * Vent main-tank propellant beyond what the planned burns (with margin) and the landing need,
+   * a step at a time; true while venting.
+   */
+  private ventExcess(ship: Vehicle, dt: number): boolean {
+    const s = ship.stages[0];
+    const vac = ship.engines.find((e) => e.place.ring === 1)?.place.type;
+    const isp = (vac ? vac.ispVac : 370) * 9.80665;
+    const dvLeft = this.plan.burns.slice(this.burnIndex).reduce((a, b) => a + Math.abs(b.dv[0]), 0);
+    const reserve = (s.def.header?.mass ?? s.def.reserve) + LANDING_MARGIN_PROP;
+    const mEnd = s.def.dryMass + reserve;
+    const keep = reserve + mEnd * (Math.exp((1.15 * dvLeft + 30) / isp) - 1);
+    const excess = s.prop - keep;
+    if (excess <= 0 || (!this.venting && excess < 5e3)) {
+      if (this.venting) {
+        this.venting = false;
+        this.log(`Return: venting complete (${(this.vented / 1000).toFixed(0)} t overboard)`);
+      }
+      return false;
+    }
+    if (!this.venting) {
+      this.venting = true;
+      this.log(`Return: venting ${(excess / 1000).toFixed(0)} t of propellant it won't need (a lighter ship comes in cooler)`);
+    }
+    const d = Math.min(excess, VENT_RATE * dt);
+    s.prop -= d;
+    this.vented += d;
+    return true;
   }
 
   /** Height (above the ellipsoid) of the surface it's coming down on: the pad's ground, or the sea. */

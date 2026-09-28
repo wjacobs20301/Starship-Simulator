@@ -220,7 +220,7 @@ export class Mission {
           );
           // The entry guidance steers onto the splashdown target (range and crossrange) if it's in
           // reach without a burn; otherwise the plain entry profile.
-          const aim = new ShipReturn(sim, ship, { kind: 'ocean', ...MISSION.splashTarget }, (text) => sim.log(text));
+          const aim = new ShipReturn(sim, ship, { kind: 'ocean', ...MISSION.splashTarget }, (text) => sim.log(text), false);
           if (aim.phase !== 'lost' && aim.plan.burns.length === 0) this.shipReturn = aim;
         }
         break;
