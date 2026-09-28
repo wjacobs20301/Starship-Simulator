@@ -1,0 +1,27 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "starship-sim",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev"
+      ],
+      "port": 5180,
+      "autoPort": true
+    },
+    {
+      "name": "starship-prod",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "vite",
+        "preview",
+        "--port",
+        "5190",
+        "--strictPort"
+      ],
+      "port": 5190
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+node_modules
+dist
+
+# Intermediate model build outputs (regenerate with `npm run models`)
+art/generated/glb
+art/generated/textures
+art/generated/geometry.json
+art/source/terrain
+art/source/globe
+
+# Streamed map tiles (~10 GB, ~750k files): synced to the server separately (rsync), rebuilt
+# with `npm run terrain:build` / `npm run globe:build`.
+public/terrain
+public/globe/tiles
+
+# Downloaded third-party model archives (the processed models are in public/models)
+art/source/vehicle/*.zip
+art/source/vehicle/source
+
+# Trailer recordings (the scripts that make them stay)
+trailer/*.mp4
+
+.DS_Store
+.claude/settings.local.json

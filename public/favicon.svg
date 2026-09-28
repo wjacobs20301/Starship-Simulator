@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#000"/>
+  <!-- Starship: the ogive nose, the steel body, forward and aft flaps -->
+  <path d="M32 5c-4.2 4.6-6 10.6-6 16.6V57h12V21.6c0-6-1.8-12-6-16.6z" fill="#e9edf2"/>
+  <path d="M26 16l-4.5 4.2V26l4.5-2.6zM38 16l4.5 4.2V26L38 23.4z" fill="#9aa4b1"/>
+  <path d="M26 45l-6 5.5V58h6zM38 45l6 5.5V58h-6z" fill="#9aa4b1"/>
+  <rect x="26" y="33" width="12" height="1.6" fill="#1c2430"/>
+</svg>

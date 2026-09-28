@@ -1,0 +1,37 @@
+{
+  "name": "starship-sim",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "fly": "tsx scripts/fly.ts",
+    "typecheck": "tsc --noEmit",
+    "geometry": "tsx scripts/export-geometry.ts",
+    "models": "npm run geometry && /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup -P art/blender/build_all.py -- --no-preview && tsx scripts/optimize-models.ts",
+    "models:preview": "npm run geometry && /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup -P art/blender/build_all.py && tsx scripts/optimize-models.ts",
+    "terrain:fetch": "tsx scripts/terrain/fetch-dem.ts && tsx scripts/terrain/fetch-copdem.ts && tsx scripts/terrain/fetch-s2.ts --concurrency=4 && tsx scripts/terrain/fetch-imagery.ts --concurrency=12",
+    "terrain:build": "tsx scripts/terrain/build-tiles.ts",
+    "globe:build": "tsx scripts/globe/build-globe.ts"
+  },
+  "dependencies": {
+    "three": "^0.186.0"
+  },
+  "devDependencies": {
+    "@gltf-transform/core": "^4.5.0",
+    "@gltf-transform/extensions": "^4.5.0",
+    "@gltf-transform/functions": "^4.5.0",
+    "@types/node": "^26.6.2",
+    "@types/three": "^0.186.0",
+    "geotiff": "^3.0.5",
+    "meshoptimizer": "^1.2.0",
+    "sharp": "^0.35.4",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.1"
+  }
+}
