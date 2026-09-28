@@ -59,6 +59,8 @@ export class ReturnPanel {
     if (!r) {
       html +=
         `<div class="rt-buttons"><button data-act="tower">⌂ Tower catch</button><button data-act="ocean">≈ Ocean ${oceanLabel}</button></div>` +
+        // (Why the last try was refused: shown until the next one, or for two minutes.)
+        (s.returnNotice && s.t - s.returnNotice.t < 120 ? `<div class="rt-refused">${escapeHtml(s.returnNotice.text)}</div>` : '') +
         `<div class="rt-hint">Autopilot plans the burns, entry and landing. Shift-click the globe (Tab map) to pick the ocean point.</div>`;
     } else {
       const where = r.target.kind === 'tower' ? `Pad ${r.target.pad + 1} tower` : r.target.kind === 'ground' ? 'ground beside the pad (diverted)' : `ocean ${oceanLabel}`;
@@ -101,4 +103,8 @@ function pausedText(r: NonNullable<Snapshot['shipReturn']>): string {
         : `<br>Hand back above <b>${km(r.handBackBy)}</b> to make the approach (now ${km(r.height)}).`;
   }
   return text;
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 }

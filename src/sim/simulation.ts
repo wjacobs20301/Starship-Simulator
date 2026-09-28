@@ -187,6 +187,8 @@ export interface Snapshot {
   } | null;
   /** An autopilot is coasting until this sim time (a hint: the player may warp). */
   waitUntil: number | null;
+  /** Why the last return command was refused (and when, sim time), for the return panel. */
+  returnNotice: { text: string; t: number } | null;
 }
 
 const padLat = PAD.latDeg * DEG;
@@ -212,6 +214,8 @@ export class Simulation {
    * player, who may speed time up. Nothing warps on its own.
    */
   waitUntil: number | null = null;
+  /** Why the last return command was refused, and when (sim time). */
+  returnNotice: { text: string; t: number } | null = null;
   /** The planned maneuver: node, its burn vector (ECI, fixed when planned) and the delta-v done since. */
   node: { node: ManeuverNode; burn: V3; delivered: V3 } | null = null;
   /** The pad the stack stands on and launches from (0 = Pad 1, 1 = Pad 2); the booster comes home to it. */
@@ -236,6 +240,7 @@ export class Simulation {
     this.gripped.clear();
     this.node = null;
     this.waitUntil = null;
+    this.returnNotice = null;
     stack.caughtPad = this.launchPad;
     placeOnPad(stack, this.t, PAD.mountHeight, this.launchPad);
     // A stacked vehicle on the launch pad: its arms are parked high up the tower, clear of the launch.
@@ -588,26 +593,34 @@ export class Simulation {
     const m = this.mission;
     m.shipReturn?.cancel();
     m.shipReturn = null;
+    this.returnNotice = null;
     if (!target) {
       this.log('Return cancelled');
       return;
     }
+    const refuse = (text: string) => {
+      this.log(text);
+      this.returnNotice = { text, t: this.t };
+    };
     if (!ship || ship.status !== 'flight' || m.phase !== 'coast') {
-      this.log("Can't return yet: after the ship's engine cutoff (SECO)");
+      refuse("Can't return yet: after the ship's engine cutoff (SECO)");
       return;
     }
     if (target.kind === 'tower') {
       const free = (p: number) => !this.towers[p].disabled && !this.vehicles.some((v) => v.status === 'caught' && v.caughtPad === p);
       const pad = target.pad >= 0 && free(target.pad) ? target.pad : [0, 1].find(free);
       if (pad === undefined) {
-        this.log("Can't return to a tower: both are holding a vehicle or wrecked");
+        refuse("Can't return to a tower: both are holding a vehicle or wrecked");
         return;
       }
       target = { kind: 'tower', pad };
     }
     this.pilot.set({ manual: false });
     m.shipReturn = new ShipReturn(this, ship, target, (text) => this.log(text));
-    if (m.shipReturn.phase === 'lost') m.shipReturn = null;
+    if (m.shipReturn.phase === 'lost') {
+      this.returnNotice = { text: m.shipReturn.status, t: this.t };
+      m.shipReturn = null;
+    }
   }
 
   /** Whether time warp may go on rails: everything in flight coasting above the atmosphere. */
@@ -1244,6 +1257,7 @@ export class Simulation {
       railsOk: this.railsAllowed(),
       shipReturn: this.returnSnapshot(),
       waitUntil: this.waitUntil,
+      returnNotice: this.returnNotice,
     };
   }
 
@@ -1257,7 +1271,7 @@ export class Simulation {
       targetLatLon: targetLatLon(r.target),
       phase: r.phase,
       status: r.status,
-      burns: r.plan.burns.map((b) => ({ label: b.label, t: b.t, dv: Math.abs(b.dv[0]) })),
+      burns: r.plan.burns.map((b) => ({ label: b.label, t: b.t, dv: norm(b.dv) })),
       predicted: r.predicted,
       dvNeeded: r.plan.dvNeeded,
       dvAvailable: r.plan.dvAvailable,

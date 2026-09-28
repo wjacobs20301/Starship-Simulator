@@ -59,7 +59,7 @@ export type ReturnPhase =
 
 /** A planned burn: sim time and delta-v along prograde / normal / radial (m/s). */
 export interface PlannedBurn {
-  label: 'circularize' | 'lower orbit' | 'phasing' | 'deorbit';
+  label: 'circularize' | 'orbit insertion' | 'lower orbit' | 'phasing' | 'targeting' | 'deorbit';
   t: number;
   dv: V3;
 }
@@ -98,6 +98,9 @@ const DEORBIT_DV = 110;
  * one of this size.
  */
 const PHASING_TRIAL = 30;
+/** Orbit insertion (from a path that won't reach a high enough apoapsis): only above this, m, this soon, s. */
+const INSERT_MIN_ALT = 140e3;
+const INSERT_LEAD = 90;
 /** Passes this far off (km) are worth phasing onto. */
 const PHASING_REACH_KM = 2500;
 /** Largest phasing burn, m/s. */
@@ -223,128 +226,236 @@ export function planReturn(
     }
   }
 
-  // Otherwise: a parking orbit first if it isn't in one, then a deorbit burn over a pass. If no
-  // pass comes soon, a phasing burn first (a slightly higher or lower orbit: its period shifts
-  // where the ground track crosses the target's latitude, orbit by orbit).
-  let r = ship.r;
-  let v = ship.v;
-  let t1 = t;
-  let circ: { t: number; dv: number; label: PlannedBurn['label'] } | null = null;
-  if (aps.perigee < PARK_PERIGEE) {
-    if (aps.apogee < PARK_PERIGEE + 20e3) return fail(`apoapsis ${Math.round(aps.apogee / 1000)} km is too low to circularise: it has to come down now`);
-    // Coast to apoapsis, then prograde to a circular orbit there.
-    const tApo = timeToApoapsis(r, v, t, mass);
-    if (tApo === null) return fail('no apoapsis ahead to circularise at');
-    const at = propagate(r, v, t, tApo, { dragArea: 0 }, mass);
-    const rn = norm(at.r);
-    const vCirc = Math.sqrt(MU / rn);
-    const vh = norm(sub(at.v, scale(normalize(at.r), dot(at.v, normalize(at.r)))));
-    circ = { t: tApo, dv: vCirc - vh, label: 'circularize' };
-    r = at.r;
-    v = scale(normalize(sub(at.v, scale(normalize(at.r), dot(at.v, normalize(at.r))))), vh);
-    t1 = tApo;
-  } else if (aps.apogee - aps.perigee > ECCENTRIC && options) {
-    // A long, eccentric orbit: its landings fall wherever its periapsis is, not where the burn
-    // puts them. Lower the apoapsis at periapsis first (retrograde), to a near-circular orbit.
-    const tPeri = timeToPeriapsis(r, v, t, mass);
-    if (tPeri === null) return fail('no periapsis ahead to lower the orbit at');
-    const at = propagate(r, v, t, tPeri, { dragArea: 0 }, mass);
-    const rp = norm(at.r);
-    const a = rp + ECCENTRIC_TO / 2; // (apoapsis ECCENTRIC_TO above the periapsis)
-    const vWant = Math.sqrt(MU * (2 / rp - 1 / a));
-    const vh = norm(sub(at.v, scale(normalize(at.r), dot(at.v, normalize(at.r)))));
-    circ = { t: tPeri, dv: vWant - vh, label: 'lower orbit' };
-    r = at.r;
-    v = scale(normalize(sub(at.v, scale(normalize(at.r), dot(at.v, normalize(at.r))))), vh);
-    t1 = tPeri;
-  } else {
-    // Already in orbit: any phasing burn a couple of minutes from now.
-    t1 = options ? t + 120 : t;
-    const at = propagate(r, v, t, t1, { dragArea: 0 }, mass);
-    r = at.r;
-    v = at.v;
-  }
-  if (circ && Math.abs(circ.dv) + DEORBIT_DV > dvAvailable) {
-    const dvNeeded = Math.abs(circ.dv) + DEORBIT_DV;
-    return fail(`needs ${Math.round(dvNeeded)} m/s (${circ.label} ${Math.round(Math.abs(circ.dv))} + deorbit) but only ${Math.round(dvAvailable)} m/s is left above the landing reserve`, dvNeeded);
-  }
-  // (Re-planning a deorbit burn that's close: it may be only a minute or two away.)
-  const earliest = options || circ ? t1 + 300 : t + 60;
+  // Otherwise, by way of an orbit, or (coming down) one burn now that aims the fall at the target:
+  // whichever gets it home soonest for the fuel.
+  const orbit = viaOrbit();
+  if (aps.perigee >= 90e3 || !options) return orbit;
+  const direct = directBurn(ship, t, mass, goal, dvAvailable, land);
+  if (!direct) return orbit;
+  const cost = (p: ReturnPlan) => (p.landing!.t - t) / 3600 + p.dvNeeded / 100 + p.missKm / 60;
+  if (direct.ok && (!orbit.ok || cost(direct) < cost(orbit))) return direct;
+  if (orbit.ok) return orbit;
+  return direct.ok ? direct : { ...orbit, reason: `${orbit.reason}; ${direct.reason}` };
 
-  // Options: straight to the first pass the deorbit burn reaches; or a phasing burn at t1 (on
-  // top of any circularisation) sized to put a later pass right over the target. The quickest
-  // home wins, counting each 100 m/s spent as an hour.
-  const pro = orbitalFrame(r, v).pro;
-  const orbitWith = (phase: number): V3 | null => {
-    const vAfter = add(v, scale(pro, phase + (circ?.dv ?? 0)));
-    if ((circ || phase) && orbitApsides(r, vAfter).perigee < PARK_PERIGEE - 10e3) return null;
-    return vAfter;
-  };
-  type Option = PassResult & { phase: number; cost: number };
-  let best: Option | null = null;
-  let closest: PassResult | null = null;
-  const consider = (res: PassResult | null, phase: number) => {
-    if (!res) return;
-    if (!closest || res.miss < closest.miss) closest = res;
-    const dv = Math.abs(phase + (circ?.dv ?? 0)) + res.dv;
-    if (res.miss > PLAN_ACCEPT_KM * (keepPass !== undefined ? 1.5 : 1) || dv > dvAvailable) return;
-    // (Time home, plus fuel, plus how much the entry will have to steer: a near miss is safer.)
-    const cost = (res.landing.t - t) / 3600 + dv / 100 + res.miss / 60;
-    if (!best || cost < best.cost) best = { ...res, phase, cost };
-  };
-  const v0 = orbitWith(0)!;
-  const track0 = groundPasses(r, v0, t1, t1 + SEARCH_WINDOW, mass, goal);
-  consider(firstPass(track0, mass, goal, earliest, land, keepPass), 0);
-  if (options) {
-    // How each pass's offset from the target moves with the phasing burn (a trial one), then,
-    // pass by pass, the burn that zeroes it (a secant step or two).
-    const trial = orbitWith(PHASING_TRIAL);
-    const track1 = trial ? groundPasses(r, trial, t1, t1 + PHASING_WINDOW + 3600, mass, goal, PHASING_REACH_KM) : null;
-    const wide = track1 ? groundPasses(r, v0, t1, t1 + PHASING_WINDOW, mass, goal, PHASING_REACH_KM) : null;
-    for (const p0 of wide ? wide.passes : []) {
-      if (p0.t < earliest + 600) continue;
-      const sofar = best as Option | null;
-      if (sofar && p0.t > sofar.landing.t) break;
-      let [xa, ya] = [0, p0.offset];
-      const p1 = matchPass(track1!, p0.t, 1800);
-      if (!p1) continue;
-      let [xb, yb] = [PHASING_TRIAL, p1.offset];
-      // (The pass comes a little later on a higher orbit: where to look for it.)
-      const tPer = (p1.t - p0.t) / PHASING_TRIAL;
-      let found: { phase: number; track: Track; pass: Pass } | null = null;
-      for (let k = 0; k < 3; k++) {
-        if (Math.abs(yb - ya) < 1e-3) break;
-        const x = xb - (yb * (xb - xa)) / (yb - ya);
-        if (!Number.isFinite(x) || Math.abs(x) > PHASING_MAX) break;
-        const vx = orbitWith(x);
-        if (!vx || Math.abs(x + (circ?.dv ?? 0)) + 50 > dvAvailable) break;
-        const tAt = p0.t + tPer * x;
-        const tr = groundPasses(r, vx, t1, tAt + 3600, mass, goal, PHASING_REACH_KM);
-        const px = matchPass(tr, tAt, 1200);
-        if (!px) break;
-        found = { phase: x, track: tr, pass: px };
-        if (Math.abs(px.offset) < PLAN_ACCEPT_KM / 3) break;
-        [xa, ya, xb, yb] = [xb, yb, x, px.offset];
+  function viaOrbit(): ReturnPlan {
+    // Otherwise: a parking orbit first if it isn't in one, then a deorbit burn over a pass. If no
+    // pass comes soon, a phasing burn first (a slightly higher or lower orbit: its period shifts
+    // where the ground track crosses the target's latitude, orbit by orbit).
+    let r = ship.r;
+    let v = ship.v;
+    let t1 = t;
+    // circ: the first burn's horizontal speed change (dv, on top of the horizontal speed there),
+    // and the velocity it starts from (so any vertical speed is taken out as well).
+    let circ: { t: number; dv: number; label: PlannedBurn['label']; vReal: V3 } | null = null;
+    const climbing = dot(ship.v, ship.r) > 0;
+    const alt = norm(ship.r) - 6.371e6;
+    if (aps.perigee < PARK_PERIGEE) {
+      // Climbing to a high enough apoapsis: coast up to it, then prograde to a circular orbit there.
+      // Otherwise (already coming down, or topping out low), an orbit insertion burn now, if it's
+      // high enough to orbit where it is.
+      const atApo = climbing && aps.apogee >= PARK_PERIGEE + 20e3;
+      if (!atApo && alt < INSERT_MIN_ALT) {
+        return fail(`too low for an orbit (${Math.round(alt / 1000)} km, apoapsis ${Math.round(aps.apogee / 1000)} km) and the target is out of reach from this path`);
       }
-      if (found) consider(refinePass(found.track, found.pass, mass, goal, earliest, land), found.phase);
+      const tApo = atApo ? timeToApoapsis(r, v, t, mass) : t + INSERT_LEAD;
+      if (tApo === null) return fail('no apoapsis ahead to circularise at');
+      const at = propagate(r, v, t, tApo, { dragArea: 0 }, mass);
+      const rn = norm(at.r);
+      const vCirc = Math.sqrt(MU / rn);
+      const vh = norm(sub(at.v, scale(normalize(at.r), dot(at.v, normalize(at.r)))));
+      circ = { t: tApo, dv: vCirc - vh, label: atApo ? 'circularize' : 'orbit insertion', vReal: at.v };
+      r = at.r;
+      v = scale(normalize(sub(at.v, scale(normalize(at.r), dot(at.v, normalize(at.r))))), vh);
+      t1 = tApo;
+    } else if (aps.apogee - aps.perigee > ECCENTRIC && options) {
+      // A long, eccentric orbit: its landings fall wherever its periapsis is, not where the burn
+      // puts them. Lower the apoapsis at periapsis first (retrograde), to a near-circular orbit.
+      const tPeri = timeToPeriapsis(r, v, t, mass);
+      if (tPeri === null) return fail('no periapsis ahead to lower the orbit at');
+      const at = propagate(r, v, t, tPeri, { dragArea: 0 }, mass);
+      const rp = norm(at.r);
+      const a = rp + ECCENTRIC_TO / 2; // (apoapsis ECCENTRIC_TO above the periapsis)
+      const vWant = Math.sqrt(MU * (2 / rp - 1 / a));
+      const vh = norm(sub(at.v, scale(normalize(at.r), dot(at.v, normalize(at.r)))));
+      circ = { t: tPeri, dv: vWant - vh, label: 'lower orbit', vReal: at.v };
+      r = at.r;
+      v = scale(normalize(sub(at.v, scale(normalize(at.r), dot(at.v, normalize(at.r))))), vh);
+      t1 = tPeri;
+    } else {
+      // Already in orbit: any phasing burn a couple of minutes from now.
+      t1 = options ? t + 120 : t;
+      const at = propagate(r, v, t, t1, { dragArea: 0 }, mass);
+      r = at.r;
+      v = at.v;
     }
-  }
-  if (!best) {
-    const c = closest as PassResult | null;
-    if (c && c.miss <= PLAN_ACCEPT_KM) {
-      const dvNeeded = Math.abs(circ?.dv ?? 0) + c.dv;
-      return fail(`needs ${Math.round(dvNeeded)} m/s but only ${Math.round(dvAvailable)} m/s is left above the landing reserve`, dvNeeded);
+    // The first burn as flown (ECI), with a phasing change on top.
+    const firstBurn = (phase: number): V3 => (circ ? sub(scale(normalize(v), norm(v) + circ.dv + phase), circ.vReal) : scale(normalize(v), phase));
+    const circCost = circ ? norm(firstBurn(0)) : 0;
+    if (circ && circCost + DEORBIT_DV > dvAvailable) {
+      const dvNeeded = circCost + DEORBIT_DV;
+      return fail(`needs ${Math.round(dvNeeded)} m/s (${circ.label} ${Math.round(circCost)} + deorbit) but only ${Math.round(dvAvailable)} m/s is left above the landing reserve`, dvNeeded);
     }
-    return fail(c ? `no pass in the next day comes within reach (best misses by ${Math.round(c.miss)} km)` : 'no pass over the target in the next day');
+    // (Re-planning a deorbit burn that's close: it may be only a minute or two away.)
+    const earliest = options || circ ? t1 + 300 : t + 60;
+
+    // Options: straight to the first pass the deorbit burn reaches; or a phasing burn at t1 (on
+    // top of any circularisation) sized to put a later pass right over the target. The quickest
+    // home wins, counting each 100 m/s spent as an hour.
+    const pro = orbitalFrame(r, v).pro;
+    const orbitWith = (phase: number): V3 | null => {
+      const vAfter = add(v, scale(pro, phase + (circ?.dv ?? 0)));
+      if ((circ || phase) && orbitApsides(r, vAfter).perigee < PARK_PERIGEE - 10e3) return null;
+      return vAfter;
+    };
+    type Option = PassResult & { phase: number; cost: number };
+    let best: Option | null = null;
+    let closest: PassResult | null = null;
+    const consider = (res: PassResult | null, phase: number) => {
+      if (!res) return;
+      if (!closest || res.miss < closest.miss) closest = res;
+      const dv = norm(firstBurn(phase)) + res.dv;
+      if (res.miss > PLAN_ACCEPT_KM * (keepPass !== undefined ? 1.5 : 1) || dv > dvAvailable) return;
+      // (Time home, plus fuel, plus how much the entry will have to steer: a near miss is safer.)
+      const cost = (res.landing.t - t) / 3600 + dv / 100 + res.miss / 60;
+      if (!best || cost < best.cost) best = { ...res, phase, cost };
+    };
+    const v0 = orbitWith(0)!;
+    const track0 = groundPasses(r, v0, t1, t1 + SEARCH_WINDOW, mass, goal);
+    consider(firstPass(track0, mass, goal, earliest, land, keepPass), 0);
+    if (options) {
+      // How each pass's offset from the target moves with the phasing burn (a trial one), then,
+      // pass by pass, the burn that zeroes it (a secant step or two).
+      const trial = orbitWith(PHASING_TRIAL);
+      const track1 = trial ? groundPasses(r, trial, t1, t1 + PHASING_WINDOW + 3600, mass, goal, PHASING_REACH_KM) : null;
+      const wide = track1 ? groundPasses(r, v0, t1, t1 + PHASING_WINDOW, mass, goal, PHASING_REACH_KM) : null;
+      for (const p0 of wide ? wide.passes : []) {
+        if (p0.t < earliest + 600) continue;
+        const sofar = best as Option | null;
+        if (sofar && p0.t > sofar.landing.t) break;
+        let [xa, ya] = [0, p0.offset];
+        const p1 = matchPass(track1!, p0.t, 1800);
+        if (!p1) continue;
+        let [xb, yb] = [PHASING_TRIAL, p1.offset];
+        // (The pass comes a little later on a higher orbit: where to look for it.)
+        const tPer = (p1.t - p0.t) / PHASING_TRIAL;
+        let found: { phase: number; track: Track; pass: Pass } | null = null;
+        for (let k = 0; k < 3; k++) {
+          if (Math.abs(yb - ya) < 1e-3) break;
+          const x = xb - (yb * (xb - xa)) / (yb - ya);
+          if (!Number.isFinite(x) || Math.abs(x) > PHASING_MAX) break;
+          const vx = orbitWith(x);
+          if (!vx || norm(firstBurn(x)) + 50 > dvAvailable) break;
+          const tAt = p0.t + tPer * x;
+          const tr = groundPasses(r, vx, t1, tAt + 3600, mass, goal, PHASING_REACH_KM);
+          const px = matchPass(tr, tAt, 1200);
+          if (!px) break;
+          found = { phase: x, track: tr, pass: px };
+          if (Math.abs(px.offset) < PLAN_ACCEPT_KM / 3) break;
+          [xa, ya, xb, yb] = [xb, yb, x, px.offset];
+        }
+        if (found) consider(refinePass(found.track, found.pass, mass, goal, earliest, land), found.phase);
+      }
+    }
+    if (!best) {
+      const c = closest as PassResult | null;
+      if (c && c.miss <= PLAN_ACCEPT_KM) {
+        const dvNeeded = circCost + c.dv;
+        return fail(`needs ${Math.round(dvNeeded)} m/s but only ${Math.round(dvAvailable)} m/s is left above the landing reserve`, dvNeeded);
+      }
+      return fail(c ? `no pass in the next day comes within reach (best misses by ${Math.round(c.miss)} km)` : 'no pass over the target in the next day');
+    }
+    const b = best as Option;
+    const burns: PlannedBurn[] = [];
+    if (circ || b.phase) {
+      // (In the frame of the velocity it starts from: prograde, normal, radial.)
+      const f = orbitalFrame(r, circ ? circ.vReal : v);
+      const d = firstBurn(b.phase);
+      burns.push({ label: circ ? circ.label : 'phasing', t: t1, dv: [dot(d, f.pro), dot(d, f.nrm), dot(d, f.rad)] });
+    }
+    burns.push({ label: 'deorbit', t: b.t, dv: [-b.dv, 0, 0] });
+    const dvNeeded = burns.reduce((a, x) => a + norm(x.dv), 0);
+    return { ok: true, burns, landing: b.landing, missKm: b.miss, dvNeeded, dvAvailable };
   }
-  const b = best as Option;
-  const burns: PlannedBurn[] = [];
-  const first = b.phase + (circ?.dv ?? 0);
-  if (circ) burns.push({ label: circ.label, t: t1, dv: [first, 0, 0] });
-  else if (b.phase) burns.push({ label: 'phasing', t: t1, dv: [first, 0, 0] });
-  burns.push({ label: 'deorbit', t: b.t, dv: [-b.dv, 0, 0] });
-  const dvNeeded = burns.reduce((a, x) => a + Math.abs(x.dv[0]), 0);
-  return { ok: true, burns, landing: b.landing, missKm: b.miss, dvNeeded, dvAvailable };
+}
+
+/** Most the aim of a direct burn may be off and still count, km (the entry steers out the rest). */
+const DIRECT_ACCEPT_KM = 30;
+/** A direct burn lights this long after the command (time to turn to it), s. */
+const DIRECT_LEAD = 60;
+
+/**
+ * Coming down (not in orbit): the single burn, a minute from now, that puts the fall onto the
+ * target. Newton steps on the landing point (east / north of the target) against the burn
+ * (prograde, normal, radial), each the smallest change that zeroes the miss; null if the
+ * current path doesn't come down at all.
+ */
+function directBurn(
+  ship: Vehicle,
+  t: number,
+  mass: number,
+  goal: { lat: number; lon: number },
+  dvAvailable: number,
+  land: (r: V3, v: V3, t0: number, burn?: { t: number; dv: V3 }) => { lat: number; lon: number; t: number; ecef: V3 } | null,
+): ReturnPlan | null {
+  const tb = t + DIRECT_LEAD;
+  const at = propagate(ship.r, ship.v, t, tb, { dragArea: 0 }, mass);
+  const f = orbitalFrame(at.r, at.v);
+  const g = geodeticToEcef(goal.lat * DEG, goal.lon * DEG, 0);
+  const R = ecefToEnuMatrix(goal.lat * DEG, goal.lon * DEG);
+  const toEci = (d: V3): V3 => add(add(scale(f.pro, d[0]), scale(f.nrm, d[1])), scale(f.rad, d[2]));
+  const missOf = (d: V3) => {
+    const l = land(at.r, at.v, tb, { t: tb, dv: toEci(d) });
+    if (!l) return null;
+    const e = mat3Vec(R, sub(l.ecef, g));
+    return { e: [e[0], e[1]] as [number, number], l };
+  };
+  let dv: V3 = [0, 0, 0];
+  let cur = missOf(dv);
+  if (!cur) return null;
+  for (let it = 0; it < 8 && Math.hypot(...cur.e) > 2e3; it++) {
+    // Sensitivities (m of landing point per m/s), by finite differences.
+    const J: number[][] = [[], []];
+    for (let k = 0; k < 3; k++) {
+      const d: V3 = [...dv];
+      d[k] += 5;
+      const m = missOf(d);
+      if (!m) return null;
+      J[0][k] = (m.e[0] - cur.e[0]) / 5;
+      J[1][k] = (m.e[1] - cur.e[1]) / 5;
+    }
+    // Smallest step that zeroes the miss (least norm), at most 150 m/s at a time.
+    const a = J[0][0] ** 2 + J[0][1] ** 2 + J[0][2] ** 2;
+    const b = J[0][0] * J[1][0] + J[0][1] * J[1][1] + J[0][2] * J[1][2];
+    const c = J[1][0] ** 2 + J[1][1] ** 2 + J[1][2] ** 2;
+    const det = a * c - b * b;
+    if (Math.abs(det) < 1e-9) break;
+    const [mx, my] = [-cur.e[0], -cur.e[1]];
+    const y0 = (c * mx - b * my) / det;
+    const y1 = (-b * mx + a * my) / det;
+    let step: V3 = [0, 1, 2].map((k) => J[0][k] * y0 + J[1][k] * y1) as V3;
+    if (norm(step) > 150) step = scale(step, 150 / norm(step));
+    // Halve the step until it helps (the landing point isn't linear in the burn far off).
+    let next = null;
+    for (let h = 0; h < 5; h++) {
+      const cand = add(dv, step);
+      const m = missOf(cand);
+      if (m && Math.hypot(...m.e) < Math.hypot(...cur.e)) {
+        next = { dv: cand, m };
+        break;
+      }
+      step = scale(step, 0.5);
+    }
+    if (!next) break;
+    dv = next.dv;
+    cur = next.m;
+    if (norm(dv) > dvAvailable * 1.5) break;
+  }
+  const missKm = Math.hypot(...cur.e) / 1000;
+  const dvNeeded = norm(dv);
+  const plan: ReturnPlan = { ok: true, burns: [{ label: 'targeting', t: tb, dv }], landing: cur.l, missKm, dvNeeded, dvAvailable };
+  if (missKm > DIRECT_ACCEPT_KM) return { ...plan, ok: false, reason: `no single burn from this path reaches it (best misses by ${Math.round(missKm)} km)` };
+  if (dvNeeded > dvAvailable) return { ...plan, ok: false, reason: `a burn onto it needs ${Math.round(dvNeeded)} m/s but only ${Math.round(dvAvailable)} m/s is left above the landing reserve` };
+  return plan;
 }
 
 interface PassResult {
@@ -579,7 +690,7 @@ export class ShipReturn {
       return;
     }
     const where = target.kind === 'tower' ? `Pad ${target.pad + 1} tower` : 'the ocean target';
-    const burns = this.plan.burns.map((b) => `${b.label} ${Math.abs(b.dv[0]).toFixed(0)} m/s`).join(', ');
+    const burns = this.plan.burns.map((b) => `${b.label} ${norm(b.dv).toFixed(0)} m/s`).join(', ');
     log(`Return to ${where} planned: ${burns || 'no burn needed'} (${Math.round(this.plan.dvNeeded)} of ${Math.round(this.plan.dvAvailable)} m/s)`);
     this.phase = this.plan.burns.length ? 'burn' : 'coast';
     this.setNode();
@@ -861,7 +972,7 @@ export class ShipReturn {
     const s = ship.stages[0];
     const vac = ship.engines.find((e) => e.place.ring === 1)?.place.type;
     const isp = (vac ? vac.ispVac : 370) * 9.80665;
-    const dvLeft = this.plan.burns.slice(this.burnIndex).reduce((a, b) => a + Math.abs(b.dv[0]), 0);
+    const dvLeft = this.plan.burns.slice(this.burnIndex).reduce((a, b) => a + norm(b.dv), 0);
     const reserve = (s.def.header?.mass ?? s.def.reserve) + LANDING_MARGIN_PROP;
     const mEnd = s.def.dryMass + reserve;
     const keep = reserve + mEnd * (Math.exp((1.15 * dvLeft + 30) / isp) - 1);

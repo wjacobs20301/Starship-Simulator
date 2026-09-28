@@ -98,6 +98,22 @@ describe('ship return from an orbit the player flew', () => {
     expect(ship.status).toBe('caught');
   });
 
+  it('not quite in orbit and already coming down: an orbit insertion burn, then home', { timeout: 300_000 }, () => {
+    const { sim, ship } = fly({ kind: 'tower', pad: -1 }, orbit(-500, 200, 26.5, 60, 190));
+    expect(sim.events.some((e) => /planned: orbit insertion/.test(e.text))).toBe(true);
+    expect(ship.status).toBe('caught');
+  });
+
+  it('a refusal says why, for the return panel', { timeout: 60_000 }, () => {
+    const sim = new Simulation();
+    sim.launch();
+    while (sim.mission.phase !== 'coast') sim.step();
+    orbit(-2000, 130, 26.5, 60, 175)(sim);
+    sim.commandReturn({ kind: 'tower', pad: -1 });
+    expect(sim.mission.shipReturn).toBeNull();
+    expect(sim.snapshot().returnNotice?.text).toMatch(/^Can't return: too low for an orbit/);
+  });
+
   it('refuses rather than run dry in the final approach', { timeout: 60_000 }, () => {
     const sim = new Simulation();
     sim.launch();
