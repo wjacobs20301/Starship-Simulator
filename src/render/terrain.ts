@@ -420,16 +420,15 @@ export class Terrain {
   }
 
   /**
-   * The imagery for a tile: its own, or, for land the fine aerial survey doesn't cover (its edges,
-   * and across the border), the matching part of the nearest coarser tile that has imagery (drawn
-   * as sea, those gaps showed as blue strips along the tile edges). Open sea gets none: the water
-   * shader draws it. Returns the texture and where the tile sits in it (uv offset and scale).
+   * The imagery for a tile: its own, or, where the fine aerial survey has none (its edges, across
+   * the border, offshore), the matching part of the nearest coarser tile with imagery, shown just
+   * as that tile shows it (its water is baked in), so the two meet without a seam. (Drawn as
+   * open sea, those tiles showed as blue strips along the survey's edge, even over land and
+   * flats.) Only where nothing above has imagery is it left to the water shader. Returns the
+   * texture and where the tile sits in it (uv offset and scale).
    */
-  private async imagery(t: Tile, hts: Float32Array): Promise<{ tex: THREE.Texture | null; off: [number, number]; scale: number }> {
+  private async imagery(t: Tile): Promise<{ tex: THREE.Texture | null; off: [number, number]; scale: number }> {
     if (t.hasImagery) return { tex: await this.texLoader.loadAsync(`${BASE}img/${t.key}.jpg`), off: [0, 0], scale: 1 };
-    let top = -Infinity;
-    for (const h of hts) top = Math.max(top, h);
-    if (top <= this.index.waterLevel + 0.5) return { tex: null, off: [0, 0], scale: 1 };
     for (let d = 1; t.z - d >= this.index.minZoom; d++) {
       const ax = t.x >> d, ay = t.y >> d;
       if (!this.has('img', t.z - d, ax, ay)) continue;
@@ -441,8 +440,7 @@ export class Terrain {
   }
 
   private async build(t: Tile): Promise<void> {
-    const hts = await this.heights(t);
-    const { tex, off, scale: texScale } = await this.imagery(t, hts);
+    const [hts, { tex, off, scale: texScale }] = await Promise.all([this.heights(t), this.imagery(t)]);
     t.heights = hts;
     if (tex) {
       tex.colorSpace = THREE.SRGBColorSpace;
@@ -457,8 +455,8 @@ export class Terrain {
     const en = new Float32Array((n + skirt) * 2);
     // Runtime water colour on tiles fine enough to resolve the shoreline (z15+, ~40 m spacing).
     // Coarser imagery has its water colour baked in by the build; tiles without imagery are sea.
-    // (Open sea, with no imagery at all: all water. Land on a coarser tile's imagery: water by height.)
-    const waterWeight = new Float32Array(n + skirt).fill(!tex ? 2 : t.z >= 15 || !t.hasImagery ? 1 : 0);
+    // (No imagery anywhere above: all water. A coarser tile's imagery: as that tile draws it.)
+    const waterWeight = new Float32Array(n + skirt).fill(!tex ? 2 : t.z >= 15 && t.hasImagery ? 1 : 0);
     const c = t.center;
     for (let j = 0; j < GRID; j++) {
       const v = j / (GRID - 1);
