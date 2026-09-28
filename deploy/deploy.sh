@@ -18,8 +18,12 @@ podman run --rm --pull=newer -v "$BASE/app:/app:Z" -w /app docker.io/library/nod
   sh -c 'npm ci --no-audit --no-fund --loglevel=error && npm run build'
 
 # Publish: hashed assets first, then the page (so a visitor never gets a page whose files are missing).
+# The previous builds' code files are kept for a week: a page that loaded just before this deploy
+# still finds everything it asks for (players already flying are never interrupted: the game is
+# loaded once, in their browser, and a new build only reaches them when they reload).
 rsync -a --exclude index.html "$BASE/app/dist/" "$BASE/site/"
-rsync -a --delete "$BASE/app/dist/" "$BASE/site/"
+rsync -a --delete --exclude /assets/ "$BASE/app/dist/" "$BASE/site/"
+find "$BASE/site/assets" -type f -mtime +7 -delete
 
 # Pick up any Caddyfile change without dropping connections.
 if podman container exists starship-web; then
