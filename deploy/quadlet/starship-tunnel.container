@@ -1,0 +1,20 @@
+# Starship Flight Simulator: the Cloudflare tunnel (outbound only: no ports opened on the router).
+# Its token is in ~/starship/tunnel.env (TUNNEL_TOKEN=...), which is not in git.
+[Unit]
+Description=Starship Flight Simulator Cloudflare tunnel
+Wants=network-online.target starship-web.service
+After=network-online.target starship-web.service
+
+[Container]
+ContainerName=starship-tunnel
+Image=docker.io/cloudflare/cloudflared:latest
+Network=starship.network
+EnvironmentFile=%h/starship/tunnel.env
+Exec=tunnel --no-autoupdate run
+AutoUpdate=registry
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target

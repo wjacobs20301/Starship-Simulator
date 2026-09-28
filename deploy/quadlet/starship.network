@@ -1,0 +1,3 @@
+# The containers' own network: the tunnel reaches the web server by name (starship-web).
+[Network]
+NetworkName=starship

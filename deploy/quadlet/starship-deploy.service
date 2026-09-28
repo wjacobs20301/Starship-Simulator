@@ -1,0 +1,7 @@
+# Optional: rebuild the site when there's a new commit on GitHub (run by starship-deploy.timer).
+[Unit]
+Description=Starship Flight Simulator: deploy new commits
+
+[Service]
+Type=oneshot
+ExecStart=%h/starship/app/deploy/deploy.sh --if-changed

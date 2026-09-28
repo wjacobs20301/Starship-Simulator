@@ -1,0 +1,52 @@
+# The web server for starship.wjacobs.space (Caddy, in a container). Plain HTTP on :80 inside the
+# container network: the Cloudflare tunnel connects to it and Cloudflare does the HTTPS.
+{
+	admin off
+	auto_https off
+}
+
+:80 {
+	# Compress what compresses: the code, JSON and the elevation tiles (.bin, to ~1/3); the imagery
+	# is JPEG already.
+	encode {
+		zstd
+		gzip
+		match {
+			header Content-Type text/*
+			header Content-Type application/javascript*
+			header Content-Type application/json*
+			header Content-Type image/svg+xml*
+			header Content-Type application/octet-stream*
+			header Content-Type model/gltf-binary*
+		}
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+
+	# The streamed map tiles: their own folder (synced once, ~10 GB), not part of the build.
+	# Cached for 30 days (by browsers and Cloudflare): they only change if the terrain is rebuilt.
+	@tiles path /terrain/* /globe/tiles/*
+	handle @tiles {
+		root * /srv/tiles
+		header Cache-Control "public, max-age=2592000"
+		file_server
+	}
+
+	# The built site.
+	handle {
+		root * /srv/site
+		# Hashed file names: a new build gets new names, so these can be cached for good.
+		@hashed path /assets/*
+		header @hashed Cache-Control "public, max-age=31536000, immutable"
+		# Models and images: a week (purge Cloudflare's cache after changing one).
+		@static path /models/* /globe/* /og.jpg /favicon.svg
+		header @static Cache-Control "public, max-age=604800"
+		# The page itself: always checked, so a new build shows up straight away.
+		@page path / /index.html
+		header @page Cache-Control "no-cache"
+		file_server
+	}
+}

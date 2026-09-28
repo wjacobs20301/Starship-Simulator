@@ -1,0 +1,11 @@
+# Optional: check GitHub for new commits every 5 minutes (enable with
+# `systemctl --user enable --now starship-deploy.timer`; leave it off to deploy by hand).
+[Unit]
+Description=Starship Flight Simulator: check for new commits
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

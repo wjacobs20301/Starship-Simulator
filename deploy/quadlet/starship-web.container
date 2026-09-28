@@ -1,0 +1,24 @@
+# Starship Flight Simulator: the web server (Caddy). Rootless Podman, started at boot by systemd.
+[Unit]
+Description=Starship Flight Simulator web server (Caddy)
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+ContainerName=starship-web
+Image=docker.io/library/caddy:2-alpine
+Network=starship.network
+Volume=%h/starship/app/deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+Volume=%h/starship/site:/srv/site:ro
+Volume=%h/starship/tiles:/srv/tiles:ro
+# (Read-only mounts; the tiles are ~750k files, so skip relabelling them all for SELinux.)
+SecurityLabelDisable=true
+# Only for checking it from this machine (http://localhost:8080): the public way in is the tunnel.
+PublishPort=127.0.0.1:8080:80
+AutoUpdate=registry
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target
