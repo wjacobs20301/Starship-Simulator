@@ -95,13 +95,14 @@ settings).
 
 ## Updating the site
 
-Push to `main` on GitHub, then on the server:
+Push to `main` on GitHub: the site updates within 10 minutes. Or straight away, on the server:
 
 ```bash
 ~/starship/app/deploy/deploy.sh
 ```
 
-Or have the server check GitHub every 5 minutes and deploy new commits by itself:
+The server also checks GitHub every 10 minutes and deploys new commits by itself (the timer is
+on; to go back to deploying by hand: `systemctl --user disable --now starship-deploy.timer`):
 
 ```bash
 systemctl --user enable --now starship-deploy.timer

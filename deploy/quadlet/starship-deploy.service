@@ -1,4 +1,4 @@
-# Optional: rebuild the site when there's a new commit on GitHub (run by starship-deploy.timer).
+# Rebuild the site when there's a new commit on GitHub (run every 10 minutes by starship-deploy.timer).
 [Unit]
 Description=Starship Flight Simulator: deploy new commits
 
