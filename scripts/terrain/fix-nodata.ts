@@ -11,7 +11,7 @@
 
 import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import sharp from 'sharp';
+import sharp, { type OverlayOptions } from 'sharp';
 import { OUT as LIVE, S2_ZOOM, SRC, tileXToLon, tileYToLat } from './config';
 
 const dryRun = process.argv.includes('--dry-run');
@@ -45,7 +45,7 @@ async function fallback(z: number, x: number, y: number, globe: (lat: number, lo
   const d = S2_ZOOM - z;
   if (d <= 2) {
     const n = 1 << d;
-    const parts: sharp.OverlayOptions[] = [];
+    const parts: OverlayOptions[] = [];
     for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
       const f = s2File((x << d) + i, (y << d) + j);
       if (f) parts.push({ input: f, left: i * 256, top: j * 256 });
