@@ -3,6 +3,7 @@ import { type ReturnTarget, greatCircleKm } from '../src/sim/shipReturn';
 import { MU } from '../src/sim/constants';
 import { Simulation } from '../src/sim/simulation';
 import type { V3 } from '../src/sim/math';
+import { eciVelToPad, padDirToEci, padToEci } from '../src/sim/padFrame';
 
 /** Nominal flight to a minute after SECO, then the return command; runs (auto-warping) to the end. */
 function fly(target: ReturnTarget, prep?: (sim: Simulation) => void) {
@@ -101,6 +102,36 @@ describe('ship return from an orbit the player flew', () => {
   it('not quite in orbit and already coming down: an orbit insertion burn, then home', { timeout: 300_000 }, () => {
     const { sim, ship } = fly({ kind: 'tower', pad: -1 }, orbit(-500, 200, 26.5, 60, 190));
     expect(sim.events.some((e) => /planned: orbit insertion/.test(e.text))).toBe(true);
+    expect(ship.status).toBe('caught');
+  });
+
+  it('flown straight up with full tanks: vents, burns onto the tower, slows the steep fall, and is caught', { timeout: 300_000 }, () => {
+    const { sim, ship } = fly({ kind: 'tower', pad: -1 }, (s) => {
+      const sh = s.find('ship')!;
+      sh.r = padToEci([0, 0, 236e3], s.t);
+      sh.v = [0, 0, 0];
+      const g = eciVelToPad(sh.r, sh.v, s.t);
+      sh.v = padDirToEci([150 - g[0], 200 - g[1], 780 - g[2]], s.t);
+      sh.stages[0].prop = 1400e3;
+    });
+    expect(sim.events.some((e) => /planned: targeting .* entry burn/.test(e.text))).toBe(true);
+    expect(sim.events.some((e) => /Entry burn startup/.test(e.text))).toBe(true);
+    expect(ship.status).toBe('caught');
+  });
+
+  it('time warp on rails stops before a planned burn, so the autopilot can turn and fly it', { timeout: 300_000 }, () => {
+    const sim = new Simulation();
+    sim.launch();
+    while (sim.mission.phase !== 'coast') sim.step();
+    orbit(200, 200, 26.5, 180, 40)(sim);
+    sim.commandReturn({ kind: 'tower', pad: -1 });
+    const ship = sim.find('ship')!;
+    // (Like a player holding the highest warp: rails whenever they're allowed.)
+    for (let i = 0; ship.status === 'flight' && sim.mission.shipReturn && i < 3e6; i++) {
+      if (sim.railsAllowed()) sim.railsStep(250);
+      else sim.step();
+    }
+    expect(sim.events.some((e) => /burns complete/.test(e.text))).toBe(true);
     expect(ship.status).toBe('caught');
   });
 

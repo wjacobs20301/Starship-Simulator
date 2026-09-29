@@ -28,6 +28,7 @@ import { DEG, MU, PAD } from './constants';
 import { applyControl } from './control';
 import type { Aux } from './dynamics';
 import { engineThrust, throttleForThrust } from './engine';
+import { atmosphere } from './atmosphere';
 import { airRelativeVelocity, ecefToEci, ecefToEnuMatrix, ecefToGeodetic, eciToEcef, geodeticToEcef, localBasisEci } from './frames';
 import { orbitApsides } from './guidance';
 import { type V3, add, clamp, cross, dot, mat3Transpose, mat3Vec, norm, normalize, qrot, scale, sub } from './math';
@@ -59,9 +60,11 @@ export type ReturnPhase =
 
 /** A planned burn: sim time and delta-v along prograde / normal / radial (m/s). */
 export interface PlannedBurn {
-  label: 'circularize' | 'orbit insertion' | 'lower orbit' | 'phasing' | 'targeting' | 'deorbit';
+  label: 'circularize' | 'orbit insertion' | 'lower orbit' | 'phasing' | 'targeting' | 'deorbit' | 'entry burn';
   t: number;
   dv: V3;
+  /** (An entry burn: the altitude it's centred on on the way down, m.) */
+  alt?: number;
 }
 
 export interface ReturnPlan {
@@ -168,7 +171,7 @@ export function targetLatLon(target: ReturnTarget): { lat: number; lon: number }
  */
 const LANDING_MARGIN_PROP = 25e3;
 /** Venting rate for propellant it won't need, kg/s. */
-const VENT_RATE = 5e3;
+const VENT_RATE = 40e3;
 
 /** Delta-v the ship can spend on maneuvers: its main-tank propellant (the landing's is kept). */
 export function maneuverDeltaV(ship: Vehicle): number {
@@ -187,6 +190,35 @@ export function maneuverDeltaV(ship: Vehicle): number {
  * the propellant covers them.
  */
 export function planReturn(
+  ship: Vehicle,
+  t: number,
+  mass: number,
+  target: ReturnTarget,
+  options = true,
+  keepPass?: number,
+): ReturnPlan {
+  // Planned for the ship as it will be: propellant it won't need is vented before the first burn
+  // (a full ship falls much harder). A first guess, then again for what the plan needs.
+  const st = ship.stages[0];
+  const vac = ship.engines.find((e) => e.place.ring === 1)?.place.type;
+  const isp = (vac ? vac.ispVac : 370) * 9.80665;
+  const reserve = (st.def.header?.mass ?? st.def.reserve) + LANDING_MARGIN_PROP;
+  const base = st.def.dryMass + reserve;
+  const lightFor = (dv: number) => Math.min(mass, base * Math.exp((1.15 * dv + 30) / isp));
+  let m = lightFor(2500);
+  let p = planReturnAt(ship, t, m, target, options, keepPass);
+  if (p.ok) {
+    const m2 = lightFor(p.dvNeeded);
+    if (Math.abs(m2 - m) > 0.05 * m) {
+      m = m2;
+      const p2 = planReturnAt(ship, t, m, target, options, keepPass);
+      if (p2.ok) p = p2;
+    }
+  }
+  return p;
+}
+
+function planReturnAt(
   ship: Vehicle,
   t: number,
   mass: number,
@@ -230,7 +262,7 @@ export function planReturn(
   // whichever gets it home soonest for the fuel.
   const orbit = viaOrbit();
   if (aps.perigee >= 90e3 || !options) return orbit;
-  const direct = directBurn(ship, t, mass, goal, dvAvailable, land);
+  const direct = directPlan(ship, t, mass, goal, dvAvailable, land);
   if (!direct) return orbit;
   const cost = (p: ReturnPlan) => (p.landing!.t - t) / 3600 + p.dvNeeded / 100 + p.missKm / 60;
   if (direct.ok && (!orbit.ok || cost(direct) < cost(orbit))) return direct;
@@ -378,6 +410,111 @@ export function planReturn(
   }
 }
 
+/**
+ * Largest dynamic pressure a planned fall may reach (the ship breaks up at LIMITS.shipQ, 40 kPa;
+ * an entry from orbit peaks around 19 kPa, a fall from high up, however slow at the top, ~30), Pa.
+ */
+const ENTRY_Q_MAX = 32e3;
+/**
+ * Altitudes an entry burn (slowing a steep fall) may be centred on, on the way down, m. Higher is
+ * cooler, but gravity speeds it up again before the thick air; lower takes less.
+ */
+const ENTRY_BURN_ALTS = [100e3, 80e3, 65e3];
+/** The entry burn as flown: from this altitude on the way down, until this one, m. */
+const ENTRY_BURN_START = 110e3;
+const ENTRY_BURN_SETTLED = 50e3;
+const ENTRY_BURN_END = 15e3;
+/** Planned entry burns get this much extra (gravity: the burn is finite, not the planned impulse). */
+const ENTRY_BURN_MARGIN = 1.35;
+
+/**
+ * The single burn onto the target from a path that's coming down, with an entry burn as well if
+ * the fall would be too steep and fast for the airframe (a straight-up flight falling back):
+ * the smallest entry burn that keeps the fall inside the limit.
+ */
+function directPlan(
+  ship: Vehicle,
+  t: number,
+  mass: number,
+  goal: { lat: number; lon: number },
+  dvAvailable: number,
+  land: (r: V3, v: V3, t0: number, burn?: { t: number; dv: V3 }) => { lat: number; lon: number; t: number; ecef: V3 } | null,
+): ReturnPlan | null {
+  const tryWith = (entryDv: number, alt: number) => {
+    const p = directBurn(ship, t, mass, goal, dvAvailable, land, entryDv, alt);
+    if (!p || !p.after) return { p, q: Infinity };
+    return { p, q: peakQ(p.after.r, p.after.v, p.after.t, mass) };
+  };
+  const good = (r: ReturnType<typeof tryWith>) => !!r.p?.ok && r.q <= ENTRY_Q_MAX;
+  const first = tryWith(0, 0);
+  if (!first.p || first.q <= ENTRY_Q_MAX) return first.p;
+  // Too hard a fall: for each burn altitude, the smallest entry burn that softens it enough
+  // (doubling, then halving the interval); the cheapest wins.
+  let best: ReturnPlan | null = null;
+  for (const alt of ENTRY_BURN_ALTS) {
+    let lo = 0;
+    let hi = 250;
+    let found: ReturnType<typeof tryWith> | null = null;
+    for (; hi <= 4000; hi *= 2) {
+      const r = tryWith(hi, alt);
+      if (good(r)) {
+        found = r;
+        break;
+      }
+      if (!r.p || r.p.dvNeeded > dvAvailable * 1.5) break;
+      lo = hi;
+    }
+    if (!found) continue;
+    for (let i = 0; i < 4; i++) {
+      const mid = (lo + hi) / 2;
+      const r = tryWith(mid, alt);
+      if (good(r)) {
+        found = r;
+        hi = mid;
+      } else lo = mid;
+    }
+    if (!best || found.p!.dvNeeded < best.dvNeeded) best = found.p;
+  }
+  if (!best) {
+    return { ...first.p, ok: false, reason: `the fall from here would be too steep for the ship (${Math.round(first.q / 1000)} kPa) and there isn't the propellant to slow it` };
+  }
+  return best;
+}
+
+/** Coasting (with drag) from this state: where and when it comes down through `alt`, or null. */
+function entryBurnPoint(r: V3, v: V3, t: number, mass: number, alt: number): { r: V3; v: V3; t: number } | null {
+  let [rr, vv, tt] = [r, v, t];
+  let hPrev = ecefToGeodetic(eciToEcef(rr, tt)).h;
+  for (let i = 0; i < 2000; i++) {
+    const nx = propagate(rr, vv, tt, tt + 5, PLAN_MODEL, mass, 5);
+    const h = ecefToGeodetic(eciToEcef(nx.r, tt + 5)).h;
+    if (h <= alt && hPrev > alt) {
+      const f = (hPrev - alt) / Math.max(1e-6, hPrev - h);
+      return { r: add(rr, scale(sub(nx.r, rr), f)), v: add(vv, scale(sub(nx.v, vv), f)), t: tt + 5 * f };
+    }
+    if (h < alt && hPrev < alt && i === 0) return null; // (already below it)
+    [rr, vv, tt, hPrev] = [nx.r, nx.v, tt + 5, h];
+  }
+  return null;
+}
+
+/** Highest dynamic pressure on the fall from this state (gliding as planned), Pa. */
+function peakQ(r: V3, v: V3, t: number, mass: number): number {
+  let [rr, vv, tt] = [r, v, t];
+  let q = 0;
+  for (let i = 0; i < 3000; i++) {
+    const h = ecefToGeodetic(eciToEcef(rr, tt)).h;
+    if (h < 15e3) break;
+    const dt = h > 100e3 ? 5 : 1;
+    const rho = atmosphere(h).rho;
+    const s = norm(airRelativeVelocity(rr, vv));
+    q = Math.max(q, 0.5 * rho * s * s);
+    const nx = propagate(rr, vv, tt, tt + dt, PLAN_MODEL, mass, dt);
+    [rr, vv, tt] = [nx.r, nx.v, tt + dt];
+  }
+  return q;
+}
+
 /** Most the aim of a direct burn may be off and still count, km (the entry steers out the rest). */
 const DIRECT_ACCEPT_KM = 30;
 /** A direct burn lights this long after the command (time to turn to it), s. */
@@ -396,18 +533,30 @@ function directBurn(
   goal: { lat: number; lon: number },
   dvAvailable: number,
   land: (r: V3, v: V3, t0: number, burn?: { t: number; dv: V3 }) => { lat: number; lon: number; t: number; ecef: V3 } | null,
-): ReturnPlan | null {
+  /** An entry burn this size (retrograde, m/s) on the way down, centred on this altitude (m). */
+  entryDv = 0,
+  entryAlt = ENTRY_BURN_ALTS[0],
+): (ReturnPlan & { after?: { r: V3; v: V3; t: number } }) | null {
   const tb = t + DIRECT_LEAD;
   const at = propagate(ship.r, ship.v, t, tb, { dragArea: 0 }, mass);
   const f = orbitalFrame(at.r, at.v);
   const g = geodeticToEcef(goal.lat * DEG, goal.lon * DEG, 0);
   const R = ecefToEnuMatrix(goal.lat * DEG, goal.lon * DEG);
   const toEci = (d: V3): V3 => add(add(scale(f.pro, d[0]), scale(f.nrm, d[1])), scale(f.rad, d[2]));
+  // The fall after the burn (and the entry burn, if any), and where it lands.
+  const fallOf = (d: V3) => {
+    const v1 = add(at.v, toEci(d));
+    if (!entryDv) return { r: at.r, v: v1, t: tb, tEntry: null as number | null };
+    const e = entryBurnPoint(at.r, v1, tb, mass, entryAlt);
+    if (!e) return null;
+    return { r: e.r, v: add(e.v, scale(normalize(airRelativeVelocity(e.r, e.v)), -entryDv)), t: e.t, tEntry: e.t };
+  };
   const missOf = (d: V3) => {
-    const l = land(at.r, at.v, tb, { t: tb, dv: toEci(d) });
-    if (!l) return null;
+    const s = fallOf(d);
+    const l = s && land(s.r, s.v, s.t);
+    if (!s || !l) return null;
     const e = mat3Vec(R, sub(l.ecef, g));
-    return { e: [e[0], e[1]] as [number, number], l };
+    return { e: [e[0], e[1]] as [number, number], l, s };
   };
   let dv: V3 = [0, 0, 0];
   let cur = missOf(dv);
@@ -451,8 +600,10 @@ function directBurn(
     if (norm(dv) > dvAvailable * 1.5) break;
   }
   const missKm = Math.hypot(...cur.e) / 1000;
-  const dvNeeded = norm(dv);
-  const plan: ReturnPlan = { ok: true, burns: [{ label: 'targeting', t: tb, dv }], landing: cur.l, missKm, dvNeeded, dvAvailable };
+  const dvNeeded = norm(dv) + entryDv * ENTRY_BURN_MARGIN;
+  const burns: PlannedBurn[] = [{ label: 'targeting', t: tb, dv }];
+  if (entryDv && cur.s.tEntry !== null) burns.push({ label: 'entry burn', t: cur.s.tEntry, dv: [-entryDv * ENTRY_BURN_MARGIN, 0, 0], alt: entryAlt });
+  const plan = { ok: true, burns, landing: cur.l, missKm, dvNeeded, dvAvailable, after: { r: cur.s.r, v: cur.s.v, t: cur.s.t } };
   if (missKm > DIRECT_ACCEPT_KM) return { ...plan, ok: false, reason: `no single burn from this path reaches it (best misses by ${Math.round(missKm)} km)` };
   if (dvNeeded > dvAvailable) return { ...plan, ok: false, reason: `a burn onto it needs ${Math.round(dvNeeded)} m/s but only ${Math.round(dvAvailable)} m/s is left above the landing reserve` };
   return plan;
@@ -643,6 +794,10 @@ export class ShipReturn {
   /** Predicted landing point (latest guidance prediction) and its miss, km. */
   predicted: { lat: number; lon: number; missKm: number } | null = null;
   private burnIndex = 0;
+  /** Which planned burn is next. */
+  get burnIndexNow(): number {
+    return this.burnIndex;
+  }
   private touchedUp = false;
   private burning = false;
   private bank = 0;
@@ -666,6 +821,10 @@ export class ShipReturn {
   private peakHeat = 0;
   private venting = false;
   private vented = 0;
+  private ventLeft = 0;
+  /** Entry burn: the fall ahead's peak dynamic pressure (predicted), and when next to predict it. */
+  private qAhead = 0;
+  private nextQCheck = 0;
 
   private milestone(key: string, text: string): void {
     if (this.milestones.has(key)) return;
@@ -741,8 +900,52 @@ export class ShipReturn {
 
   private setNode(): void {
     const b = this.plan.burns[this.burnIndex];
-    this.sim.setNode(b ? { vehicle: this.ship.id, t: b.t, dv: b.dv } : null);
+    // (An entry burn is flown closed-loop, not to a node.)
+    this.sim.setNode(b && b.label !== 'entry burn' ? { vehicle: this.ship.id, t: b.t, dv: b.dv } : null);
     this.burning = false;
+  }
+
+  /**
+   * The entry burn, flown closed-loop: coming down below ENTRY_BURN_START, engines-first on all six
+   * engines whenever the fall ahead (predicted every half second) would load the airframe close to
+   * ENTRY_Q_MAX, until that's comfortably below it; then the entry as usual.
+   */
+  private flyEntryBurn(ship: Vehicle, aux: Aux, dt: number, vHat: V3, vz: number): void {
+    const t = this.sim.t;
+    const retro = scale(vHat, -1);
+    applyControl(ship, aux, retro, dt);
+    this.sim.waitUntil = null;
+    if (t >= this.nextQCheck) {
+      this.nextQCheck = t + 0.5;
+      this.qAhead = peakQ(ship.r, ship.v, t, aux.mp.mass);
+    }
+    const s = ship.stages[0];
+    const reserve = (s.def.header?.mass ?? s.def.reserve) + LANDING_MARGIN_PROP * 0.5;
+    const aligned = dot(normalize(qx(ship)), retro) > Math.cos(10 * DEG);
+    // (Nearly stopped: retrograde means nothing any more.)
+    const speed = norm(airRelativeVelocity(ship.r, ship.v));
+    const inWindow = vz < 0 && aux.geo.h < ENTRY_BURN_START;
+    if (!this.burning && inWindow && aligned && this.qAhead > ENTRY_Q_MAX * 0.75 && s.prop > reserve) {
+      this.burning = true;
+      this.milestone('entryBurn', `Entry burn startup (${(aux.geo.h / 1000).toFixed(0)} km, ${(norm(airRelativeVelocity(ship.r, ship.v)) * 3.6).toFixed(0)} km/h)`);
+    } else if (this.burning && (this.qAhead < ENTRY_Q_MAX * 0.6 || s.prop <= reserve || speed < 150)) {
+      this.burning = false;
+    }
+    setThrottle(ship, 'ship', this.burning ? 1 : 0);
+    this.status = !inWindow
+      ? `entry burn below ${(ENTRY_BURN_START / 1000).toFixed(0)} km on the way down (${(aux.geo.h / 1000).toFixed(0)} km)`
+      : `entry burn${this.burning ? '' : ' (holding)'}: fall ahead peaks at ${(this.qAhead / 1000).toFixed(0)} kPa`;
+    // Done once the fall ahead is soft enough (well down, so gravity won't speed it up much again),
+    // or too low to go on.
+    // (Engines-first, it falls much faster than belly-first, as the prediction assumes: once it
+    // needn't burn, it turns belly-first for the entry.)
+    if (vz < 0 && (aux.geo.h < ENTRY_BURN_END || (!this.burning && aux.geo.h < ENTRY_BURN_SETTLED && this.qAhead < ENTRY_Q_MAX * 0.75))) {
+      this.burning = false;
+      setThrottle(ship, 'ship', 0);
+      this.burnIndex++;
+      this.phase = 'coast';
+      this.log(`Return: entry burn complete (fall ahead peaks at ${(this.qAhead / 1000).toFixed(0)} kPa)`);
+    }
   }
 
   /**
@@ -805,11 +1008,13 @@ export class ShipReturn {
 
     switch (this.phase) {
       case 'burn': {
-        // Propellant beyond what the burns and the landing need goes overboard first: a heavy
-        // ship comes in hotter (and the plan is re-made for the lighter ship after the burn).
-        if (this.burnIndex === 0 && !this.burning && this.ventExcess(ship, dt)) {
-          this.sim.waitUntil = null;
-          applyControl(ship, aux, axis, dt);
+        // Propellant beyond what the burns and the landing need goes overboard while it waits for
+        // the first burn: a heavy ship comes in hotter (and the plan is re-made for the lighter
+        // ship after the burn).
+        const venting = this.burnIndex === 0 && !this.burning && this.ventExcess(ship, dt);
+        if (venting) this.sim.waitUntil = null;
+        if (this.plan.burns[this.burnIndex]?.label === 'entry burn') {
+          this.flyEntryBurn(ship, aux, dt, vHat, vz);
           break;
         }
         // Fly the planned maneuver nodes on the vacuum engines.
@@ -821,8 +1026,9 @@ export class ShipReturn {
           this.burnIndex++;
           if (this.burnIndex < this.plan.burns.length) {
             // Re-plan what's left from the orbit it actually reached (small differences grow over
-            // the hours to the pass).
-            this.replan(ship, aux);
+            // the hours to the pass); an entry burn is just re-timed for the path it's now on.
+            if (this.plan.burns[this.burnIndex].label === 'entry burn') this.retimeEntryBurn(ship, aux);
+            else this.replan(ship, aux);
             this.setNode();
           } else {
             this.phase = 'coast';
@@ -843,7 +1049,7 @@ export class ShipReturn {
           // Taper near the end so the cutoff lands on the plan.
           const thr = snap.remaining < 5 ? 0.4 : 1;
           setThrottle(ship, 'ship', thr, (ring) => ring === 1);
-          this.status = `${this.plan.burns[this.burnIndex].label} burn: ${snap.remaining.toFixed(1)} m/s to go`;
+          this.status = `${burnName(this.plan.burns[this.burnIndex].label)}: ${snap.remaining.toFixed(1)} m/s to go`;
         } else {
           setThrottle(ship, 'ship', 0);
           // One last touch-up of the deorbit burn about ten minutes out.
@@ -854,8 +1060,10 @@ export class ShipReturn {
             this.setNode();
             break;
           }
-          if (start - t > 120) this.sim.waitUntil = start - (this.touchedUp || b.label !== 'deorbit' ? 60 : 660);
-          this.status = `${this.plan.burns[this.burnIndex].label} burn in ${fmt(start - t)}`;
+          if (start - t > 120 && !venting) this.sim.waitUntil = start - (this.touchedUp || b.label !== 'deorbit' ? 60 : 660);
+          this.status = venting
+            ? `venting propellant it won't need (${(this.ventLeft / 1000).toFixed(0)} t to go), ${burnName(b.label)} in ${fmt(start - t)}`
+            : `${burnName(b.label)} in ${fmt(start - t)}`;
         }
         break;
       }
@@ -991,7 +1199,15 @@ export class ShipReturn {
     const d = Math.min(excess, VENT_RATE * dt);
     s.prop -= d;
     this.vented += d;
+    this.ventLeft = excess - d;
     return true;
+  }
+
+  /** Put the planned entry burn where the ship now crosses the entry burn altitude. */
+  private retimeEntryBurn(ship: Vehicle, aux: Aux): void {
+    const b = this.plan.burns[this.burnIndex];
+    const e = entryBurnPoint(ship.r, ship.v, this.sim.t, aux.mp.mass, b.alt ?? ENTRY_BURN_ALTS[0]);
+    if (e) this.plan.burns[this.burnIndex] = { ...b, t: e.t };
   }
 
   /** Height (above the ellipsoid) of the surface it's coming down on: the pad's ground, or the sea. */
@@ -1407,4 +1623,9 @@ function fmt(s: number): string {
   const sec = t % 60;
   const p = (n: number) => String(n).padStart(2, '0');
   return h ? `${h}:${p(m)}:${p(sec)}` : `${m}:${p(sec)}`;
+}
+
+/** "deorbit" -> "deorbit burn" (an "entry burn" stays as it is). */
+function burnName(label: string): string {
+  return label.endsWith('burn') ? label : `${label} burn`;
 }

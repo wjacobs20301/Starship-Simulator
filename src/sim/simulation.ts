@@ -72,6 +72,8 @@ const CRASH_SPEED = { arm: 4, tower: 3, qd: 6 };
 const QD_BREAK_SPEED = 0.8;
 /** Fastest warp that still steps the full physics. */
 export const PHYSICS_WARP_MAX = 50;
+/** Rails warp stops this long before a planned burn starts, s (time for the ship to turn to it). */
+const RAILS_BURN_LEAD = 90;
 
 /** The ship's entry as flown by its autopilot, measured from the sim (flaps included): approx. */
 
@@ -626,6 +628,9 @@ export class Simulation {
   /** Whether time warp may go on rails: everything in flight coasting above the atmosphere. */
   railsAllowed(): boolean {
     if (this.mission.phase === 'countdown' || this.mission.phase === 'ascent' || this.mission.phase === 'hotstaging') return false;
+    // A burn coming up: off rails in time to turn to it (on rails the attitude is frozen).
+    const until = this.railsUntil();
+    if (until !== null && this.t >= until - 0.01) return false;
     for (const v of this.vehicles) {
       if (v.status !== 'flight') continue;
       const aux = this.aux.get(v.id);
@@ -639,7 +644,26 @@ export class Simulation {
    * inertially), keep landed / caught vehicles with the Earth. Stops early (returning the time
    * actually advanced) if something would dip below the rails altitude.
    */
+  /**
+   * Sim time rails must stop at: a minute and a half before a planned burn starts (the maneuver
+   * node, or the return autopilot's closed-loop entry burn window), or null.
+   */
+  private railsUntil(): number | null {
+    let until: number | null = null;
+    const snap = this.node && this.nodeSnapshot();
+    if (this.node) {
+      const half = snap && Number.isFinite(snap.burnTime) ? snap.burnTime / 2 : 60;
+      until = this.node.node.t - half - RAILS_BURN_LEAD;
+    }
+    const r = this.mission.shipReturn;
+    if (r && r.phase === 'burn' && r.plan.burns[r.burnIndexNow]?.label === 'entry burn') until = Math.min(until ?? Infinity, this.t);
+    return until;
+  }
+
   railsStep(dt: number): number {
+    // (Never past the point a burn needs the ship off rails.)
+    const until = this.railsUntil();
+    if (until !== null) dt = Math.max(0, Math.min(dt, until - this.t));
     const chunk = 10;
     let done = 0;
     while (done < dt - 1e-9) {
