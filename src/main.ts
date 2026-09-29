@@ -8,6 +8,7 @@ import { type ModelLibrary, loadModels } from './render/models';
 import { applyShipSerial } from './render/decals';
 import { loadFacilities } from './render/facilities';
 import { rocketGarden } from './render/rocketGarden';
+import { loadSouthPadre } from './render/southPadre';
 import { createLaunchSite } from './render/launchSite';
 import { type StarbaseWeather, WEATHER_AVAILABLE, onSettingsChange, settings, updateSettings } from './settings';
 import { type PadRig, SUN_AT_DAY0, createWorld } from './render/scene';
@@ -88,6 +89,14 @@ const launchSite = createLaunchSite();
 world.scene.add(launchSite);
 world.statics.push(launchSite);
 origin.place(launchSite, [0, 0, 0]);
+// South Padre Island and Port Isabel, across the channel (the skyline behind the pad views).
+loadSouthPadre()
+  .then((g) => {
+    world.scene.add(g);
+    world.statics.push(g);
+    origin.place(g, [0, 0, 0]);
+  })
+  .catch((err) => console.error('South Padre Island failed to load', err));
 const facilitiesLoaded = loadFacilities();
 facilitiesLoaded
   .then((g) => {

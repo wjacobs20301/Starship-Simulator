@@ -17,6 +17,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { PAD } from '../sim/constants';
 import { TRENCHES, insideTrench } from './launchSite';
+import { EXTRA_FACILITIES } from './facilitiesExtra';
 import { setSiteMask } from './terrain';
 import type { GardenVehicle } from './rocketGarden';
 
@@ -31,6 +32,10 @@ interface Facility {
   length?: number;
   angle?: number;
   material: 'industrial' | 'bay' | 'house' | 'tank' | 'rocket';
+  /** (Hand-added, facilitiesExtra.ts.) A gable roof rising this much above the eaves, m. */
+  gable?: number;
+  /** (Hand-added.) An office or parking structure: ribbons of windows / openings. */
+  office?: boolean;
 }
 
 const R_EARTH = 6371000;
@@ -38,7 +43,7 @@ const R_EARTH = 6371000;
 const ENU_TO_WORLD = new THREE.Matrix4().set(1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1);
 
 /** Building styles (the shader's aInfo.z). */
-const STYLE = { shed: 0, house: 1, bay: 2, plain: 3, office: 4 } as const;
+export const STYLE = { shed: 0, house: 1, bay: 2, plain: 3, office: 4 } as const;
 
 /** Wall colours (sRGB): mostly SpaceX white and light grey, some older tan and blue-grey sheds. */
 const SHED_COLORS = [0xe9ebec, 0xe2e4e6, 0xd9dcdf, 0xeceae4, 0xcfd4d9, 0xd8cfbd, 0xc5ccd3];
@@ -47,7 +52,7 @@ const BAY_COLOR = 0xeef0f1;
 const CONCRETE = 0xb3b1ab;
 const ROOFTOP = 0xc4c7ca;
 
-const buildingMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 0.25, roughness: 0.62 });
+export const buildingMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 0.25, roughness: 0.62 });
 buildingMaterial.onBeforeCompile = (shader) => {
   shader.vertexShader = shader.vertexShader
     .replace(
@@ -185,13 +190,13 @@ const MATERIALS = {
 };
 
 /** A deterministic 0..1 value from a building's centre. */
-const hash = (e: number, n: number) => {
+export const hash = (e: number, n: number) => {
   const s = Math.sin(e * 12.9898 + n * 78.233) * 43758.5453;
   return s - Math.floor(s);
 };
 
 /** Put the per-building attributes on a geometry: colour, (ground, height, style, seed) and the door. */
-function tag(g: THREE.BufferGeometry, color: THREE.Color, info: [number, number, number, number], door: [number, number, number, number] = [0, 0, 0, 0]): THREE.BufferGeometry {
+export function tag(g: THREE.BufferGeometry, color: THREE.Color, info: [number, number, number, number], door: [number, number, number, number] = [0, 0, 0, 0]): THREE.BufferGeometry {
   const ng = g.index ? g.toNonIndexed() : g;
   const n = ng.getAttribute('position').count;
   const col = new Float32Array(n * 3);
@@ -240,7 +245,7 @@ function doorFor(ring: number[][]): [number, number, number, number] {
 
 export async function loadFacilities(): Promise<THREE.Group> {
   const res = await fetch(`${import.meta.env.BASE_URL}terrain/facilities.json`);
-  const { facilities } = (await res.json()) as { facilities: Facility[] };
+  const facilities: Facility[] = [...((await res.json()) as { facilities: Facility[] }).facilities, ...EXTRA_FACILITIES];
   const parts: Record<keyof typeof MATERIALS, THREE.BufferGeometry[]> = { buildings: [], tank: [], steel: [] };
   /** Vehicles on display (drawn with the real models, rocketGarden.ts, once they're loaded). */
   const garden: GardenVehicle[] = [];
@@ -290,18 +295,24 @@ export async function loadFacilities(): Promise<THREE.Group> {
         color.setHex(BAY_COLOR);
         door = doorFor(f.ring);
         roofUnits(shape, e, n, y0 + f.height, 6, 4);
+      } else if (f.material === 'house' && Math.abs(shape.getPoints().reduce((a, p, i, ps) => a + p.x * ps[(i + 1) % ps.length].y - ps[(i + 1) % ps.length].x * p.y, 0) / 2) > 400) {
+        // A big residential block (apartments): light walls, windows.
+        style = STYLE.office;
+        color.setHex(0xd9d4ca);
       } else if (f.material === 'house') {
         style = STYLE.house;
         color.setHex(HOUSE_COLOR);
       } else {
         // Small buildings are mostly offices and trailers (windows); the rest are sheds.
         const footprint = Math.abs(shape.getPoints().reduce((a, p, i, ps) => a + p.x * ps[(i + 1) % ps.length].y - ps[(i + 1) % ps.length].x * p.y, 0) / 2);
-        style = footprint < 250 && f.height <= 7 && seed < 0.55 ? STYLE.office : STYLE.shed;
+        style = f.office || (footprint < 250 && f.height <= 7 && seed < 0.55) ? STYLE.office : STYLE.shed;
+        if (f.office) color.setHex(0xc9c8c3);
         color.setHex(SHED_COLORS[Math.floor(seed * SHED_COLORS.length)]);
         // Rooftop units on the bigger sheds.
         if (footprint > 700 && f.height >= 5) roofUnits(shape, e, n, y0 + f.height, 2 + Math.floor(seed * 4), 2);
       }
       parts.buildings.push(tag(g, color, [y0, f.height, style, seed], door));
+      if (f.gable) parts.buildings.push(tag(gableRoof(f.ring, y0 + f.height, f.gable), color, [y0, f.height + f.gable, STYLE.shed, seed]));
     } else if (f.kind === 'vtank') {
       const r = f.diameter! / 2;
       let g: THREE.BufferGeometry = new THREE.CylinderGeometry(r, r, f.height + 1, 24);
@@ -409,4 +420,48 @@ function paintSiteMask(facilities: Facility[]): void {
   tex.magFilter = THREE.LinearFilter;
   tex.generateMipmaps = true;
   setSiteMask(tex, [minE, minN, maxE - minE, maxN - minN]);
+}
+
+/**
+ * A gable roof over a rectangular footprint (ring of 4 corners + the closing point, pad-local
+ * east / north): two slopes meeting at a ridge along the long axis, `rise` above the eaves at
+ * `eave` (render height), and the gable-end triangles. In render world (x = E, y = U, z = -N).
+ */
+function gableRoof(ring: number[][], eave: number, rise: number): THREE.BufferGeometry {
+  const [a, b, c, d] = ring.slice(0, 4).map(([e, n]) => new THREE.Vector3(e, eave, -n));
+  // The long sides: ab and cd if ab is longer than bc.
+  const [p0, p1, p2, p3] = a.distanceTo(b) >= b.distanceTo(c) ? [a, b, c, d] : [b, c, d, a];
+  // Ridge endpoints over the middle of the short ends (p1-p2 and p3-p0).
+  const r0 = p1.clone().add(p2).multiplyScalar(0.5).setY(eave + rise);
+  const r1 = p3.clone().add(p0).multiplyScalar(0.5).setY(eave + rise);
+  const tri = (...v: THREE.Vector3[]) => v.flatMap((q) => [q.x, q.y, q.z]);
+  const pos = [
+    // Slope along p0-p1, and the one along p2-p3 (each two triangles).
+    ...tri(p0, p1, r0), ...tri(p0, r0, r1),
+    ...tri(p2, p3, r1), ...tri(p2, r1, r0),
+    // Gable ends.
+    ...tri(p1, p2, r0), ...tri(p3, p0, r1),
+  ];
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  // (Wound either way depending on the ring's direction: make every face point outward/up.)
+  g.computeVertexNormals();
+  const centre = a.clone().add(c).multiplyScalar(0.5);
+  const P = g.getAttribute('position');
+  const N = g.getAttribute('normal');
+  for (let i = 0; i < P.count; i += 3) {
+    const f = new THREE.Vector3().fromBufferAttribute(P, i).add(new THREE.Vector3().fromBufferAttribute(P, i + 1)).add(new THREE.Vector3().fromBufferAttribute(P, i + 2)).divideScalar(3);
+    const n = new THREE.Vector3().fromBufferAttribute(N, i);
+    const out = f.clone().sub(centre).setY(Math.max(0, f.y - eave));
+    if (n.dot(out) < 0) {
+      // Swap two vertices of this triangle.
+      for (let k = 0; k < 3; k++) {
+        const t = P.getComponent(i + 1, k);
+        P.setComponent(i + 1, k, P.getComponent(i + 2, k));
+        P.setComponent(i + 2, k, t);
+      }
+    }
+  }
+  g.computeVertexNormals();
+  return g;
 }
