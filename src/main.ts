@@ -7,6 +7,7 @@ import { FloatingOrigin, enuToWorld, vehicleQuaternion } from './render/floating
 import { type ModelLibrary, loadModels } from './render/models';
 import { applyShipSerial } from './render/decals';
 import { loadFacilities } from './render/facilities';
+import { rocketGarden } from './render/rocketGarden';
 import { createLaunchSite } from './render/launchSite';
 import { type StarbaseWeather, WEATHER_AVAILABLE, onSettingsChange, settings, updateSettings } from './settings';
 import { type PadRig, SUN_AT_DAY0, createWorld } from './render/scene';
@@ -87,7 +88,8 @@ const launchSite = createLaunchSite();
 world.scene.add(launchSite);
 world.statics.push(launchSite);
 origin.place(launchSite, [0, 0, 0]);
-loadFacilities()
+const facilitiesLoaded = loadFacilities();
+facilitiesLoaded
   .then((g) => {
     world.scene.add(g);
     world.statics.push(g);
@@ -106,6 +108,15 @@ loadModels(world.renderer, (f) => (loadingBar.style.transform = `scaleX(${f})`))
     // Vehicle meshes clone the model and share its materials, so this updates every ship.
     onSettingsChange((s) => applyShipSerial(lib.ship, s.shipSerial));
     padRig = world.addPad(lib.pad);
+    // The rocket garden's vehicles, now the models are here.
+    facilitiesLoaded
+      .then((g) => {
+        const garden = rocketGarden(lib, g.userData.garden ?? []);
+        world.scene.add(garden);
+        world.statics.push(garden);
+        origin.place(garden, [0, 0, 0]);
+      })
+      .catch(() => {});
     loadingBar.style.transform = 'scaleX(1)';
     loading.classList.add('done');
     setTimeout(() => loading.remove(), 1000);
