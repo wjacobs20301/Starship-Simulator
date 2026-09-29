@@ -21,6 +21,7 @@ import { TargetMarker } from './render/targetMarker';
 import { Weather } from './render/weather';
 import { Rain } from './render/fx/rain';
 import { type FxVehicle, LaunchFx, explosionRadius, vehicleNoise } from './render/fx/launchFx';
+import { VentFx } from './render/fx/vent';
 import { LaunchAudio } from './audio/launchAudio';
 import { AudioEngine } from './audio/engine';
 import { Ambience } from './audio/ambience';
@@ -59,6 +60,8 @@ world.scene.add(mapView.group);
 const trajectories = new Map<string, Trajectory>();
 const fx = new LaunchFx(origin);
 world.scene.add(fx.group, ...fx.lights);
+const ventFx = new VentFx(origin);
+world.scene.add(ventFx.group);
 const sound = new SoundField();
 const audioEngine = new AudioEngine();
 const audio = new LaunchAudio(audioEngine);
@@ -1037,6 +1040,7 @@ function frame(): void {
   // Dev-only: __fxMissionTime overrides the countdown clock the effects see (to preview the deluge).
   const fxClock = import.meta.env.DEV ? (window as unknown as { __fxMissionTime?: number }).__fxMissionTime : undefined;
   fx.update(simTime, fxClock ?? snap.missionTime, placements, world.sun, 1);
+  ventFx.update(simTime, placements, fx.particles);
 
   // Sound: every vehicle is a source (silent ones too, so a cut-off is heard late as well).
   for (const pl of placements) {

@@ -87,6 +87,8 @@ export class Vehicle {
   rcsTorque: V3 = [0, 0, 0];
   /** Extra external force over the step (ECI, N), e.g. plume impingement during hot staging. */
   extForce: V3 = [0, 0, 0];
+  /** Venting propellant overboard until this sim time (the return autopilots dumping what they won't need). */
+  ventUntil = -Infinity;
   /** Resting place (Earth-fixed position and attitude) once landed. */
   rest: { rEcef: V3; qEcef: Q } | null = null;
   /** Hanging on a tower's arms: which pad, and the catch point's height above the vehicle's base, m. */

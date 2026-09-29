@@ -134,6 +134,8 @@ export interface VehicleSnapshot {
   health: VehicleHealth;
   /** Flap / grid fin angles (rad), by model node name. */
   surfaces: { name: string; angle: number }[];
+  /** Venting propellant overboard now (for the vent effect). */
+  venting: boolean;
   /** Per stage: propellant fraction, engine throttles (0..1), and the common TVC gimbal. */
   stageState: Partial<Record<StageId, {
     propFrac: number;
@@ -1228,6 +1230,7 @@ export class Simulation {
         id: v.id,
         name: v.name,
         status: v.status,
+        venting: v.ventUntil > this.t,
         stages: v.stages.map((s) => s.def.id),
         pos: mat3Vec(ECEF_TO_ENU, d),
         rot: mat3Mul(bodyToEnuBase, mat3FromQ(v.q)),

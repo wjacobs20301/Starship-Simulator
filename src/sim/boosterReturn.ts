@@ -860,6 +860,7 @@ export class BoosterReturn {
       }
       const v = Math.min(excess, VENT_RATE * dt);
       booster.stages[0].prop -= v;
+      booster.ventUntil = this.sim.t + 0.3;
       this.vented += v;
       return;
     }

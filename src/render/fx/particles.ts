@@ -49,6 +49,7 @@ const vertex = /* glsl */ `
   attribute vec2 aKind;
   uniform float uTime;
   uniform vec3 uWind;
+  uniform float uGround;
   uniform vec3 uDrag[${KINDS}];   // drag, lift, opacity per kind
   uniform float uStreak[${KINDS}];
   varying vec2 vUv;
@@ -70,10 +71,10 @@ const vertex = /* glsl */ `
     float k = dl.x;
     float decay = k > 0.0 ? (1.0 - exp(-k * age)) / k : age;
     vec3 p = aPos + uWind * age + (aVel - uWind) * decay + vec3(0.0, 0.5 * dl.y * age * age, 0.0);
-    // Don't sink through the ground plane of the anchor (pad level).
+    // Don't sink through the ground plane of the anchor (pad level), for effects anchored there.
     float ground = 0.3 * aTime.z;
-    bool landed = p.y < ground;
-    p.y = max(p.y, ground);
+    bool landed = uGround > 0.5 && p.y < ground;
+    if (uGround > 0.5) p.y = max(p.y, ground);
     float f = age / life;
     // Puffs grow fast at first, then slowly.
     float size = mix(aTime.z, aTime.w, 1.0 - pow(1.0 - f, 2.2));
@@ -261,6 +262,8 @@ export class ParticleSystem {
     this.uniforms = {
       uTime: { value: 0 },
       uWind: { value: new THREE.Vector3() },
+      /** 1: particles stay above the anchor's ground plane (y = 0); 0: no ground (a vehicle-anchored effect). */
+      uGround: { value: 1 },
       uDrag: { value: pad(kinds.map((k) => new THREE.Vector3(k.drag, k.lift, k.opacity)), new THREE.Vector3()) },
       uColor: { value: pad(kinds.map((k) => k.color), new THREE.Color()) },
       uGlowPickup: { value: pad(kinds.map((k) => k.glowPickup), 0) },

@@ -1198,6 +1198,7 @@ export class ShipReturn {
     }
     const d = Math.min(excess, VENT_RATE * dt);
     s.prop -= d;
+    ship.ventUntil = this.sim.t + 0.3;
     this.vented += d;
     this.ventLeft = excess - d;
     return true;
