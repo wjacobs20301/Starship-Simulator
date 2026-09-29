@@ -52,6 +52,14 @@ const BAY_COLOR = 0xeef0f1;
 const CONCRETE = 0xb3b1ab;
 const ROOFTOP = 0xc4c7ca;
 
+/** Shared by every building: how dark it is (0 day .. 1 night), for their lit windows. */
+export const buildingUniforms = { uNight: { value: 0 } };
+
+/** Set from the sun's direction (render world, y up at the pad) each frame. */
+export function setBuildingNight(sunUp: number): void {
+  buildingUniforms.uNight.value = 1 - THREE.MathUtils.smoothstep(sunUp, -0.1, 0.03);
+}
+
 export const buildingMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 0.25, roughness: 0.62 });
 buildingMaterial.onBeforeCompile = (shader) => {
   shader.vertexShader = shader.vertexShader
@@ -73,10 +81,12 @@ vObjN = normal;
 vInfo = aInfo;
 vDoor = aDoor;`,
     );
+  shader.uniforms.uNight = buildingUniforms.uNight;
   shader.fragmentShader = shader.fragmentShader
     .replace(
       '#include <common>',
       `#include <common>
+uniform float uNight;
 varying vec3 vObj;
 varying vec3 vObjN;
 varying vec4 vInfo;
@@ -103,6 +113,8 @@ float bTop = vInfo.y;
 int bStyle = int(vInfo.z + 0.5);
 float bRib = 0.0;
 float bGlass = 0.0;
+// Light from inside at night (windows, the bays' clerestories): colour, intensity.
+vec3 bLight = vec3(0.0);
 if (bWall > 0.5) {
   if (bStyle == 0 || bStyle == 2) {
     // Corrugated steel: vertical ribs (in the lighting, below), panel seams every ~6 m. Each
@@ -126,6 +138,8 @@ if (bWall > 0.5) {
       float mullion = aaLine(bAlong, 3.05, 0.35);
       diffuseColor.rgb = mix(vec3(0.7, 0.76, 0.8), vec3(0.45, 0.47, 0.49), mullion);
       bGlass = 0.6 * (1.0 - mullion);
+      // The bays work round the clock: their clerestories glow white.
+      bLight = vec3(0.9, 0.95, 1.0) * 0.9 * (1.0 - mullion);
       bRib = 0.0;
     }
     // A concrete plinth round the base.
@@ -151,8 +165,21 @@ if (bWall > 0.5) {
     float wy = fract(bH / 3.0);
     float mull = step(0.08, fract(bAlong / 1.6));
     float win = mull * step(0.38, wy) * step(wy, 0.72) * step(bH, bTop - 0.8) * step(0.8, bH);
-    bGlass = win * bDetail * (1.0 - smoothstep(0.1, 0.25, fwidth(bAlong) / 1.6));
+    float winFade = 1.0 - smoothstep(0.1, 0.25, fwidth(bAlong) / 1.6);
+    bGlass = win * bDetail * winFade;
     diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.1, 0.12, 0.14), bGlass);
+    // At night about half the windows are lit, warm (each 1.6 m pane of each floor on its own);
+    // far away, where panes merge, the wall glows with their average.
+    float room = fract(sin(dot(vec3(floor(bH / 3.0), floor(bAlong / 4.8), vInfo.w * 97.0), vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+    // (A quarter of the buildings are dark: shut, or everyone's asleep.)
+    float occupied = step(0.25, fract(vInfo.w * 7.31));
+    float lit = step(0.55, room) * (0.7 + 0.6 * fract(room * 13.1)) * occupied;
+    float near = win * lit;
+    // Far off (panes smaller than a pixel): a sparse scatter of lit rooms, 6 m x 1 floor each, so a
+    // distant town at night is points of light (a twinkle as they come and go at the pixel size).
+    float cell = fract(sin(dot(vec3(floor(bH / 3.0), floor(bAlong / 6.0), vInfo.w * 53.0), vec3(39.35, 11.13, 83.17))) * 24634.63);
+    float far = step(0.7, cell) * 0.45 * occupied * step(0.8, bH) * step(bH, bTop - 0.8);
+    bLight = vec3(1.0, 0.72, 0.42) * 2.0 * mix(far, near, winFade);
   }
   if (bStyle == 1) {
     // Painted black, with white fascia and skirting.
@@ -171,6 +198,11 @@ if (bWall > 0.5) {
 roughnessFactor = mix(roughnessFactor, 0.1, bGlass);`,
     )
     .replace(
+      '#include <emissivemap_fragment>',
+      `#include <emissivemap_fragment>
+totalEmissiveRadiance += bLight * uNight;`,
+    )
+    .replace(
       '#include <normal_fragment_maps>',
       `#include <normal_fragment_maps>
 if (bRib != 0.0) {
@@ -179,7 +211,7 @@ if (bRib != 0.0) {
 }`,
     );
 };
-buildingMaterial.customProgramCacheKey = () => 'starbase-buildings-v3';
+buildingMaterial.customProgramCacheKey = () => 'starbase-buildings-v6';
 
 const MATERIALS = {
   buildings: buildingMaterial,

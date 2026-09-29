@@ -6,7 +6,7 @@ import { CAMERA_LABELS, CameraRig } from './render/cameras';
 import { FloatingOrigin, enuToWorld, vehicleQuaternion } from './render/floatingOrigin';
 import { type ModelLibrary, loadModels } from './render/models';
 import { applyShipSerial } from './render/decals';
-import { loadFacilities } from './render/facilities';
+import { loadFacilities, setBuildingNight } from './render/facilities';
 import { rocketGarden } from './render/rocketGarden';
 import { loadSouthPadre } from './render/southPadre';
 import { createLaunchSite } from './render/launchSite';
@@ -964,7 +964,9 @@ function frame(): void {
     const flown = snap.vehicles.find((v) => v.id === trackedId)?.telemetry;
     dayPhase = dayWants ? daylightPhase(dayWants, dayRef.missionTime, flown ? { lat: flown.lat, lon: flown.lon } : null) : 0;
   }
-  const dayAngle = dayPhase + (dayRef ? DAY_RATE * (simTime - dayRef.t) : 0);
+  // (Dev-only: __dayOffset, rad, shifts the time of day, e.g. Math.PI for night.)
+  const dayOffset = import.meta.env.DEV ? ((window as unknown as { __dayOffset?: number }).__dayOffset ?? 0) : 0;
+  const dayAngle = dayPhase + (dayRef ? DAY_RATE * (simTime - dayRef.t) : 0) + dayOffset;
   world.setDay(dayAngle, EARTH_AXIS_WORLD);
 
   // The tracked vehicle blew up: watch the explosion for a while (V switches sooner), then go
@@ -1079,6 +1081,7 @@ function frame(): void {
   // rays from it. Up high only the vehicle itself (its parts shading each other).
   const focus = target?.center ?? [0, 60, 0];
   const sd = world.sunDir;
+  setBuildingNight(sd.y);
   const fh = Math.max(0, focus[1]);
   if (fh < SHADOW_CEILING && sd.y > 0.08) {
     const gx = focus[0] - (sd.x * fh) / sd.y;
