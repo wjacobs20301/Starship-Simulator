@@ -255,6 +255,40 @@ export class Terrain {
     if (!this.ready) return;
     this.frame++;
     uniforms.uTime.value = time;
+    const visible = this.select(camera, cameraWorld);
+    // (How many tiles this view still waits for: the loading screen holds for them.)
+    let pending = 0;
+    for (const t of this.tiles.values()) if (t.lastUsed === this.frame && (t.state === 'idle' || t.state === 'loading')) pending++;
+    this.pendingInView = pending;
+
+    for (const t of this.tiles.values()) if (t.mesh) t.mesh.visible = false;
+    for (const t of visible) {
+      const m = t.mesh!;
+      m.visible = true;
+      this.origin.place(m, t.center);
+    }
+    this.pump(cameraWorld);
+    this.evict();
+  }
+
+  /** Tiles the current view is still waiting for (0: it's all there at full detail). */
+  pendingInView = Infinity;
+
+  /**
+   * Load ahead the tiles another view will want (the launch pad's while the menu is up), without
+   * showing them. Call after update() in the same frame.
+   */
+  warm(camera: THREE.PerspectiveCamera, cameraWorld: V3): number {
+    if (!this.ready) return Infinity;
+    this.select(camera, cameraWorld);
+    let pending = 0;
+    for (const t of this.tiles.values()) if (t.lastUsed === this.frame && (t.state === 'idle' || t.state === 'loading')) pending++;
+    this.pump(cameraWorld);
+    return pending;
+  }
+
+  /** Which tiles to draw for this camera (marking every tile it wants as in use, and asking for any not loaded). */
+  private select(camera: THREE.PerspectiveCamera, cameraWorld: V3): Tile[] {
     camera.updateMatrixWorld();
     this.projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     this.frustum.setFromProjectionMatrix(this.projView);
@@ -286,15 +320,7 @@ export class Terrain {
       else this.request(t);
     };
     this.roots.forEach(visit);
-
-    for (const t of this.tiles.values()) if (t.mesh) t.mesh.visible = false;
-    for (const t of visible) {
-      const m = t.mesh!;
-      m.visible = true;
-      this.origin.place(m, t.center);
-    }
-    this.pump(cameraWorld);
-    this.evict();
+    return visible;
   }
 
   private childrenOf(t: Tile): Tile[] {

@@ -380,7 +380,7 @@ function resetFlight(): void {
   else if (start === 'boosterLanding') setPilot({ manual: true, target: fly, throttle: 0, engines: 1, sas: 'retrograde' });
   else if (start === 'entry') setPilot({ manual: true, target: fly, throttle: 0, engines: 1, sas: 'entry' });
   else setPilot({ manual: true, target: fly, throttle: 1, engines: 0, sas: 'stability' });
-  if (start !== 'pad') showPreparing();
+  showPreparing(start !== 'pad');
   plot.reset();
   hud.clearLog();
   tracker.reset();
@@ -388,21 +388,67 @@ function resetFlight(): void {
   blasts.clear();
 }
 
-// A mission starting part-way through a flight: the worker runs one ahead to there (a second or
-// two); a screen covers the wait.
+// A screen covers the start of a flight until it's ready to look at: a mission starting part-way
+// through a flight (the worker runs one ahead to there, a second or two), and the ground around
+// the camera streamed in at full detail (the first time, a few seconds).
 const preparing = document.createElement('div');
 preparing.id = 'preparing';
-preparing.innerHTML = '<div class="pp-title">Preparing mission</div><div class="pp-name"></div><div class="pp-bar"><i></i></div>';
+preparing.innerHTML = '<div class="pp-title"></div><div class="pp-name"></div><div class="pp-bar"><i></i></div><div class="pp-sub"></div>';
 document.body.appendChild(preparing);
+/** Frames drawn so far (the loading screen waits for the camera to have moved to the new flight). */
+let framesDrawn = 0;
+/** Longest the screen waits for the ground (a slow connection flies with it still arriving), ms. */
+const PREPARING_MAX_MS = 20000;
+let preparingRun = 0;
 
-function showPreparing(): void {
+function showPreparing(midFlight: boolean): void {
+  const run = ++preparingRun;
+  preparing.querySelector('.pp-title')!.textContent = midFlight ? 'Preparing mission' : 'Loading';
   preparing.querySelector('.pp-name')!.textContent = tracker.mission.title;
-  preparing.classList.add('on');
+  const sub = preparing.querySelector<HTMLElement>('.pp-sub')!;
+  sub.textContent = '';
+  const started = performance.now();
+  let settled = 0;
+  let shown = false;
+  /** Frames drawn once the worker had the new flight (the camera takes a few to get there). */
+  let readyAt: number | null = null;
   const wait = () => {
-    if (workerSceneId < scenesSent) return void window.setTimeout(wait, 100);
-    window.setTimeout(() => preparing.classList.remove('on'), 400);
+    if (run !== preparingRun) return;
+    const waited = performance.now() - started;
+    if (readyAt === null && workerReady()) readyAt = framesDrawn;
+    const ground = terrain.ready ? terrain.pendingInView : Infinity;
+    const ready = readyAt !== null && framesDrawn >= readyAt + 5 && models !== null && ground === 0;
+    // (Ready at once, as when the ground is already loaded: no screen at all.)
+    settled = ready ? settled + 1 : 0;
+    if (settled >= 3 || waited > PREPARING_MAX_MS) {
+      if (shown) window.setTimeout(() => preparing.classList.remove('on'), 300);
+      return;
+    }
+    if (!shown && (midFlight || waited > 150)) {
+      shown = true;
+      preparing.classList.add('on');
+    }
+    sub.textContent = !workerReady() ? '' : models === null ? 'Loading models' : Number.isFinite(ground) && ground > 0 ? `Loading terrain · ${ground} tile${ground === 1 ? '' : 's'}` : 'Loading terrain';
+    window.setTimeout(wait, 100);
   };
   wait();
+}
+
+/**
+ * While the main menu is up: load the launch pad's ground ahead (as the launch camera will see it),
+ * so a launch starts with it there.
+ */
+const warmCam = new THREE.PerspectiveCamera(50, 1, 1, 5e6);
+function warmPad(): void {
+  const [e, n] = MOUNTS[launchPad] ?? [0, 0];
+  const target = new THREE.Vector3(e, 70, -n);
+  const [az, el, d] = [-2.3, 0.12, 420]; // (the orbit camera's starting view, cameras.ts)
+  const pos = target.clone().add(new THREE.Vector3(Math.cos(el) * Math.sin(az), Math.sin(el), Math.cos(el) * Math.cos(az)).multiplyScalar(d));
+  warmCam.aspect = world.camera.aspect;
+  warmCam.updateProjectionMatrix();
+  warmCam.position.set(0, 0, 0);
+  warmCam.lookAt(target.clone().sub(pos));
+  terrain.warm(warmCam, [pos.x, pos.y, pos.z]);
 }
 
 /** The worker has caught up with the last scene / mission set-up asked for. */
@@ -1001,6 +1047,8 @@ function frame(): void {
   const heard = sound.hear(simTime, cam);
   globeTiles.update(world.camera, cam);
   terrain.update(world.camera, cam, now / 1000);
+  framesDrawn++;
+  if (menu.kind === 'main') warmPad();
   padRig?.update(snap.missionTime, snap.towers);
   // Shadows: near the ground they cover the whole launch site (both towers and the shadows they
   // cast) and, as a vehicle climbs, the ground its own shadow falls on, straight down the sun's
