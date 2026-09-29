@@ -196,7 +196,7 @@ hud.setMission(tracker.mission.title);
 
 // --- Main menu and pause menu ------------------------------------------------------------
 
-/** Whether the pause menu paused the sim (so resuming doesn't unpause a K pause). */
+/** Whether the pause menu paused the sim (so resuming unpauses it). */
 let menuPaused = false;
 const menu = new GameMenu(
   document.body,
@@ -554,7 +554,6 @@ bindKeys({
     send({ type: 'warp', value: next });
   },
   toggleNode: () => maneuverPanel.toggle(),
-  togglePause: () => send({ type: 'pause', value: !paused }),
   togglePlot: () => plot.toggle(),
   toggleHelp: () => document.querySelector('#help')!.classList.toggle('hidden'),
   toggleLog: () => hud.toggleLog(),

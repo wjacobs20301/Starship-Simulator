@@ -16,8 +16,6 @@ export interface InputActions {
   toggleMissions(): void;
   /** N: add a maneuver node / delete it. */
   toggleNode(): void;
-  /** K: pause / unpause (no menu). */
-  togglePause(): void;
   /** Esc: the pause menu (or back out of a menu page). */
   menu(): void;
   /** True while a full-screen menu is up: game keys are ignored. */
@@ -111,7 +109,6 @@ export function bindKeys(a: InputActions): void {
     else if (k === 'z') a.throttleFull();
     else if (k === 'x') a.throttleCut();
     else if (k === 'escape') a.menu();
-    else if (k === 'k') a.togglePause();
     else if (k === 'n') a.toggleNode();
     else if (k === 'o') a.toggleMissions();
     else if (k === ',' || k === '<') a.stepWarp(-1);
