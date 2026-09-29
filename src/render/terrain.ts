@@ -39,6 +39,8 @@ const REGION_HALF_M = 100_000;
 const EDGE_FADE_M = 40_000;
 const placeholder = new THREE.DataTexture(new Uint8Array([70, 105, 110, 255]), 1, 1);
 placeholder.needsUpdate = true;
+const siteMaskPlaceholder = new THREE.DataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1);
+siteMaskPlaceholder.needsUpdate = true;
 const uniforms = {
   uTime: { value: 0 },
   uWaterLevel: { value: 0.25 },
@@ -50,7 +52,21 @@ const uniforms = {
   // Flame-trench openings (center east/north, axis cos/sin) and half sizes: no ground there.
   uTrench: { value: TRENCHES.map((t) => new THREE.Vector4(t.center[0], t.center[1], t.axis[0], t.axis[1])) },
   uTrenchHalf: { value: TRENCHES.map((t) => new THREE.Vector2(t.half[0], t.half[1])) },
+  // Built-up ground (setSiteMask): R = concrete / asphalt, G = lawn, over the area rect (min
+  // east, min north, 1 / size east, 1 / size north).
+  uSiteMask: { value: siteMaskPlaceholder as THREE.Texture },
+  uSiteRect: { value: new THREE.Vector4(0, 0, 0, 0) },
 };
+
+/**
+ * Where the 3D buildings stand, the aerial photo shows them too (flat, leaning, with their
+ * shadows, and some since rebuilt or gone): a mask of that ground, drawn as concrete or lawn
+ * instead. rect: [min east, min north, size east, size north], pad-local m.
+ */
+export function setSiteMask(tex: THREE.Texture, rect: [number, number, number, number]): void {
+  uniforms.uSiteMask.value = tex;
+  uniforms.uSiteRect.value.set(rect[0], rect[1], 1 / rect[2], 1 / rect[3]);
+}
 
 /**
  * holes: the tile reaches a flame trench, so it cuts the openings out. Only those tiles use the
@@ -73,6 +89,8 @@ function makeMaterial(map: THREE.Texture | null, holes: boolean): THREE.MeshStan
     shader.uniforms.uEdge = uniforms.uEdge;
     shader.uniforms.uTrench = uniforms.uTrench;
     shader.uniforms.uTrenchHalf = uniforms.uTrenchHalf;
+    shader.uniforms.uSiteMask = uniforms.uSiteMask;
+    shader.uniforms.uSiteRect = uniforms.uSiteRect;
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nattribute float aHeight;\nattribute vec2 aEN;\nattribute float aWaterWeight;\nvarying float vHeight;\nvarying vec2 vEN;\nvarying float vWaterWeight;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvHeight = aHeight;\nvEN = aEN;\nvWaterWeight = aWaterWeight;');
@@ -89,6 +107,8 @@ uniform vec2 uMPerDeg;
 uniform vec2 uEdge;
 uniform vec4 uTrench[${TRENCHES.length}];
 uniform vec2 uTrenchHalf[${TRENCHES.length}];
+uniform sampler2D uSiteMask;
+uniform vec4 uSiteRect;
 varying float vHeight;
 varying vec2 vEN;
 varying float vWaterWeight;
@@ -134,6 +154,24 @@ vec3 globe = texture2D(uGlobe, vec2((ll.y + 180.0) / 360.0, (ll.x + 90.0) / 180.
 // little of the photo for surf lines, 2 = no imagery (open sea).
 vec3 sea = pow(mix(pow(uWater, vec3(1.0 / 2.2)), pow(globe, vec3(1.0 / 2.2)), 0.75), vec3(2.2));
 diffuseColor.rgb = mix(diffuseColor.rgb, sea, water * (0.92 * min(vWaterWeight, 1.0) + 0.08 * max(vWaterWeight - 1.0, 0.0)));
+// Built-up ground around the 3D buildings: concrete (slabs with joints, a little patchy) or lawn,
+// over the aerial photo of the buildings themselves.
+vec2 siteUv = (vEN - uSiteRect.xy) * uSiteRect.zw;
+if (siteUv.x > 0.0 && siteUv.y > 0.0 && siteUv.x < 1.0 && siteUv.y < 1.0) {
+  vec2 site = texture2D(uSiteMask, siteUv).rg * (1.0 - water);
+  if (site.r + site.g > 0.003) {
+    vec2 slab = floor(vEN / 7.5);
+    float n = fract(sin(dot(slab, vec2(12.9898, 78.233))) * 43758.5453);
+    float n2 = fract(sin(dot(floor(vEN / 31.0), vec2(39.3468, 11.135))) * 24634.6345);
+    vec2 jd = abs(fract(vEN / 7.5 + 0.5) - 0.5) * 7.5;
+    vec2 jw = max(fwidth(vEN), vec2(1e-3));
+    float joint = max((1.0 - smoothstep(0.08 - jw.x, 0.08 + jw.x, jd.x)) * min(1.0, 0.08 / jw.x), (1.0 - smoothstep(0.08 - jw.y, 0.08 + jw.y, jd.y)) * min(1.0, 0.08 / jw.y));
+    vec3 concrete = vec3(0.43, 0.43, 0.41) * (0.92 + 0.07 * n + 0.06 * n2) * (1.0 - 0.25 * joint);
+    vec3 lawn = vec3(0.12, 0.16, 0.07) * (0.85 + 0.2 * n2);
+    diffuseColor.rgb = mix(diffuseColor.rgb, concrete, site.r);
+    diffuseColor.rgb = mix(diffuseColor.rgb, lawn, site.g * (1.0 - site.r));
+  }
+}
 // Fade out over the region's outer edge, revealing the streamed globe tiles underneath.
 float edge = smoothstep(uEdge.x, uEdge.y, max(abs(vEN.x), abs(vEN.y)));
 diffuseColor.a *= 1.0 - edge;
@@ -157,7 +195,7 @@ if (water > 0.001) {
 }`,
       );
   };
-  mat.customProgramCacheKey = () => (holes ? 'terrain-v10-holes' : 'terrain-v10');
+  mat.customProgramCacheKey = () => (holes ? 'terrain-v11-holes' : 'terrain-v11');
   return mat;
 }
 

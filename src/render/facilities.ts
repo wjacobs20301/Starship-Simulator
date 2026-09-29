@@ -17,6 +17,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { PAD } from '../sim/constants';
 import { TRENCHES, insideTrench } from './launchSite';
+import { setSiteMask } from './terrain';
 import type { GardenVehicle } from './rocketGarden';
 
 interface Facility {
@@ -109,15 +110,35 @@ if (bWall > 0.5) {
     diffuseColor.rgb *= 1.0 - 0.13 * max(girt, joint);
   }
   if (bStyle == 2) {
-    // The bays: a darker band along the top, and the big sectional door.
-    if (bH > bTop - 4.0) diffuseColor.rgb *= 0.82;
-    if (dot(bN.xz, vDoor.xy) > 0.9 && abs(bAlong - vDoor.z) < vDoor.w * 0.5 && bH < bTop * 0.86) {
+    // The high bays. Structural columns every ~9 m show through the cladding as darker lines.
+    float column = aaLine(bAlong, 9.2, 0.9);
+    diffuseColor.rgb *= 1.0 - 0.12 * column;
+    // A parapet band along the top, and below it a clerestory: a band of translucent panels
+    // (light, a little blue, glossy) split by mullions, that lets daylight into the bay.
+    if (bH > bTop - 3.5) diffuseColor.rgb = vec3(0.62, 0.64, 0.66);
+    float clere = step(bTop - 11.0, bH) * step(bH, bTop - 5.0);
+    if (clere > 0.0) {
+      float mullion = aaLine(bAlong, 3.05, 0.35);
+      diffuseColor.rgb = mix(vec3(0.7, 0.76, 0.8), vec3(0.45, 0.47, 0.49), mullion);
+      bGlass = 0.6 * (1.0 - mullion);
       bRib = 0.0;
-      float panel = 1.0 - smoothstep(0.0, 0.08, abs(fract(bH / 2.6) - 0.5) * 2.0 - 0.9);
-      float panelFade = 1.0 - smoothstep(0.1, 0.3, fwidth(bH) / 2.6);
-      diffuseColor.rgb = vec3(0.47, 0.49, 0.5) * (1.0 - 0.25 * panel * panelFade);
-      // (Its frame.)
-      if (abs(bAlong - vDoor.z) > vDoor.w * 0.5 - 1.2 || bH > bTop * 0.86 - 1.2) diffuseColor.rgb = vec3(0.3, 0.31, 0.32);
+    }
+    // A concrete plinth round the base.
+    if (bH < 3.2) { diffuseColor.rgb = vec3(0.52, 0.51, 0.48); bRib = 0.0; }
+    // The big sectional door (and its header), on the wall facing the launch site.
+    float doorTop = min(bTop * 0.84, bTop - 14.0);
+    float across = abs(bAlong - vDoor.z);
+    if (dot(bN.xz, vDoor.xy) > 0.9 && across < vDoor.w * 0.5 + 2.5 && bH < doorTop + 5.0) {
+      bRib = 0.0;
+      if (across < vDoor.w * 0.5 && bH < doorTop) {
+        // Horizontal door sections, a vertical split down the middle.
+        float section = aaLine(bH, 2.6, 0.18);
+        float split = aaLine(bAlong - vDoor.z, vDoor.w, 0.5);
+        diffuseColor.rgb = vec3(0.5, 0.52, 0.53) * (1.0 - 0.3 * max(section, split));
+      } else {
+        // The frame and the header box above it.
+        diffuseColor.rgb = vec3(0.33, 0.34, 0.35);
+      }
     }
   }
   if (bStyle == 1 || bStyle == 4) {
@@ -153,7 +174,7 @@ if (bRib != 0.0) {
 }`,
     );
 };
-buildingMaterial.customProgramCacheKey = () => 'starbase-buildings-v2';
+buildingMaterial.customProgramCacheKey = () => 'starbase-buildings-v3';
 
 const MATERIALS = {
   buildings: buildingMaterial,
@@ -225,6 +246,21 @@ export async function loadFacilities(): Promise<THREE.Group> {
   const garden: GardenVehicle[] = [];
   const color = new THREE.Color();
 
+  /** Boxy rooftop units (air handling, vents) on a flat roof at height `top`. */
+  const roofUnits = (shape: THREE.Shape, e: number, n: number, top: number, count: number, size: number) => {
+    const box = new THREE.Box2().setFromPoints(shape.getPoints());
+    for (let k = 0; k < count; k++) {
+      const u = hash(e + k * 7.1, n - k * 3.3);
+      const w = hash(e - k, n + k);
+      const [x, y] = [box.min.x + (box.max.x - box.min.x) * (0.25 + 0.5 * u), box.min.y + (box.max.y - box.min.y) * (0.25 + 0.5 * w)];
+      const s = size * (1 + 1.2 * u);
+      const h = size * (0.7 + 0.5 * w);
+      const unit = new THREE.BoxGeometry(s, h, s * (0.7 + 0.6 * w));
+      unit.translate(e + x, top + h / 2, -(n + y));
+      parts.buildings.push(tag(unit, new THREE.Color(ROOFTOP), [top, h, STYLE.plain, u]));
+    }
+  };
+
   for (const f of facilities) {
     const [e, n] = f.center;
     // The V3 flame trenches and launch mounts are part of the pad model (OSM maps them as buildings).
@@ -253,6 +289,7 @@ export async function loadFacilities(): Promise<THREE.Group> {
         style = STYLE.bay;
         color.setHex(BAY_COLOR);
         door = doorFor(f.ring);
+        roofUnits(shape, e, n, y0 + f.height, 6, 4);
       } else if (f.material === 'house') {
         style = STYLE.house;
         color.setHex(HOUSE_COLOR);
@@ -262,19 +299,7 @@ export async function loadFacilities(): Promise<THREE.Group> {
         style = footprint < 250 && f.height <= 7 && seed < 0.55 ? STYLE.office : STYLE.shed;
         color.setHex(SHED_COLORS[Math.floor(seed * SHED_COLORS.length)]);
         // Rooftop units on the bigger sheds.
-        if (footprint > 700 && f.height >= 5) {
-          const units = 2 + Math.floor(seed * 4);
-          const box = new THREE.Box2().setFromPoints(shape.getPoints());
-          for (let k = 0; k < units; k++) {
-            const u = hash(e + k * 7.1, n - k * 3.3);
-            const w = hash(e - k, n + k);
-            const [x, y] = [box.min.x + (box.max.x - box.min.x) * (0.25 + 0.5 * u), box.min.y + (box.max.y - box.min.y) * (0.25 + 0.5 * w)];
-            const s = 2 + 2.5 * u;
-            const unit = new THREE.BoxGeometry(s, 1.4 + w, s * (0.7 + 0.6 * w));
-            unit.translate(e + x, y0 + f.height + (1.4 + w) / 2, -(n + y));
-            parts.buildings.push(tag(unit, new THREE.Color(ROOFTOP), [y0 + f.height, 1.4 + w, STYLE.plain, u]));
-          }
-        }
+        if (footprint > 700 && f.height >= 5) roofUnits(shape, e, n, y0 + f.height, 2 + Math.floor(seed * 4), 2);
       }
       parts.buildings.push(tag(g, color, [y0, f.height, style, seed], door));
     } else if (f.kind === 'vtank') {
@@ -308,6 +333,8 @@ export async function loadFacilities(): Promise<THREE.Group> {
     }
   }
 
+  paintSiteMask(facilities);
+
   const group = new THREE.Group();
   group.name = 'Facilities';
   group.userData.garden = garden;
@@ -323,4 +350,63 @@ export async function loadFacilities(): Promise<THREE.Group> {
     group.add(mesh);
   }
   return group;
+}
+
+/** Ground mask resolution, m per pixel, and how far out from the pad it covers (Starbase itself). */
+const MASK_RES = 2;
+const MASK_REACH: [number, number] = [5000, 3000];
+
+/**
+ * The built-up ground under and around the buildings (the aerial photo shows them there, flat,
+ * leaning out with height and with their shadows): concrete round the site's buildings and
+ * tanks, lawn round the village houses. The margin grows with the building's height.
+ */
+function paintSiteMask(facilities: Facility[]): void {
+  const near = facilities.filter((f) => Math.abs(f.center[0]) < MASK_REACH[0] && Math.abs(f.center[1]) < MASK_REACH[1]);
+  if (!near.length) return;
+  const pad = 80;
+  const minE = Math.min(...near.map((f) => f.center[0])) - pad - 150;
+  const maxE = Math.max(...near.map((f) => f.center[0])) + pad + 150;
+  const minN = Math.min(...near.map((f) => f.center[1])) - pad - 150;
+  const maxN = Math.max(...near.map((f) => f.center[1])) + pad + 150;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.ceil((maxE - minE) / MASK_RES);
+  canvas.height = Math.ceil((maxN - minN) / MASK_RES);
+  const ctx = canvas.getContext('2d')!;
+  const px = (e: number, n: number): [number, number] => [(e - minE) / MASK_RES, (maxN - n) / MASK_RES];
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  const shape = (f: Facility) => {
+    ctx.beginPath();
+    if (f.kind === 'building' && f.ring) {
+      f.ring.forEach(([e, n], i) => (i ? ctx.lineTo(...px(e, n)) : ctx.moveTo(...px(e, n))));
+      ctx.closePath();
+    } else if (f.kind === 'vtank') {
+      ctx.arc(...px(f.center[0], f.center[1]), f.diameter! / 2 / MASK_RES, 0, Math.PI * 2);
+    } else {
+      const [c, s] = [Math.cos(f.angle!), Math.sin(f.angle!)];
+      const [hl, hw] = [f.length! / 2, f.diameter! / 2];
+      const corners = [[hl, hw], [-hl, hw], [-hl, -hw], [hl, -hw]].map(([a, b]) => px(f.center[0] + a * c - b * s, f.center[1] + a * s + b * c));
+      corners.forEach((p, i) => (i ? ctx.lineTo(...p) : ctx.moveTo(...p)));
+      ctx.closePath();
+    }
+  };
+  // Houses first (lawn, green), then everything else over them (concrete, red).
+  for (const pass of ['house', 'rest'] as const) {
+    for (const f of near) {
+      if ((f.material === 'house') !== (pass === 'house')) continue;
+      const margin = pass === 'house' ? 5 : Math.min(22, 4 + 0.18 * f.height);
+      ctx.fillStyle = ctx.strokeStyle = pass === 'house' ? 'rgb(0,255,0)' : 'rgb(255,0,0)';
+      ctx.lineWidth = (2 * margin) / MASK_RES;
+      shape(f);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = true;
+  setSiteMask(tex, [minE, minN, maxE - minE, maxN - minN]);
 }
