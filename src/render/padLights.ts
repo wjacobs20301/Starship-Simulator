@@ -340,5 +340,13 @@ export class PadLights {
     lampUniforms.uLampNight.value = night;
     this.group.updateWorldMatrix(true, false);
     lampUniforms.uLampOrigin.value.setFromMatrixPosition(this.group.matrixWorld);
+    // The shadow maps are only redrawn now and then (with the sun's), but the floating origin
+    // moves everything, the lights too, every frame: their matrices have to follow along, or the
+    // shadows slide about as the camera moves.
+    for (const s of this.spots) {
+      s.updateMatrixWorld();
+      s.target.updateMatrixWorld();
+      s.shadow.updateMatrices(s);
+    }
   }
 }
