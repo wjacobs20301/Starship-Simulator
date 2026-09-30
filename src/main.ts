@@ -611,7 +611,6 @@ bindKeys({
   cycleEngines: () => setPilot({ engines: (pilot.engines + 1) % 3 }),
   throttleFull: () => setPilot({ throttle: 1 }),
   throttleCut: () => setPilot({ throttle: 0 }),
-  reset: () => resetFlight(),
   cycleCamera: () => rig.cycle(),
   toggleMap: () => rig.toggleMap(lastTarget),
   cycleTarget: () => {

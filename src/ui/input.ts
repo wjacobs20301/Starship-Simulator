@@ -4,7 +4,6 @@ export const WARP_LEVELS = [1, 2, 5, 10, 50, 100, 1000, 10000];
 export interface InputActions {
   /** Space: start the countdown before launch; stage when flying manually. */
   spaceBar(): void;
-  reset(): void;
   cycleCamera(): void;
   /** Tab: map view on / off. */
   toggleMap(): void;
@@ -93,7 +92,6 @@ export function bindKeys(a: InputActions): void {
     if (k in SWING) return a.arms(null, SWING[k]);
     if (k in SLEW) return a.arms(null, null, SLEW[k]);
     if (k === ' ') a.spaceBar();
-    else if (k === 'backspace') a.reset();
     else if (k === 'c') a.cycleCamera();
     else if (k === 'tab') a.toggleMap();
     else if (k === 'v') a.cycleTarget();
