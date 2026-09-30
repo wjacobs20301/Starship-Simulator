@@ -10,7 +10,7 @@ import { loadFacilities, setBuildingNight } from './render/facilities';
 import { rocketGarden } from './render/rocketGarden';
 import { loadSouthPadre } from './render/southPadre';
 import { createLaunchSite } from './render/launchSite';
-import { PadLights } from './render/padLights';
+import { PadLights, lampLightAll } from './render/padLights';
 import { type StarbaseWeather, WEATHER_AVAILABLE, onSettingsChange, settings, updateSettings } from './settings';
 import { type PadRig, SUN_AT_DAY0, createWorld } from './render/scene';
 import { PAD, RE, RP } from './sim/constants';
@@ -92,6 +92,7 @@ world.statics.push(launchSite);
 origin.place(launchSite, [0, 0, 0]);
 // Floodlights and tower beacons, for the night.
 const padLights = new PadLights();
+lampLightAll(launchSite);
 world.scene.add(padLights.group);
 world.statics.push(padLights.group);
 origin.place(padLights.group, [0, 0, 0]);
@@ -106,6 +107,7 @@ loadSouthPadre()
 const facilitiesLoaded = loadFacilities();
 facilitiesLoaded
   .then((g) => {
+    lampLightAll(g);
     world.scene.add(g);
     world.statics.push(g);
     origin.place(g, [0, 0, 0]);
@@ -122,6 +124,7 @@ loadModels(world.renderer, (f) => (loadingBar.style.transform = `scaleX(${f})`))
     models = lib;
     // Vehicle meshes clone the model and share its materials, so this updates every ship.
     onSettingsChange((s) => applyShipSerial(lib.ship, s.shipSerial));
+    lampLightAll(lib.pad);
     padRig = world.addPad(lib.pad);
     // The rocket garden's vehicles, now the models are here.
     facilitiesLoaded

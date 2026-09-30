@@ -339,11 +339,14 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
       hemi.intensity = 0.3 * (1 - 0.7 * t2) * (0.08 + 0.92 * day);
       // How dark it is here: the sun's height at the ground, whether the sun is in sight up high.
       const dark = 1 - THREE.MathUtils.lerp(day, sunUp, t2);
-      starlight.intensity = 0.6 * dark;
+      // (Dim at the ground, where the eye is on lit things and a night away from them is dark;
+      // brighter up high, so a vehicle in the Earth's shadow still shows its shape.)
+      starlight.intensity = THREE.MathUtils.lerp(0.14, 0.6, t2) * dark;
       // Above the air the black sky shows its stars even in sunlight (dimmer: the eye is
       // adapted to the sunlit ship and Earth); fully in the Earth's shadow.
       const starsShow = Math.max(dark, 0.4 * t2);
-      scene.environmentIntensity = 0.75 * (1 - 0.6 * t2) * (0.06 + 0.94 * day) + 0.08 * dark;
+      // (Its sky is a daytime one: at night only a trace of it, least at the ground.)
+      scene.environmentIntensity = 0.75 * (1 - 0.6 * t2) * (THREE.MathUtils.lerp(0.02, 0.06, t2) + (1 - THREE.MathUtils.lerp(0.02, 0.06, t2)) * day) + THREE.MathUtils.lerp(0.03, 0.08, t2) * dark;
       stars.update(camera, starsShow, 1 - t2, performance.now() / 1000, renderer.getPixelRatio());
     },
     sunDir,
