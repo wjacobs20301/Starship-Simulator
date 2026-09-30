@@ -10,6 +10,7 @@ import { loadFacilities, setBuildingNight } from './render/facilities';
 import { rocketGarden } from './render/rocketGarden';
 import { loadSouthPadre } from './render/southPadre';
 import { createLaunchSite } from './render/launchSite';
+import { PadLights } from './render/padLights';
 import { type StarbaseWeather, WEATHER_AVAILABLE, onSettingsChange, settings, updateSettings } from './settings';
 import { type PadRig, SUN_AT_DAY0, createWorld } from './render/scene';
 import { PAD, RE, RP } from './sim/constants';
@@ -89,6 +90,11 @@ const launchSite = createLaunchSite();
 world.scene.add(launchSite);
 world.statics.push(launchSite);
 origin.place(launchSite, [0, 0, 0]);
+// Floodlights and tower beacons, for the night.
+const padLights = new PadLights();
+world.scene.add(padLights.group);
+world.statics.push(padLights.group);
+origin.place(padLights.group, [0, 0, 0]);
 // South Padre Island and Port Isabel, across the channel (the skyline behind the pad views).
 loadSouthPadre()
   .then((g) => {
@@ -1082,6 +1088,7 @@ function frame(): void {
   const focus = target?.center ?? [0, 60, 0];
   const sd = world.sunDir;
   setBuildingNight(sd.y);
+  padLights.update(now / 1000, world.renderer, world.camera);
   const fh = Math.max(0, focus[1]);
   if (fh < SHADOW_CEILING && sd.y > 0.08) {
     const gx = focus[0] - (sd.x * fh) / sd.y;
