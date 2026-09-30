@@ -371,7 +371,8 @@ export class StarSky {
     this.group.add(milky, points);
   }
 
-  private rotation = new THREE.Quaternion();
+  /** Equatorial -> world rotation now (turning with the day). */
+  readonly rotation = new THREE.Quaternion();
   /** The sky's orientation at day angle 0 (see spin). */
   private rotation0 = new THREE.Quaternion();
   private one = new THREE.Vector3(1, 1, 1);

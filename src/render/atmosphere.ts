@@ -532,6 +532,8 @@ const fragment = /* glsl */ `
     float t1 = min(ta.y, sceneDist);
     if (tg.x > 0.0) t1 = min(t1, tg.x);
     if (ta.y < 0.0 || t1 <= t0) {
+      // Out in space, clear of the air: the sun's disk as it is (in the map, from orbit).
+      if (sky && (tg.x < 0.0 || tg.y < 0.0)) col.rgb += smoothstep(0.99996, 0.99999, mu0) * 40.0;
       gl_FragColor = col;
       return;
     }
@@ -600,7 +602,8 @@ const fragment = /* glsl */ `
     if (!pastCloud) transToCloud = trans;
     vec3 outc = col.rgb * trans * cl.a + cl.rgb * transToCloud + inscatter;
     // The sun's disk, reddened by the air in front of it (and hidden by cloud).
-    if (sky && tg.x < 0.0) outc += trans * cl.a * smoothstep(0.99996, 0.99999, mu) * 40.0;
+    // (No ground ahead: the ray misses it, or it's all behind the camera.)
+    if (sky && (tg.x < 0.0 || tg.y < 0.0)) outc += trans * cl.a * smoothstep(0.99996, 0.99999, mu) * 40.0;
     // Guard against any stray non-finite value (bloom would smear it over the whole screen).
     // Ground fog: lit grey, by day; the scene fades into it with distance.
     float fogOD = fogDepth(ro, rd, min(sceneDist, 8e4));

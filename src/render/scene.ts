@@ -82,6 +82,8 @@ export interface World {
   setDay(angle: number, earthAxis: THREE.Vector3): void;
   /** Direction to the sun (world axes, unit). */
   readonly sunDir: THREE.Vector3;
+  /** Equatorial (celestial) -> world rotation now: the star sky's, turning with the day. */
+  readonly skyRotation: THREE.Quaternion;
   /** Add the Pad 2 model; returns its animatable parts. */
   addPad(model: THREE.Object3D): PadRig;
 }
@@ -249,7 +251,8 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
   scene.environment = envTarget.texture;
   scene.environmentIntensity = 0.75;
 
-  const camera = new THREE.PerspectiveCamera(50, 1, 0.5, 5e7);
+  // (Far enough for the Moon, and the map zoomed out to its orbit.)
+  const camera = new THREE.PerspectiveCamera(50, 1, 0.5, 2e9);
 
   // At day angle 0, a morning sun from the east-southeast (like many Starbase launch windows);
   // it turns with the day about the Earth's axis (setDay).
@@ -350,6 +353,7 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
       stars.update(camera, starsShow, 1 - t2, performance.now() / 1000, renderer.getPixelRatio());
     },
     sunDir,
+    skyRotation: stars.rotation,
     setDay(angle: number, earthAxis: THREE.Vector3) {
       // The Earth turns east: in its (the world's) frame the sky turns west about the axis.
       dayTurn.setFromAxisAngle(earthAxis, -angle);

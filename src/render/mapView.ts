@@ -13,6 +13,7 @@ import type { Trajectory, TrajectoryMark } from '../sim/trajectory';
 import { FX_LAYER } from './atmosphere';
 import type { FloatingOrigin } from './floatingOrigin';
 import { ecefToWorld, toWorld } from './geo';
+import { MOON_DISTANCE, type Moon, phaseName } from './moon';
 
 const EARTH_CENTER = ecefToWorld([0, 0, 0]);
 /** Sphere that hides labels behind the Earth, m. */
@@ -50,11 +51,20 @@ export class MapView {
   private used = 0;
   private v = new THREE.Vector3();
   visible = false;
+  /** The Sun (world unit vector toward it) and the Moon, shown with the Moon's orbit. */
+  bodies: { sunDir: THREE.Vector3; moon: Moon } | null = null;
+  private moonOrbit: Line2;
+  private orbitNormal = new THREE.Vector3();
 
   constructor(parent: HTMLElement) {
     this.group.visible = false;
     this.material = new LineMaterial({ linewidth: 2.6, vertexColors: true, transparent: true, opacity: 0.95, depthWrite: false });
     this.dimMaterial = new LineMaterial({ linewidth: 1.6, vertexColors: true, transparent: true, opacity: 0.75, depthWrite: false });
+    // The Moon's orbit: a thin grey ring (it's 60 Earth radii out).
+    this.moonOrbit = new Line2(new LineGeometry(), new LineMaterial({ linewidth: 1.2, color: 0x8d96a6, transparent: true, opacity: 0.55, depthWrite: false }));
+    this.moonOrbit.frustumCulled = false;
+    this.moonOrbit.layers.set(FX_LAYER);
+    this.group.add(this.moonOrbit);
     this.labels = document.createElement('div');
     this.labels.id = 'map-labels';
     parent.appendChild(this.labels);
@@ -70,6 +80,7 @@ export class MapView {
   setSize(w: number, h: number): void {
     this.material.resolution.set(w, h);
     this.dimMaterial.resolution.set(w, h);
+    (this.moonOrbit.material as LineMaterial).resolution.set(w, h);
   }
 
   /** New predictions from the worker (replaces all paths). */
@@ -168,6 +179,27 @@ export class MapView {
     };
 
     label([0, 0, 0], 'site', '<i></i><span>Starbase</span>');
+    if (this.bodies) {
+      const { sunDir, moon } = this.bodies;
+      // The Sun, far off in its direction; the Moon, and its orbit (rebuilt as its plane turns).
+      label([cam[0] + sunDir.x * 1e12, cam[1] + sunDir.y * 1e12, cam[2] + sunDir.z * 1e12], 'body sun', '<i></i><span>Sun</span>');
+      label(moon.world, 'body', `<i></i><span>Moon<br><b>${phaseName(moon.illuminated, moon.waxing)} · ${Math.round(moon.illuminated * 100)}%</b></span>`);
+      if (this.orbitNormal.dot(moon.orbitNormal) < 0.999999) {
+        this.orbitNormal.copy(moon.orbitNormal);
+        const u = moon.dir.clone();
+        const v = new THREE.Vector3().crossVectors(moon.orbitNormal, u);
+        const pts: number[] = [];
+        for (let i = 0; i <= 256; i++) {
+          const a = (i / 256) * Math.PI * 2;
+          const p = u.clone().multiplyScalar(Math.cos(a)).addScaledVector(v, Math.sin(a)).multiplyScalar(MOON_DISTANCE);
+          pts.push(p.x, p.y, p.z);
+        }
+        this.moonOrbit.geometry.dispose();
+        const g = new LineGeometry();
+        g.setPositions(pts);
+        this.moonOrbit.geometry = g;
+      }
+    }
     for (const m of extra) label(toWorld(m.lat, m.lon, 0), m.cls, m.html);
     for (const v of vehicles) {
       label(v.world, v.id === trackedId ? 'vehicle tracked' : 'vehicle', `<i></i><span>${v.name}<br><b>${fmtAlt(v.altitude)}</b></span>`);

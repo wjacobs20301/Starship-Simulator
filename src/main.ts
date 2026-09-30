@@ -6,11 +6,12 @@ import { CAMERA_LABELS, CameraRig } from './render/cameras';
 import { FloatingOrigin, enuToWorld, vehicleQuaternion } from './render/floatingOrigin';
 import { type ModelLibrary, loadModels } from './render/models';
 import { applyShipSerial } from './render/decals';
-import { loadFacilities, setBuildingNight } from './render/facilities';
+import { buildingUniforms, loadFacilities, setBuildingNight } from './render/facilities';
 import { rocketGarden } from './render/rocketGarden';
 import { loadSouthPadre } from './render/southPadre';
 import { createLaunchSite } from './render/launchSite';
 import { PadLights, lampLightAll } from './render/padLights';
+import { Moon } from './render/moon';
 import { type StarbaseWeather, WEATHER_AVAILABLE, onSettingsChange, settings, updateSettings } from './settings';
 import { type PadRig, SUN_AT_DAY0, createWorld } from './render/scene';
 import { PAD, RE, RP } from './sim/constants';
@@ -59,6 +60,11 @@ terrain.load().catch((err) => console.error('terrain failed to load', err));
 rig.groundHeight = (lat, lon) => terrain.groundHeight(lat, lon);
 const mapView = new MapView(document.body);
 world.scene.add(mapView.group);
+// The Moon, in the sky and on the map.
+const moon = new Moon();
+world.scene.add(moon.mesh, moon.halo, moon.light, moon.light.target);
+mapView.bodies = { sunDir: world.sunDir, moon };
+const PAD_UP = new THREE.Vector3(0, 1, 0);
 /** Latest predicted trajectories, by vehicle id. */
 const trajectories = new Map<string, Trajectory>();
 const fx = new LaunchFx(origin);
@@ -138,7 +144,7 @@ loadModels(world.renderer, (f) => (loadingBar.style.transform = `scaleX(${f})`))
     loadingBar.style.transform = 'scaleX(1)';
     loading.classList.add('done');
     setTimeout(() => loading.remove(), 1000);
-    if (import.meta.env.DEV) Object.assign(window, { __debug: { models, padRig, world, meshes, terrain, settings, updateSettings, rig, fx, sound, showScene, pr: () => pixelRatio, frame, globeTiles, mapView, flightPanel, hud, plot, ambience, audioEngine, menu, menuAudio, weather } });
+    if (import.meta.env.DEV) Object.assign(window, { __debug: { models, padRig, world, meshes, terrain, settings, updateSettings, rig, fx, sound, showScene, pr: () => pixelRatio, frame, globeTiles, mapView, flightPanel, hud, plot, ambience, audioEngine, menu, menuAudio, weather, moon, origin } });
   })
   .catch((err) => {
     loadingText.textContent = import.meta.env.DEV
@@ -1063,6 +1069,7 @@ function frame(): void {
   if (missionTarget) returnMarks.push({ lat: missionTarget.lat, lon: missionTarget.lon, cls: 'mark return', html: `<i></i><span>${missionTarget.label}</span>` });
   mapView.update(origin, world.camera, simTime, mapVehicles, trackedId, returnMarks);
   origin.apply(world.statics);
+  moon.update(simTime, world.skyRotation, world.sunDir, origin, PAD_UP, buildingUniforms.uNight.value);
   for (const pl of placements) {
     origin.place(pl.mesh.root, pl.world);
     pl.mesh.afterPlace();

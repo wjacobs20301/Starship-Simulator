@@ -17,7 +17,8 @@ const EY = axisWorld([0, 1e6, 0]);
 const EZ = axisWorld([0, 0, 1e6]);
 /** Map camera distance from the Earth's centre, m. */
 const MAP_MIN = 7.4e6;
-const MAP_MAX = 4e7;
+/** (Out far enough to see the Moon's orbit.) */
+const MAP_MAX = 1.2e9;
 /** Closest the camera may come to the ground or sea, m. */
 const GROUND_CLEARANCE = 2;
 
