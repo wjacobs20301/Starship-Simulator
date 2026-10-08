@@ -14,7 +14,8 @@
     "models": "npm run geometry && /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup -P art/blender/build_all.py -- --no-preview && tsx scripts/optimize-models.ts",
     "models:preview": "npm run geometry && /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup -P art/blender/build_all.py && tsx scripts/optimize-models.ts",
     "terrain:fetch": "tsx scripts/terrain/fetch-dem.ts && tsx scripts/terrain/fetch-copdem.ts && tsx scripts/terrain/fetch-s2.ts --concurrency=4 && tsx scripts/terrain/fetch-imagery.ts --concurrency=12",
-    "terrain:build": "tsx scripts/terrain/build-tiles.ts",
+    "terrain:build": "tsx scripts/terrain/build-tiles.ts && python3 scripts/terrain/fix-flatwater.py",
+    "globe:fetch": "tsx scripts/globe/fetch-globe.ts",
     "globe:build": "tsx scripts/globe/build-globe.ts"
   },
   "dependencies": {

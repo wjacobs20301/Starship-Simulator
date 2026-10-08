@@ -9,11 +9,14 @@ connected patches big enough (~1.3 ha at z16, scaled for coarser zooms), are
 flattened water, if the aerial photo there looks like water too (blue or teal, or dark: the
 wind-tidal flats are as flat but dry sand in the photo): set to -0.6 m (with the cells ringing
 them that are still near sea level). The launch site (flattened on purpose, 1.5 m) is left alone.
+Safe to run again: the tiles it has fixed are listed in public/terrain/dem/flatwater-fixed.json
+(gone with the folder when the terrain is rebuilt) and skipped. `npm run terrain:build` runs it
+after the build.
 
 Works in place on public/terrain/dem (never through a hard link). Usage:
   python3 scripts/terrain/fix-flatwater.py [--dry-run]
 """
-import math, os, re, sys
+import json, math, os, re, sys
 import numpy as np
 from scipy import ndimage
 from PIL import Image
@@ -51,6 +54,10 @@ def photo(z, x, y):
     return np.asarray(im, dtype=np.float32)
 
 
+# Tiles fixed by an earlier run (a second pass would widen the shore ring each time).
+DONE_FILE = f'{ROOT}/flatwater-fixed.json'
+done = set(json.load(open(DONE_FILE))) if os.path.exists(DONE_FILE) else set()
+
 total_tiles = changed_tiles = changed_cells = 0
 for z in sorted(int(d) for d in os.listdir(ROOT) if d.isdigit()):
     min_cells = max(10, int(600 / 4 ** (16 - z)))  # ~1.3 ha at z16 (a strip is cut up at tile edges)
@@ -64,6 +71,9 @@ for z in sorted(int(d) for d in os.listdir(ROOT) if d.isdigit()):
             if math.hypot(e, n) < SITE_KEEP_M + tile_size_m(z):
                 continue
             path = f'{ROOT}/{z}/{xs}/{f}'
+            key = f'{z}/{xs}/{f}'
+            if key in done:
+                continue
             h = np.fromfile(path, dtype='<i2').reshape(G, G).astype(np.int32)
             near = (h >= LO) & (h <= HI) & (h != 0)
             if not near.any():
@@ -98,4 +108,8 @@ for z in sorted(int(d) for d in os.listdir(ROOT) if d.isdigit()):
             if not DRY:
                 os.remove(path)  # (may be a hard link to a source tile: never write through it)
                 h.astype('<i2').tofile(path)
+                done.add(key)
+if not DRY:
+    with open(DONE_FILE, 'w') as fh:
+        json.dump(sorted(done), fh)
 print(f'{total_tiles} DEM tiles, {changed_tiles} with flattened water fixed ({changed_cells} cells){" (dry run)" if DRY else ""}')

@@ -50,10 +50,13 @@ The ground is streamed like a map app: a quadtree of Web Mercator tiles (zoom 8â
 
 ```bash
 npm run terrain:fetch   # NAIP, Sentinel-2, 3DEP and Copernicus sources -> art/source/terrain (resumable; hours for NAIP)
-npm run terrain:build   # writes public/terrain (imagery pyramid, height tiles, index, facilities); ~25 min
-npm run globe:build     # Blue Marble 500 m (art/source/globe/bmng_*.jpg, 420 MB) -> public/globe/tiles; ~11 min
+npm run terrain:build   # writes public/terrain (imagery pyramid, height tiles, index, facilities), then the flat-water fix; ~25 min
+npm run globe:fetch     # NASA Blue Marble 500 m sources (8 tiles, 420 MB) -> art/source/globe (resumable)
+npm run globe:build     # art/source/globe/bmng_*.jpg -> public/globe/tiles; ~11 min
 npx tsx scripts/terrain/build-tiles.ts --water-only=0.98   # quick: re-bake water colour into coarse tiles only
 ```
+The flat-water fix (`scripts/terrain/fix-flatwater.py`, Python 3 with numpy, scipy and Pillow: `pip3 install numpy scipy pillow`) lowers lagoon and channel water that lidar surveys "hydro-flattened" above sea level, which would otherwise draw as land (teal strips). It works in place on `public/terrain/dem` and is safe to run again.
+
 Builds go to `public/terrain.building` and swap in when finished, so a running game never sees a half-built set. The dev server doesn't watch the ~750k tile files (`vite.config.ts`); watching them runs it out of memory.
 
 ## Settings
