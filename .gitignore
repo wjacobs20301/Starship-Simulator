@@ -17,8 +17,10 @@ public/globe/tiles
 art/source/vehicle/*.zip
 art/source/vehicle/source
 
-# Trailer recordings (the scripts that make them stay)
+# Trailer recordings, thumbnails and promo screenshots (the scripts that make them stay)
 trailer/*.mp4
+trailer/*.jpg
+website-images/
 
 .DS_Store
 .claude/settings.local.json

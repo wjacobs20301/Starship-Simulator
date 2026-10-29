@@ -12,6 +12,16 @@ npm run fly     # headless flight, prints a telemetry table + event log
 npm run models  # rebuild the 3D models (needs Blender at /Applications/Blender.app)
 ```
 
+### Map data
+The terrain and globe tiles (~10 GB, ~750k files) aren't in the repo. Without them the game still runs, but over a bare globe. To download and build all of it in one go:
+
+```bash
+pip3 install numpy scipy pillow   # needed by the build
+npm run data                      # download + build everything; several hours, resumable
+```
+
+`npm run data` runs `terrain:fetch`, `terrain:build`, `globe:fetch` and `globe:build` (see [Terrain and globe](#terrain-and-globe)). No accounts or API keys are needed. If a download is interrupted, run it again and it picks up where it left off.
+
 ## 3D models
 `npm run models` runs Blender headless (`art/blender/build_all.py`) and writes optimized GLBs to `public/models/`. All output is meshopt-compressed with WebP textures.
 
@@ -92,3 +102,6 @@ Booster boostback and catch, ship reentry and flip, detailed models, real terrai
 - Buildings and tanks: © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors (ODbL).
 
 An independent fan-made simulator, not affiliated with or endorsed by SpaceX.
+
+## License
+The code is [MIT](LICENSE). The third-party models and data credited above keep their own licenses.

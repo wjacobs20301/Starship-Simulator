@@ -1,6 +1,7 @@
 {
   "name": "starship-sim",
   "private": true,
+  "license": "MIT",
   "version": "0.1.0",
   "type": "module",
   "scripts": {
@@ -16,7 +17,8 @@
     "terrain:fetch": "tsx scripts/terrain/fetch-dem.ts && tsx scripts/terrain/fetch-copdem.ts && tsx scripts/terrain/fetch-s2.ts --concurrency=4 && tsx scripts/terrain/fetch-imagery.ts --concurrency=12",
     "terrain:build": "tsx scripts/terrain/build-tiles.ts && python3 scripts/terrain/fix-flatwater.py",
     "globe:fetch": "tsx scripts/globe/fetch-globe.ts",
-    "globe:build": "tsx scripts/globe/build-globe.ts"
+    "globe:build": "tsx scripts/globe/build-globe.ts",
+    "data": "python3 -c \"import numpy, scipy, PIL\" && npm run terrain:fetch && npm run terrain:build && npm run globe:fetch && npm run globe:build"
   },
   "dependencies": {
     "three": "^0.186.0"
