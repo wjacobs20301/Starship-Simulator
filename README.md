@@ -104,4 +104,4 @@ Booster boostback and catch, ship reentry and flip, detailed models, real terrai
 An independent fan-made simulator, not affiliated with or endorsed by SpaceX.
 
 ## License
-The code is [MIT](LICENSE). The third-party models and data credited above keep their own licenses.
+The code is [MIT](LICENSE). The third-party models and data credited above keep their own licenses and aren't covered by it: the 3D models in `art/source/` and the models built from them in `public/models/` (CC BY 4.0, see `art/source/README.md`), and the map, imagery and elevation data.
