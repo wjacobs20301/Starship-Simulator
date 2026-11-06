@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Off-nominal trajectory · Starship Flight Simulator</title>
+    <meta name="robots" content="noindex" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <!-- The page for any address that isn't on the site (served by deploy/Caddyfile with a 404
+         status, at whatever path was asked for: every link is absolute). The scene is the game's
+         own: the Starship model, the star catalogue sky, the Blue Marble Earth (src/notFound.ts). -->
+    <style>
+      :root {
+        --font: "Barlow Semi Condensed", "D-DIN", "Arial Narrow", system-ui, sans-serif;
+        --line: rgba(255, 255, 255, 0.16);
+        --line-strong: rgba(255, 255, 255, 0.34);
+        --text: #f2f4f7;
+        --muted: rgba(255, 255, 255, 0.62);
+        --bad: #ff6a5a;
+        --warn: #ffc85a;
+        --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; background: #000; color: var(--text); font-family: var(--font); }
+      body { overflow: hidden; }
+      #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; opacity: 0; transition: opacity 1.6s var(--ease); }
+      #view.on { opacity: 1; }
+      /* Shade behind the text so it reads over the Earth. */
+      .shade { position: fixed; inset: 0; pointer-events: none;
+        background: linear-gradient(90deg, rgba(0, 0, 0, 0.72) 0%, rgba(0, 0, 0, 0.45) 38%, rgba(0, 0, 0, 0) 62%); }
+
+      main { position: fixed; left: clamp(20px, 7vw, 120px); top: 50%; transform: translateY(-50%); width: min(560px, calc(100vw - 40px));
+        animation: fadeUp 1s var(--ease) 0.15s both; }
+      @keyframes fadeUp { from { opacity: 0; transform: translateY(calc(-50% + 14px)); } to { opacity: 1; transform: translateY(-50%); } }
+      .tag { font-size: 13px; font-weight: 600; letter-spacing: 0.32em; color: var(--muted); text-transform: uppercase; }
+      .tag b { color: var(--bad); font-weight: 600; }
+      .blink { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--bad); margin-right: 10px; vertical-align: 1px; animation: blink 1.2s steps(2, start) infinite; }
+      @keyframes blink { to { visibility: hidden; } }
+      .code { margin: 10px 0 2px; font-size: clamp(110px, 17vw, 200px); font-weight: 700; line-height: 0.9; letter-spacing: -0.02em; }
+      h1 { margin: 0; font-size: clamp(26px, 3.4vw, 38px); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+      p.say { margin: 14px 0 0; max-width: 470px; font-size: 18px; line-height: 1.45; color: var(--muted); }
+      p.say code { font-family: inherit; color: var(--text); background: rgba(255, 255, 255, 0.08); border: 1px solid var(--line); border-radius: 4px; padding: 0 6px; word-break: break-all; }
+
+      /* Telemetry, like the webcast strip. */
+      .telemetry { display: flex; gap: clamp(16px, 3vw, 34px); margin: 28px 0 30px; padding: 14px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+      .telemetry span { display: block; font-size: 11px; letter-spacing: 0.24em; color: var(--muted); text-transform: uppercase; }
+      .telemetry strong { display: block; margin-top: 4px; font-size: clamp(18px, 2.2vw, 24px); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+      .telemetry .lost { color: var(--bad); }
+
+      a.btn { display: inline-flex; align-items: center; gap: 10px; padding: 14px 24px; border-radius: 999px; font-size: 15px; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase;
+        text-decoration: none; color: #000; background: var(--text); transition: transform 0.25s var(--ease), box-shadow 0.25s var(--ease); }
+      a.btn:hover { transform: translateY(-1px); box-shadow: 0 6px 30px rgba(255, 255, 255, 0.25); }
+      a.btn:focus-visible { outline: 2px solid var(--warn); outline-offset: 3px; }
+
+      /* Narrow screens: the ship up top, the text below it. */
+      @media (max-width: 760px) {
+        .shade { background: linear-gradient(180deg, rgba(0, 0, 0, 0) 22%, rgba(0, 0, 0, 0.7) 52%, rgba(0, 0, 0, 0.82) 100%); }
+        main { top: auto; bottom: 28px; transform: none; animation-name: fadeUpNarrow; }
+        @keyframes fadeUpNarrow { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+        .code { font-size: 96px; }
+        p.say { font-size: 16px; }
+        .telemetry { flex-wrap: wrap; row-gap: 12px; margin: 20px 0 22px; }
+        .telemetry div { flex: 0 0 42%; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        main, .blink { animation: none !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="view" aria-hidden="true"></canvas>
+    <div class="shade" aria-hidden="true"></div>
+    <main>
+      <div class="tag"><span class="blink"></span>Error <b>404</b> · Off-nominal trajectory</div>
+      <div class="code">404</div>
+      <h1>This page never made orbit</h1>
+      <p class="say">There's nothing at <code id="path">this address</code>. It may have moved, or it went through a rapid unscheduled disassembly.</p>
+      <div class="telemetry" role="group" aria-label="Telemetry">
+        <div><span>Mission time</span><strong id="clock">T+00:00:00</strong></div>
+        <div><span>Altitude</span><strong>404 km</strong></div>
+        <div><span>Speed</span><strong id="speed">27,404 km/h</strong></div>
+        <div><span>Signal</span><strong class="lost">LOST</strong></div>
+      </div>
+      <a class="btn" href="/">Return to launch site</a>
+    </main>
+    <script type="module" src="/src/notFound.ts"></script>
+  </body>
+</html>

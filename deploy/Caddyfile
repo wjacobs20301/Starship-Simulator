@@ -35,6 +35,19 @@
 		file_server
 	}
 
+	# An address that isn't on the site: the 404 page (still with a 404 status). Not for the
+	# map tiles, code and models: the game asks for tiles that may not exist, and only needs the
+	# status.
+	handle_errors 404 {
+		@page not path /terrain/* /globe/tiles/* /assets/* /models/*
+		handle @page {
+			root * /srv/site
+			rewrite * /404.html
+			header Cache-Control "no-cache"
+			file_server
+		}
+	}
+
 	# The built site.
 	handle {
 		root * /srv/site

@@ -49,7 +49,13 @@ export default defineConfig({
   // (The same for `vite preview`, serving the production build.)
   preview: { port: Number(process.env.PORT) || 5180, allowedHosts: [HOST] },
   // (One main chunk, ~290 kB gzipped: fine for a game that then streams its tiles.)
-  build: { copyPublicDir: false, chunkSizeWarningLimit: 1500 },
+  // Two pages: the game, and the page for addresses that aren't on the site (served by the web
+  // server's 404 handler, deploy/Caddyfile).
+  build: {
+    copyPublicDir: false,
+    chunkSizeWarningLimit: 1500,
+    rollupOptions: { input: { main: 'index.html', notFound: '404.html' } },
+  },
   plugins: [copyPublicExceptTiles()],
   worker: { format: 'es' },
   // (The flight tests are heavy: all at once on every core, the slowest can run out of time.)
