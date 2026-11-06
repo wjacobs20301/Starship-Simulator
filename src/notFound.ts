@@ -25,11 +25,15 @@ const clock = document.getElementById('clock')!;
 const speed = document.getElementById('speed')!;
 const pad = (n: number) => String(n).padStart(2, '0');
 const t0 = performance.now();
-setInterval(() => {
-  const s = Math.floor((performance.now() - t0) / 1000);
+// The ship's been up a while: the clock opens somewhere between 1h30 and 3h into the mission.
+const elapsed0 = 5400 + Math.floor(Math.random() * 5400);
+const tick = () => {
+  const s = elapsed0 + Math.floor((performance.now() - t0) / 1000);
   clock.textContent = `T+${pad(Math.floor(s / 3600))}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`;
   speed.textContent = `${Math.round(27404 + Math.sin(s / 7) * 12).toLocaleString('en-US')} km/h`;
-}, 250);
+};
+tick();
+setInterval(tick, 250);
 
 const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const canvas = document.querySelector<HTMLCanvasElement>('#view')!;
