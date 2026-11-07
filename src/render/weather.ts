@@ -204,9 +204,11 @@ export class Weather {
     u.uPolar.value.copy(this.axis);
     u.uDrift.value.copy(this.drift);
     u.uFog.value = on ? this.fogHere : 0;
+    u.uLocalSun.value = on ? this.sunHere : 1;
   }
 
   private fogHere = 0;
+  private sunHere = 1;
 
   /**
    * The weather where the camera is: rain (0..1), a factor for the sunlight (1 clear, down to
@@ -216,6 +218,7 @@ export class Weather {
   local(camFromCentre: THREE.Vector3, height: number): { rain: number; sun: number; fog: number } {
     if (!this.enabled || !this.model || height > 16000) {
       this.fogHere = 0;
+      this.sunHere = 1;
       return { rain: 0, sun: 1, fog: 0 };
     }
     const l = this.local0;
@@ -232,6 +235,7 @@ export class Weather {
     const rain = smooth(0.12, 0.5, s.precip) * smooth(s.top, s.base, height) * smooth(0.5, 0.8, s.cover);
     const dim = 0.7 * smooth(0.45, 0.95, s.cover) * (1 - 0.6 * s.broken) * under + 0.15 * s.high * (1 - smooth(8000, 11000, height));
     this.fogHere = s.fog * (1 - smooth(150, 600, height));
-    return { rain, sun: 1 - Math.min(0.75, dim), fog: this.fogHere };
+    this.sunHere = 1 - Math.min(0.75, dim);
+    return { rain, sun: this.sunHere, fog: this.fogHere };
   }
 }

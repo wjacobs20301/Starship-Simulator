@@ -153,6 +153,8 @@ function sunDepthTable(): THREE.DataTexture {
 export const CLOUD_SHELL_LO = 0;
 export const CLOUD_SHELL_HI = 16000;
 const CLOUD_DETAIL_SCALE = 2600;
+/** The order the cloud pass visits each 2x2 block's pixels in, frame by frame. */
+const SUBPIXELS: [number, number][] = [[0, 0], [1, 1], [1, 0], [0, 1]];
 /** Cirrus: a thin sheet this high, m. */
 const CIRRUS_ALT = 10000;
 
@@ -179,16 +181,18 @@ const CLOUD_GLSL = /* glsl */ `
     b = mix(textureLod(tWxB0, uv, 0.0), textureLod(tWxB1, uv, 0.0), uWxBlend);
   }
 
-  // A hash of a point: 0..1.
-  float hash13(vec3 p) {
-    p = fract(p * 0.1031);
-    p += dot(p, p.zyx + 31.32);
-    return fract((p.x + p.y) * p.z);
-  }
-
   // Mip level for noise of period "scale" (m) seen from distance t: about one texel per pixel.
   float noiseLod(float t, float scale) {
     return max(0.0, log2(max(t, 1.0) * uPixAng * ${NOISE_SIZE}.0 / scale));
+  }
+
+  // The spread of the noise's R channel at mip level l (measured: its mips average it smoother).
+  float noiseSd(float l) {
+    float f = clamp(l, 0.0, 5.0);
+    float i = floor(f);
+    float a = i < 0.5 ? 0.0648 : i < 1.5 ? 0.0633 : i < 2.5 ? 0.0588 : i < 3.5 ? 0.048 : i < 4.5 ? 0.0247 : 0.0077;
+    float b = i < 0.5 ? 0.0633 : i < 1.5 ? 0.0588 : i < 2.5 ? 0.048 : i < 3.5 ? 0.0247 : 0.0077;
+    return max(mix(a, b, f - i), 0.004);
   }
 
   // The clouds over n from the map's weather (a, b) with the fine detail the map is too coarse
@@ -200,20 +204,29 @@ const CLOUD_GLSL = /* glsl */ `
   // fields would blink on and off as the view moved), and the threshold softens to match.
   // (weatherFine's cell pattern there, -1..1: lumpier tops are lit unevenly, seen from far off.)
   float gRelief = 0.0;
+  // (The march's step length as a distance for the erosion detail's mip, see cloudDensity.)
+  float gDetT = 0.0;
+  // (Over 0 for the light samples: their detail a little blurrier, their edges soft.)
+  float gDetBias = 0.0;
+  // (How near the last sample was to being cloud: its shape value less the cutoff, < 0 clear.)
+  float gMargin = -1.0;
+  // (How broken weatherFine's weather is, 0 a deck .. 1 scattered cumulus.)
+  float gBroken = 0.0;
   vec4 weatherFine(vec3 n, vec4 a, vec4 b, float t) {
     gRelief = 0.0;
+    gBroken = a.w;
     if (a.x < 0.015) return vec4(0.0, 0.0, 0.0, b.w);
     vec3 q = n + uDrift;
     float fine = 1.0 - smoothstep(-2.0, 0.0, log2(max(t, 1.0) * uPixAng * ${NOISE_SIZE}.0 * 120.0 / uRc));
     // Mesoscale cells, as cloud seen from orbit organizes: closed cells (cloud cells parted by
     // thin clear lines) in decks, open cells (rings of cloud round clear middles) in broken
     // weather. Cellular noise, warped so no two cells are alike, at two scales.
-    // (A mip blurrier than one texel a pixel: the noise's own finer octaves would be grain.)
+    // (A texel a pixel: the frames' sub-pixel samples, added up, keep it from grain.)
     float lodM = noiseLod(t, uRc / 27.0);
     float lod2 = noiseLod(t, uRc / 61.0);
     vec3 warp = textureLod(tNoise, q * 7.0 + vec3(0.1, 0.8, 0.5), noiseLod(t, uRc / 7.0) + 1.0).rgr - vec3(0.6, 0.45, 0.6);
-    float c1 = (textureLod(tNoise, q * 27.0 + warp * 0.9 + vec3(0.6, 0.3, 0.9), lodM + 1.0).g - 0.478) / 0.115;
-    float c2 = (textureLod(tNoise, q.zxy * 61.0 + warp * 1.7 + vec3(0.2, 0.9, 0.4), lod2 + 1.0).g - 0.478) / 0.115;
+    float c1 = (textureLod(tNoise, q * 27.0 + warp * 0.9 + vec3(0.6, 0.3, 0.9), lodM).g - 0.478) / 0.115;
+    float c2 = (textureLod(tNoise, q.zxy * 61.0 + warp * 1.7 + vec3(0.2, 0.9, 0.4), lod2).g - 0.478) / 0.115;
     float z1 = 0.8 * c1 + 0.45 * c2 * (1.0 - smoothstep(0.0, 1.5, lod2));
     // (And clusters ~90 km across, seen from far out: from thousands of km the finer cells are
     // below a pixel, and without these the map's own 40 km texels would be all there is: a blur.)
@@ -260,7 +273,7 @@ const CLOUD_GLSL = /* glsl */ `
     float maskK = detail * mix(0.85, 0.55, smoothstep(0.6, 0.95, a.w));
     // (Edges crisp close up, softer once the finest breakup is below a pixel: from far off a
     // cloud field's edge frays over many pixels, not a cut line.)
-    float edge = mix(0.08, 0.26, 1.0 - fine);
+    float edge = mix(0.06, 0.13, 1.0 - fine);
     float cov = mix(ax, smoothstep(u - edge, u + edge, ax), maskK) * smoothstep(0.015, 0.08, a.x);
     gRelief = clamp(0.5 * z1 * meso + 0.3 * c0 * fade0, -1.0, 1.0);
     float base = a.z * 4000.0;
@@ -271,8 +284,7 @@ const CLOUD_GLSL = /* glsl */ `
       float tw = clamp((textureLod(tNoise, q * 330.0 + vec3(0.3, 0.7, 0.1), noiseLod(t, uRc / 330.0)).r - 0.58) / 0.17, 0.0, 1.0);
       top = mix(top, base + (top - base) * (0.25 + 0.75 * tw), conv);
     }
-    // (Cells in broken weather: less of each field filled.)
-    return vec4(cov * (1.0 - 0.4 * a.w), base, top, b.w);
+    return vec4(cov, base, top, b.w);
   }
 
   // Cloud density 0..1 at p (relative to the Earth's centre), in weather w (see weatherFine),
@@ -290,24 +302,64 @@ const CLOUD_GLSL = /* glsl */ `
     // Cumulus cells ~2 km across, or broad sheets ~15 km; the light samples take the nearer kind.
     // (Two copies at unrelated scales and turned: the noise's 7 km repeat would show from orbit as
     // a lattice.)
-    vec3 pr = vec3(0.6 * p.x + 0.8 * p.z, p.y, -0.8 * p.x + 0.6 * p.z);
-    float small = 0.5 * (textureLod(tNoise, p / 7000.0 + uDrift * 40.0, noiseLod(t, 7000.0)).r
-                       + textureLod(tNoise, pr / 11300.0 + vec3(0.31, 0.57, 0.12) + uDrift * 25.0, noiseLod(t, 11300.0)).r);
+    // (The cells barely change with height: each cumulus one column from its flat base to its
+    // top (the profile above rounds it off, the detail below roughens it), as they are, not a
+    // stack of separate slices, which seen through would cover far more of the sky than the cover
+    // says, and look like it. Not stretched part way: the noise's texel layers, magnified, would
+    // show as terraces.)
+    vec3 pc = p - p * ((length(p) - uRc) * 0.92 / length(p));
+    vec3 pr = vec3(0.6 * pc.x + 0.8 * pc.z, pc.y, -0.8 * pc.x + 0.6 * pc.z);
+    vec3 pr0 = vec3(0.6 * p.x + 0.8 * p.z, p.y, -0.8 * p.x + 0.6 * p.z);
+    // (No finer than the march's steps, as the detail below: a shape sampled every few of its
+    // own cells along the ray, from far off, combs into streaks.)
+    float l1 = noiseLod(max(t, gDetT), 7000.0);
+    float l2 = noiseLod(max(t, gDetT), 11300.0);
+    float small = 0.5 * (textureLod(tNoise, pc / 7000.0 + uDrift * 40.0, l1).r
+                       + textureLod(tNoise, pr / 11300.0 + vec3(0.31, 0.57, 0.12) + uDrift * 25.0, l2).r);
     float shape = small;
-    if (detailed || w.w > 0.5) shape = mix(small, textureLod(tNoise, p / 30000.0 + vec3(0.7, 0.1, 0.4) + uDrift * 40.0, noiseLod(t, 30000.0)).r, w.w);
-    // (The noise's values bunch round 0.67: spread out, so light cover forms separate cells.)
-    shape = clamp((shape - 0.57) / 0.2, 0.0, 1.0);
-    // (Light cover is thin: you see through it.)
-    // (Soft-edged: a hard threshold aliases into crawling edges seen from far off.)
-    float dens = smoothstep(0.0, 1.0, (shape - (1.0 - base)) / max(base, 0.05)) * (0.3 + 0.7 * w.x);
-    // (Far off, the cells blur toward their average, which the shape's cutoff above would erase:
-    // there, an even density as thick as the cover, the same cloud on average.)
-    float avgK = smoothstep(1.0, 3.0, noiseLod(t, 7000.0));
-    dens = mix(dens, base * (0.3 + 0.7 * w.x) * 0.6, avgK);
-    if (detailed && dens > 0.0) {
-      float det = textureLod(tNoise, p / ${CLOUD_DETAIL_SCALE}.0 + uDrift * 40.0, noiseLod(t, ${CLOUD_DETAIL_SCALE}.0)).g;
-      dens = max(0.0, dens - det * 0.35 * (1.0 - dens));
+    float sd = 0.5 * length(vec2(noiseSd(l1), noiseSd(l2)));
+    if (detailed || w.w > 0.5) {
+      float l3 = noiseLod(t, 30000.0);
+      shape = mix(small, textureLod(tNoise, p / 30000.0 + vec3(0.7, 0.1, 0.4) + uDrift * 40.0, l3).r, w.w);
+      sd = length(vec2((1.0 - w.w) * sd, w.w * noiseSd(l3)));
     }
+    // (The noise's values bunch round 0.669, spread sd (less, the more its mips have averaged it
+    // from far off): spread evenly over 0..1 (its distribution's own curve, near enough), so the
+    // share of points over 1 - c is c, near or far: the clouds fill as much of the sky as the
+    // cover says, separate cells when it's light, still cells from far off, not a milky film.)
+    float u = 1.0 / (1.0 + exp(-1.75 * (shape - 0.669) / sd));
+    // (Light cover is thin: you see through it.)
+    // (Crisp-edged close up, as cumulus are; soft-edged far off, where a hard threshold would
+    // alias into crawling edges.)
+    // (u changes ~0.4 every 500 m: an edge a few screen pixels wide wherever it's seen from;
+    // uPixAng is the cloud pass's, two of them.)
+    float soft = mix(clamp(2.0 * t * uPixAng / 1250.0, 0.008, 0.05), 0.35, smoothstep(2.0, 4.0, l1));
+    // (The light samples see the cloud soft-edged: crisp, a step's shadow is all or nothing, and
+    // the shading breaks into facets.)
+    if (!detailed || gDetBias > 0.0) soft = max(soft, 0.12);
+    // (Close up, the cells' surfaces roughened by finer noise, billows on billows, a cumulus's
+    // cauliflower; a deck's top lumpier still, its cells.)
+    if (detailed) {
+      float dl = noiseLod(max(t, gDetT), ${CLOUD_DETAIL_SCALE}.0) + gDetBias;
+      float det = textureLod(tNoise, p / ${CLOUD_DETAIL_SCALE}.0 + uDrift * 40.0, dl).g;
+      u += mix(0.22, 0.11, smoothstep(0.3, 0.8, gBroken)) * (det - 0.478) / 0.12 * (1.0 - smoothstep(0.5, 2.5, dl));
+      // (And finer still, close up: wisps and knots a few tens of metres across.)
+      float dl2 = noiseLod(max(t, gDetT), 610.0) + gDetBias;
+      if (dl2 < 2.5) {
+        float det2 = textureLod(tNoise, pr0 / 610.0 + vec3(0.37, 0.11, 0.83) + uDrift * 60.0, dl2).g;
+        u += 0.06 * (det2 - 0.478) / 0.12 * (1.0 - smoothstep(0.5, 2.5, dl2));
+      }
+    }
+    // (Broken cumulus a little less than the cover: seen at a slant, their sides fill the gaps.)
+    float fill = mix(1.0, 0.8, smoothstep(0.3, 0.8, gBroken));
+    gMargin = u - (1.0 - fill * base);
+    float dens = smoothstep(0.0, 1.0, gMargin / soft) * (0.3 + 0.7 * w.x);
+    // (So far off the cells are a few pixels across or less: their average, an even density, as
+    // thick as lets through what the gaps between them would, the same cloud on average. (A
+    // broken field averaged as thick as its clouds would be one white sheet.))
+    float avgK = smoothstep(1.5, 3.0, l1);
+    float cAvg = clamp(fill * w.x, 0.0, 0.95);
+    dens = mix(dens, -log(1.0 - cAvg) / (SIGMA * 2.5 * max(w.z - w.y, 300.0)) * grad / 0.6, avgK);
     return dens;
   }
 
@@ -424,8 +476,86 @@ const CLOUD_GLSL = /* glsl */ `
     return vec4(S * alpha, 1.0 - alpha);
   }
 
-  // Returns (light, transmittance); tFirst: the clouds' distance along the ray.
-  vec4 clouds(vec3 ro, vec3 rd, float tEnd, out float tFirst) {
+  // How much sunlight reaches P (relative to the Earth's centre) through the low clouds above it,
+  // 0..1: their shadows on the ground and sea (and anything else under them). t: P's distance
+  // from the camera (the detail as seen from there).
+  float cloudShadow(vec3 P, float t) {
+    float r = length(P);
+    vec3 n = P / r;
+    float mus = dot(n, uSun);
+    if (mus < 0.03) return 1.0;
+    vec4 wa;
+    vec4 wb;
+    weatherMap(n, wa, wb);
+    if (wa.x < 0.015) return 1.0;
+    float base = wa.z * 4000.0;
+    float top = max(base + 200.0, wa.y * 16000.0);
+    float h = r - uRc;
+    if (h > top) return 1.0;
+    // Three samples up through the clouds' heights along the sun's ray (from where it enters them).
+    float h0 = max(h, base);
+    float dh = (top - h0) / 3.0;
+    float od = 0.0;
+    gDetT = 0.0;
+    for (int i = 0; i < 3; i++) {
+      float hs = h0 + (float(i) + 0.5) * dh;
+      vec3 q = P + uSun * ((hs - h) / mus);
+      vec3 up = normalize(q);
+      vec4 qa;
+      vec4 qb;
+      weatherMap(up, qa, qb);
+      vec4 w = weatherFine(up, qa, qb, t);
+      od += cloudDensity(q, w, false, t) * dh / mus;
+    }
+    // (Some light still gets through even a thick cloud's shadow: scattered down through it.)
+    return max(exp(-SIGMA * 2.5 * od), 0.2 * exp(-SIGMA * 0.3 * od));
+  }
+
+  // The march's density sample at distance t along a ray; w: the weather there. skip: how far
+  // on along the ray is surely clear of cloud (0 within the heights this weather has cloud at):
+  // the march leaps the clear air above, below and between the weather's clouds.
+  // (w, pw: the weather last worked out along this ray, and where: it changes over kilometres,
+  // so it's kept for samples within a kilometre of that, not worked out again for every one.)
+  float marchDensity(vec3 ro, vec3 rd, float t, inout vec4 w, inout vec3 pw, out float skip) {
+    vec3 p = ro + rd * t;
+    skip = 0.0;
+    gMargin = -1.0;
+    if (dot(p - pw, p - pw) < 1e6) return w.x < 0.02 ? 0.0 : cloudDensity(p, w, true, t);
+    pw = p;
+    vec3 up = normalize(p);
+    vec4 wa;
+    vec4 wb;
+    weatherMap(up, wa, wb);
+    float h = length(p) - uRc;
+    float muv = dot(rd, up);
+    // (Along the ray per metre across the ground.)
+    float side = 1.0 / max(sqrt(max(1.0 - muv * muv, 0.0)), 0.05);
+    float base = wa.z * 4000.0;
+    float top = max(base + 200.0, wa.y * 16000.0);
+    skip = 0.0;
+    if (wa.x < 0.015) skip = min(4000.0 * side, 20000.0);
+    else if (h > top + 30.0) skip = min(muv < 0.0 ? (h - top - 30.0) / -muv : 1e9, 2500.0 * side);
+    else if (h < base - 30.0) skip = min(muv > 0.0 ? (base - 30.0 - h) / muv : 1e9, 2500.0 * side);
+    if (skip > 0.0) {
+      w = vec4(0.0, base, top, wb.w);
+      pw = vec3(1e30);
+      return 0.0;
+    }
+    w = weatherFine(up, wa, wb, t / max(abs(muv), 0.15));
+    return cloudDensity(p, w, true, t);
+  }
+
+  // The march's step through clear air at distance t along a ray (mu: its slope, up = 1):
+  // growing with distance (4.5% of it: the clouds are smaller on screen), but never so long it
+  // could step over a cloud (150 m in height, 300 m across the ground, both more far off).
+  float clearStep(float t, float mu) {
+    float lim = min(150.0 / max(abs(mu), 0.01), 300.0 / max(sqrt(max(1.0 - mu * mu, 0.0)), 0.01));
+    return clamp(0.045 * t, 50.0, lim * max(1.0, t / 20000.0));
+  }
+
+  // Returns (light, transmittance); tFirst: the clouds' distance along the ray. jit: 0..1, this
+  // pixel's offset into the first step.
+  vec4 clouds(vec3 ro, vec3 rd, float tEnd, float jit, out float tFirst) {
     tFirst = 1e30;
     float mu = dot(rd, uSun);
     float tc;
@@ -449,88 +579,100 @@ const CLOUD_GLSL = /* glsl */ `
       float tA;
       float tB;
       bool inSlab = covMax > 0.015 && slab(ro, rd, uRc + lo, uRc + hi + 50.0, tEnd, tA, tB);
-      // From inside or below, a ray low over the horizon crosses tens of km of the layer: its
-      // steps would be longer than the clouds are wide, and which cloud each pixel's steps hit
-      // would be noise (stripes). There, the lit layer too.
-      if (inSlab && length(ro) <= uRc + hi + 50.0) far = max(far, smoothstep(800.0, 1800.0, (tB - tA) / 28.0));
-      // March only the heights this weather has cloud at.
+      // How far the march reached (beyond it, the lit layer).
+      float tMarch = 1e30;
       if (far < 0.99 && inSlab) {
-        const int NC = 28;
-        float rTop = uRc + hi + 50.0;
-        float rBase = uRc + lo;
-        // From above the clouds (orbit), sample on fixed-altitude shells through the layer: the
-        // samples stay put in the world as the camera moves (stepping along the ray from the
-        // camera, they'd slide through the clouds every frame and the edges would crawl).
-        // Inside or below the layer, step along the ray, each pixel offset a little into the step.
-        bool fromAbove = length(ro) > rTop;
-        // (Spacing 150 m, doubled as often as needed for tall towers to fit in NC shells.)
-        float SHELL_DH = 150.0 * exp2(max(0.0, ceil(log2((rTop - rBase) / (150.0 * float(NC))))));
-        float kTop = floor((rTop - uRc - SHELL_LO) / SHELL_DH);
-        // An offset into the step for each pixel, so the steps' edges don't line up from pixel to
-        // pixel as bands (and the composite smooths what's left of it). From above, fixed to the
-        // ground, not the screen: a hash of where the ray meets the clouds' top, on cells about
-        // a pixel across (a power of two in size, so they keep still as the camera moves).
-        // Inside or below the layer, per pixel on the screen.
-        float jit;
-        if (fromAbove) {
-          float tTop = hitSphere(ro, rd, rTop).x;
-          vec3 pt = ro + rd * tTop;
-          float cell = exp2(ceil(log2(max(tTop * uPixAng / max(abs(dot(rd, normalize(pt))), 0.2), 1.0))));
-          jit = hash13(floor(pt / cell));
-        } else {
-          jit = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
-        }
+        // One march for every view (from the ground, inside, just over the tops, from high up):
+        // through clear air in steps that grow with distance (see clearStep), leaping where the
+        // weather has no cloud. On meeting cloud, its surface is found between that sample and
+        // the last (halving), and the cloud sampled from there inward in quarter steps until
+        // clear again: every pixel samples a cloud at the same depths into its surface, so it
+        // shades smoothly, the same from frame to frame. (Samples at set distances from the
+        // camera cut a crisp edge or a flat base into contour rings, or with a random offset,
+        // into grain.)
         float phase = 0.55 + 1.6 * mix(cloudPhase(mu, 0.55), cloudPhase(mu, -0.25), 0.3);
         float T = 1.0;
         vec3 C = vec3(0.0);
         float tw = 0.0;
         float sw = 0.0;
-        float tPrev = tA;
-        if (fromAbove) tPrev = hitSphere(ro, rd, uRc + SHELL_LO + (kTop + 1.0 + jit) * SHELL_DH).x;
-        for (int i = 0; i < NC; i++) {
-          float t;
-          float dt;
-          if (fromAbove) {
-            // Altitudes on one fixed grid (every SHELL_DH), from just under this weather's tops
-            // down: the same heights for every ray and every frame.
-            float h = SHELL_LO + (kTop - float(i) + jit) * SHELL_DH;
-            if (uRc + h < rBase - SHELL_DH) break;
-            vec2 hs = hitSphere(ro, rd, uRc + h);
-            if (hs.x <= 0.0 || hs.x > 9e29 || hs.x > tB) break;
-            t = hs.x;
-            dt = max(t - tPrev, 1.0);
-            tPrev = t;
-          } else {
-            dt = (tB - tA) / float(NC);
-            t = tA + (float(i) + jit) * dt;
-          }
+        bool inCloud = false;
+        int clearRun = 0;
+        float tS = tA;
+        vec4 w = vec4(0.0);
+        vec3 pw = vec3(1e30);
+        float muA = dot(rd, normalize(ro + rd * tA));
+        float t = tA + jit * clearStep(tA, muA);
+        tMarch = tB;
+        for (int i = 0; i < 128; i++) {
+          if (t > tB) break;
           vec3 p = ro + rd * t;
-          vec3 up = normalize(p);
-          vec4 wa;
-          vec4 wb;
-          weatherMap(up, wa, wb);
-          vec4 w = weatherFine(up, wa, wb, t / max(abs(dot(rd, up)), 0.15));
-          float dens = cloudDensity(p, w, true, t);
-          if (dens <= 0.002) continue;
-          vec3 sunCol = sunAt(p);
-          if (sunCol.r + sunCol.g > 0.0) {
-            // Through the cloud above toward the sun (two samples), with a floor for the light
-            // scattered around inside it.
-            float od = cloudDensity(p + uSun * 180.0, w, false, t) * 180.0 + cloudDensity(p + uSun * 700.0, w, false, t) * 520.0;
-            sunCol *= max(exp(-SIGMA * od), 0.3 * exp(-SIGMA * 0.25 * od));
-          }
           float rp = length(p);
-          float hn = clamp((rp - uRc - w.y) / max(w.z - w.y, 100.0), 0.0, 1.0);
-          float day = smoothstep(-0.15, 0.1, dot(p, uSun) / rp);
-          vec3 sky = vec3(0.22, 0.3, 0.42) * (0.45 + 0.55 * hn) * day;
-          float powder = 1.0 - exp(-dens * 5.0);
-          vec3 S = uCloudSun * (sunCol * phase * (0.55 + 0.45 * powder) + sky);
-          float a = 1.0 - exp(-SIGMA * dens * dt);
-          C += T * a * S;
-          tw += t * T * a;
-          sw += T * a;
-          T *= 1.0 - a;
-          if (T < 0.02) break;
+          float muv = dot(rd, p) / rp;
+          float dIn = max(0.25 * clearStep(t, muv), 30.0);
+          gDetT = dIn / uPixAng;
+          float skip;
+          float dens = marchDensity(ro, rd, t, w, pw, skip);
+          if (dens > 0.002 && !inCloud) {
+            // Into cloud: its surface, between the last (clear) sample and this one.
+            float lo2 = tS;
+            float hi2 = t;
+            float sk;
+            for (int j = 0; j < 4; j++) {
+              float m = 0.5 * (lo2 + hi2);
+              if (marchDensity(ro, rd, m, w, pw, sk) > 0.002) hi2 = m;
+              else lo2 = m;
+            }
+            inCloud = true;
+            clearRun = 0;
+            tS = lo2;
+            t = lo2 + 0.5 * dIn;
+            continue;
+          }
+          if (inCloud) {
+            clearRun = dens > 0.002 ? 0 : clearRun + 1;
+            if (clearRun >= 4) inCloud = false;
+          }
+          if (dens > 0.002) {
+            vec3 sunCol = sunAt(p);
+            if (sunCol.r + sunCol.g > 0.0) {
+              // Through the cloud toward the sun (two samples: one close, with the fine detail,
+              // so each billow shades the next, the cauliflower; one farther, of the cloud seen
+              // softer-edged), with a floor for the light scattered around inside it.
+              gDetBias = 0.5;
+              float od = cloudDensity(p + uSun * 60.0, w, true, t) * 150.0;
+              gDetBias = 0.0;
+              od += cloudDensity(p + uSun * 400.0, w, false, t) * 500.0;
+              // (Light scattered on through the cloud: the shadowed side greys gradually, not black.)
+              sunCol *= max(max(exp(-SIGMA * od), 0.3 * exp(-SIGMA * 0.25 * od)), 0.12 * exp(-SIGMA * 0.06 * od));
+            }
+            float hn = clamp((rp - uRc - w.y) / max(w.z - w.y, 100.0), 0.0, 1.0);
+            float sunUp = dot(p, uSun) / rp;
+            float day = smoothstep(-0.15, 0.1, sunUp);
+            // Ambient light: the blue sky's from above (less of it in the creases and under the
+            // tops), and the sunlit ground and sea's, grey, from below (lighting the flat bases).
+            float odUp = cloudDensity(p + p * (300.0 / rp), w, false, t) * 300.0;
+            vec3 sky = mix(vec3(0.2, 0.21, 0.23) * (0.3 + 0.7 * max(sunUp, 0.0)), vec3(0.22, 0.3, 0.42), hn)
+                     * day * (0.35 + 0.65 * exp(-SIGMA * 0.5 * odUp));
+            float powder = 1.0 - exp(-dens * 5.0);
+            vec3 S = uCloudSun * (sunCol * phase * (0.55 + 0.45 * powder) + sky);
+            // (Cloud is optically thick: a few hundred metres of it hides what's behind, so its
+            // edges are sharp, not a fade.)
+            // (Thinned to a mist near the camera: flying through a cloud, the ship stays in view.)
+            // (Only the last couple of hundred metres: a cloud just under or beside the camera
+            // stays crisp.)
+            float nearK = smoothstep(20.0, 250.0, t);
+            float a = 1.0 - exp(-SIGMA * 2.5 * dens * dIn * nearK);
+            C += T * a * S;
+            tw += t * T * a;
+            sw += T * a;
+            T *= 1.0 - a;
+            if (T < 0.03) break;
+          }
+          tS = t;
+          // (Through clear air close to a cloud's edge, as through cloud: wisps there would be
+          // stepped over by one pixel and caught by the next, a stipple.)
+          t += inCloud ? dIn : gMargin > -0.1 ? 2.0 * dIn : max(clearStep(t, muv), skip);
+          tMarch = min(t, tB);
         }
         low = vec4(C, T);
         if (sw > 0.0) tLow = tw / sw;
@@ -540,6 +682,18 @@ const CLOUD_GLSL = /* glsl */ `
         vec4 lay = cloudLayer(ro, rd, tEnd, mu, tL);
         low = mix(low, lay, far);
         if (lay.a < 0.999) tLow = tLow < 1e29 ? mix(tLow, tL, far) : tL;
+      } else if (inSlab && tMarch < tB) {
+        // Beyond the march (low over the horizon, tens of km out): the lit layer, behind it.
+        // (Only so far out: a march that ran out of steps near, threading through many clouds,
+        // has gaps that show what's under them, not a flat layer's haze.)
+        float tL;
+        vec4 lay = cloudLayer(ro, rd, tEnd, mu, tL);
+        float k = smoothstep(0.85, 1.15, tL / tMarch) * smoothstep(15000.0, 30000.0, tMarch);
+        if (k > 0.0 && lay.a < 0.999) {
+          lay = mix(vec4(0.0, 0.0, 0.0, 1.0), lay, k);
+          low = vec4(low.rgb + low.a * lay.rgb, low.a * lay.a);
+          if (tLow > 1e29) tLow = tL;
+        }
       }
     }
     // Put the cirrus in front of or behind the lower clouds (it's above them).
@@ -587,6 +741,7 @@ const ATMO_COMMON = /* glsl */ `
   uniform float uRc;           // the clouds' ground radius: the equator's (see cloudFragment)
   uniform vec3 uPolar;         // the Earth's axis (world)
   uniform vec2 uProjOff;       // projection off-centre terms (elements 8, 9)
+  uniform float uFrame;        // frame count (the cloud pass's offsets move on every frame)
 
   const vec3 BR = vec3(5.8e-6, 13.5e-6, 33.1e-6); // Rayleigh scattering at sea level, 1/m
   const float BM = 7e-6;                          // Mie scattering at sea level, 1/m (a clear Gulf day)
@@ -637,7 +792,8 @@ const fragment = /* glsl */ `
   uniform sampler2D tColor;
   uniform sampler2D tCloudTex;   // the cloud pass: light and transmittance
   uniform sampler2D tCloudDist;  // and the clouds' distance, km
-  uniform vec2 uCloudTexel;      // its texel, uv
+  uniform vec2 uCloudTexel;      // the half-resolution pass's texel, uv
+  uniform float uLocalSun;       // the scene's sunlight already dimmed by cloud over the camera, 0..1
   varying vec2 vUv;
   ${ATMO_COMMON}
 
@@ -667,15 +823,18 @@ const fragment = /* glsl */ `
     // near-horizontal rays that run for 1000+ km.
     // Clouds in front of whatever is here: their light, what they let through, and how far away
     // they are (the air beyond them is hidden by them too).
-    // (Drawn at half resolution by the cloud pass; not over anything solid nearer than them.)
+    // (Drawn by the cloud pass, put together at full resolution over the last frames; not over
+    // anything solid nearer than them.)
     float tCloud = 1e30;
     vec4 cl = vec4(0.0, 0.0, 0.0, 1.0);
     if (uClouds > 0.5) {
-      // (Smoothed a little: a tent over ~3x3 of the half-resolution pass, four bilinear taps.)
+      vec4 c4 = texture2D(tCloudTex, vUv);
+      // (The clouds' distance from the half-resolution pass: the nearest of the four around, so
+      // at a cloud's edge it's the cloud's, not a blend with the sky's "none" behind it that
+      // changes from frame to frame, and the haze in front of the edge with it.)
       vec2 o = 0.5 * uCloudTexel;
-      vec4 c4 = 0.25 * (texture2D(tCloudTex, vUv + vec2(o.x, o.y)) + texture2D(tCloudTex, vUv + vec2(-o.x, o.y))
-                      + texture2D(tCloudTex, vUv + vec2(o.x, -o.y)) + texture2D(tCloudTex, vUv - o));
-      float tf = texture2D(tCloudDist, vUv).r * 1000.0;
+      float tf = 1000.0 * min(min(texture2D(tCloudDist, vUv + vec2(o.x, o.y)).r, texture2D(tCloudDist, vUv + vec2(-o.x, o.y)).r),
+                              min(texture2D(tCloudDist, vUv + vec2(o.x, -o.y)).r, texture2D(tCloudDist, vUv - o).r));
       if (c4.a < 0.999 && !(sceneDist < tf * 0.97)) {
         cl = c4;
         tCloud = tf;
@@ -728,6 +887,12 @@ const fragment = /* glsl */ `
     vec3 inscatter = uSunI * (sumR * BR * phaseR + sumM * BM * phaseM);
     vec3 trans = exp(-(BR * odR + BM * 1.1 * odM));
     if (!pastCloud) transToCloud = trans;
+    // The clouds' shadows on the scene (the sunlight it's lit by; less of it where the whole scene
+    // is dimmed already, the camera under an overcast).
+    if (!sky && uClouds > 0.5) {
+      float sh = 0.3 + 0.7 * texture2D(tCloudDist, vUv).g;
+      col.rgb *= clamp(sh / max(uLocalSun, 0.05), 0.0, 1.0);
+    }
     vec3 outc = col.rgb * trans * cl.a + cl.rgb * transToCloud + inscatter;
     // The sun's disk, reddened by the air in front of it (and hidden by cloud).
     // (No ground ahead: the ray misses it, or it's all behind the camera.)
@@ -745,7 +910,7 @@ const fragment = /* glsl */ `
     gl_FragColor = vec4(max(outc, vec3(0.0)), 1.0);
   }
 `;
-/** The cloud pass (half resolution): cloud light and transmittance, and their distance. */
+/** The cloud pass (half resolution, see resolveFragment): cloud light and transmittance, their distance and shadow. */
 const cloudVertex = /* glsl */ `
   out vec2 vUv;
   void main() {
@@ -758,12 +923,17 @@ const cloudFragment = /* glsl */ `
   layout(location = 0) out vec4 outCloud;
   layout(location = 1) out vec4 outDist;
   ${ATMO_COMMON}
+  uniform vec2 uSub;       // this frame's sub-pixel: which of each 2x2 block of screen pixels
+  uniform vec2 uFullSize;  // the screen's size, pixels
   void main() {
     vec3 ro;
     vec3 rd;
     float sceneDist;
     float mu;
-    viewRay(vUv, ro, rd, sceneDist, mu);
+    // (Drawn at half resolution, each pixel's ray through one of the four screen pixels it
+    // covers, a different one each frame: cloudResolve puts them together.)
+    vec2 uv = (2.0 * floor(gl_FragCoord.xy) + uSub + 0.5) / uFullSize;
+    viewRay(uv, ro, rd, sceneDist, mu);
     // The clouds sit on the ellipsoid, not a sphere (its radius varies 21 km from the equator to
     // the poles: a sphere of the radius under the camera would put clouds under the ground in
     // places). Stretched along the axis, the ellipsoid becomes a sphere of the equator's radius:
@@ -779,7 +949,10 @@ const cloudFragment = /* glsl */ `
     // and would cut low clouds off in a stipple.)
     float tEnd = tg.x > 0.0 ? (sceneDist < tg.x * 0.97 - 50.0 ? sceneDist : tg.x) : sceneDist;
     float tFirst = 1e30;
-    vec4 c = uClouds > 0.5 ? clouds(ro, rd, tEnd, tFirst) : vec4(0.0, 0.0, 0.0, 1.0);
+    // (Each pixel's offset into the march's first step: interleaved gradient noise, moved on
+    // every frame.)
+    float jit = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))) + 0.618034 * uFrame);
+    vec4 c = uClouds > 0.5 ? clouds(ro, rd, tEnd, jit, tFirst) : vec4(0.0, 0.0, 0.0, 1.0);
     tFirst /= k;
     tEnd /= k;
     outCloud = c;
@@ -787,11 +960,74 @@ const cloudFragment = /* glsl */ `
     // "none" value: the atmosphere pass reads this upscaled (blended between pixels), and a huge
     // value blended into a cloud edge would make the edge look farther than the ground behind it
     // and drop it, pixel by pixel, flickering as the view moves.
-    outDist = vec4(min(tFirst < 1e29 ? tFirst : tEnd, 6e7) / 1000.0, 0.0, 0.0, 1.0);
+    // (And in .g: the clouds' shadow on whatever the ray ends at, the ground or a vehicle.)
+    float shadow = uClouds > 0.5 && tEnd < 1e29 ? cloudShadow(ro + rd * (tEnd * k), tEnd * k) : 1.0;
+    outDist = vec4(min(tFirst < 1e29 ? tFirst : tEnd, 6e7) / 1000.0, shadow, 0.0, 1.0);
   }
 `;
 
 
+/**
+ * The clouds at full resolution from the half-resolution pass: each frame's samples are one of
+ * the four screen pixels of each 2x2 block (a different one each frame), so the last four frames
+ * hold them all. Kept in a history, moved with the camera (each pixel reprojected by its clouds'
+ * distance), and held to the range of this frame's samples around it (where the history is
+ * wrong, a solid moved, the view changed: this frame's, not a ghost).
+ */
+const resolveFragment = /* glsl */ `
+  in vec2 vUv;
+  layout(location = 0) out vec4 outColor;
+  uniform sampler2D tCur;      // this frame's samples (half resolution)
+  uniform sampler2D tCurDist;  // their distance, km
+  uniform sampler2D tHist;     // the history (full resolution)
+  uniform vec2 uSub;
+  uniform vec2 uFullSize;
+  uniform vec2 uHalfSize;
+  uniform float uHistOk;       // 0: no usable history (first frame, resized)
+  uniform vec2 uTanHalf;
+  uniform vec2 uProjOff;
+  uniform mat4 uCamWorld;
+  uniform vec3 uCamMove;       // the camera's move since the last frame (world, m)
+  uniform mat3 uPrevView;      // the last frame's world -> view rotation
+  uniform vec2 uPrevTanHalf;
+  uniform vec2 uPrevProjOff;
+
+  void main() {
+    ivec2 px = ivec2(gl_FragCoord.xy);
+    ivec2 h = px / 2;
+    ivec2 hMax = ivec2(uHalfSize) - 1;
+    vec4 here = texelFetch(tCur, min(h, hMax), 0);
+    bool fresh = all(equal(px - 2 * h, ivec2(uSub)));
+    // This frame's samples around: their range, and their blend at this pixel.
+    vec4 lo = here;
+    vec4 hi = here;
+    for (int j = -1; j <= 1; j++) {
+      for (int i = -1; i <= 1; i++) {
+        vec4 c = texelFetch(tCur, clamp(h + ivec2(i, j), ivec2(0), hMax), 0);
+        lo = min(lo, c);
+        hi = max(hi, c);
+      }
+    }
+    vec2 uvHalf = ((vec2(px) - uSub) * 0.5 + 0.5) / uHalfSize;
+    vec4 cur = texture(tCur, uvHalf);
+    // Where this pixel's clouds were on screen last frame.
+    vec2 uv = (vec2(px) + 0.5) / uFullSize;
+    vec3 viewDir = normalize(vec3((uv * 2.0 - 1.0 + uProjOff) * uTanHalf, -1.0));
+    vec3 rd = normalize((uCamWorld * vec4(viewDir, 0.0)).xyz);
+    float d = texture(tCurDist, uvHalf).r * 1000.0;
+    vec3 v = uPrevView * (rd * d + uCamMove);
+    vec2 uvPrev = ((v.xy / max(-v.z, 1e-6)) / uPrevTanHalf - uPrevProjOff) * 0.5 + 0.5;
+    bool ok = uHistOk > 0.5 && v.z < 0.0 && all(greaterThanEqual(uvPrev, vec2(0.0))) && all(lessThanEqual(uvPrev, vec2(1.0)));
+    if (!ok) {
+      outColor = fresh ? here : cur;
+      return;
+    }
+    vec4 hist = clamp(texture(tHist, uvPrev), lo, hi);
+    // (A pixel's new sample blended in, not swapped: each is a little noisy, the march's offsets
+    // moving on every frame; averaged over a few, they settle.)
+    outColor = fresh ? mix(hist, here, 0.3) : hist;
+  }
+`;
 
 export class SceneAtmospherePass extends Pass {
   readonly uniforms = {
@@ -810,6 +1046,7 @@ export class SceneAtmospherePass extends Pass {
     tCloudTex: FX_SHARED.tCloudTex,
     tCloudDist: FX_SHARED.tCloudDist,
     uCloudTexel: { value: new THREE.Vector2(1, 1) },
+    uLocalSun: { value: 1 },
     uClouds: FX_SHARED.uClouds,
     uFog: FX_SHARED.uFog,
     tWxA0: { value: null as THREE.Texture | null },
@@ -824,9 +1061,34 @@ export class SceneAtmospherePass extends Pass {
     uRc: { value: RE },
     uPolar: { value: new THREE.Vector3(0, 1, 0) },
     uProjOff: { value: new THREE.Vector2() },
+    uFrame: { value: 0 },
+    uSub: { value: new THREE.Vector2() },
+    uFullSize: { value: new THREE.Vector2(1, 1) },
   };
+  private resolveUniforms = {
+    tCur: { value: null as THREE.Texture | null },
+    tCurDist: { value: null as THREE.Texture | null },
+    tHist: { value: null as THREE.Texture | null },
+    uSub: this.uniforms.uSub,
+    uFullSize: this.uniforms.uFullSize,
+    uHalfSize: { value: new THREE.Vector2(1, 1) },
+    uHistOk: { value: 0 },
+    uTanHalf: this.uniforms.uTanHalf,
+    uProjOff: this.uniforms.uProjOff,
+    uCamWorld: this.uniforms.uCamWorld,
+    uCamMove: { value: new THREE.Vector3() },
+    uPrevView: { value: new THREE.Matrix3() },
+    uPrevTanHalf: { value: new THREE.Vector2(1, 1) },
+    uPrevProjOff: { value: new THREE.Vector2() },
+  };
+  private resolveQuad: FullScreenQuad;
+  /** The clouds at full resolution, two (this frame's and the last's, swapped each frame). */
+  private history = [0, 1].map(() => new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, depthBuffer: false }));
+  private frame = 0;
+  private prevCenter = new THREE.Vector3();
+  private histValid = false;
   private quad: FullScreenQuad;
-  /** Clouds at half resolution (they're soft): light + transmittance, and distance. */
+  /** Clouds at half resolution (see resolveFragment): light + transmittance, and distance. */
   private cloudQuad: FullScreenQuad;
   private cloudTarget = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, count: 2, depthBuffer: false });
   private clearColor = new THREE.Color();
@@ -859,6 +1121,22 @@ export class SceneAtmospherePass extends Pass {
         depthWrite: false,
       }),
     );
+    this.resolveQuad = new FullScreenQuad(
+      new THREE.ShaderMaterial({
+        vertexShader: cloudVertex,
+        fragmentShader: resolveFragment,
+        uniforms: this.resolveUniforms,
+        glslVersion: THREE.GLSL3,
+        depthTest: false,
+        depthWrite: false,
+      }),
+    );
+    for (const t of [this.cloudTarget, ...this.history]) {
+      for (const tex of t.textures) {
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+      }
+    }
     this.sceneTarget = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
     this.sceneTarget.depthTexture = new THREE.DepthTexture(1, 1, THREE.FloatType);
   }
@@ -866,7 +1144,11 @@ export class SceneAtmospherePass extends Pass {
   setSize(width: number, height: number): void {
     this.sceneTarget.setSize(width, height);
     this.cloudTarget.setSize(Math.max(1, Math.ceil(width / 2)), Math.max(1, Math.ceil(height / 2)));
+    for (const h of this.history) h.setSize(width, height);
+    this.uniforms.uFullSize.value.set(width, height);
+    this.resolveUniforms.uHalfSize.value.set(this.cloudTarget.width, this.cloudTarget.height);
     this.uniforms.uCloudTexel.value.set(1 / this.cloudTarget.width, 1 / this.cloudTarget.height);
+    this.histValid = false;
   }
 
   /**
@@ -910,11 +1192,32 @@ export class SceneAtmospherePass extends Pass {
     FX_SHARED.uScreen.value.set(writeBuffer.width, writeBuffer.height);
     if (this.uniforms.uClouds.value > 0.5) {
       const u = this.uniforms;
+      const r = this.resolveUniforms;
       u.uPixAng.value = (2 / pe[5]) / this.cloudTarget.height;
+      const f = this.frame++;
+      u.uFrame.value = f % 64;
+      u.uSub.value.set(...SUBPIXELS[f % 4]);
       renderer.setRenderTarget(this.cloudTarget);
       this.cloudQuad.render(renderer);
-      u.tCloudTex.value = this.cloudTarget.textures[0];
+      // Put together with the last frames, at full resolution.
+      const [prev, next] = f % 2 ? [this.history[0], this.history[1]] : [this.history[1], this.history[0]];
+      r.tCur.value = this.cloudTarget.textures[0];
+      r.tCurDist.value = this.cloudTarget.textures[1];
+      r.tHist.value = prev.texture;
+      r.uHistOk.value = this.histValid ? 1 : 0;
+      r.uCamMove.value.copy(this.prevCenter).sub(u.uCenter.value);
+      renderer.setRenderTarget(next);
+      this.resolveQuad.render(renderer);
+      u.tCloudTex.value = next.texture;
       u.tCloudDist.value = this.cloudTarget.textures[1];
+      // (This frame's view, for the next.)
+      this.prevCenter.copy(u.uCenter.value);
+      r.uPrevView.value.setFromMatrix4(cam.matrixWorld).transpose();
+      r.uPrevTanHalf.value.copy(u.uTanHalf.value);
+      r.uPrevProjOff.value.copy(u.uProjOff.value);
+      this.histValid = true;
+    } else {
+      this.histValid = false;
     }
     renderer.setRenderTarget(writeBuffer);
     this.quad.render(renderer);
@@ -971,6 +1274,8 @@ export class SceneAtmospherePass extends Pass {
     this.quad.dispose();
     this.cloudQuad.dispose();
     this.cloudTarget.dispose();
+    this.resolveQuad.dispose();
+    for (const h of this.history) h.dispose();
     this.sceneTarget.dispose();
   }
 }
