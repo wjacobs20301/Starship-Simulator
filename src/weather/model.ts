@@ -345,8 +345,9 @@ export class WeatherModel {
       case 'clear':
         return [sys({ kind: 'high', R: 1900e3, life: 7 * DAY, peak: 1, u: 3, v: 0 }, 0.45, -200e3, 450e3)];
       case 'partly':
-        // A day of fair-weather cumulus: a broad field of it, ragged-edged, drifting inland.
-        return [sys({ kind: 'cu', R: 900e3, life: 1.5 * DAY, peak: 1, u: -2, v: 0.5, ax: 1.4, ay: 1 }, 0.4, 80e3, -40e3)];
+        // A day of fair-weather cumulus over the coast: a field a few hundred km across, in
+        // clusters and streets, drifting inland; the global weather all round it.
+        return [sys({ kind: 'cu', R: 320e3, life: 1.5 * DAY, peak: 1, u: -2, v: 0.5, ax: 1.4, ay: 1 }, 0.4, 40e3, -20e3)];
       case 'overcast':
         return [sys({ kind: 'deck', R: 650e3, life: 1.6 * DAY, peak: 1, u: 2.5, v: 0.5, ax: 1.3, ay: 0.75 }, 0.4, -120e3 + 100e3 * r(), 60e3)];
       case 'fog':
@@ -731,8 +732,11 @@ export class WeatherModel {
         break;
       }
       case 'cu': {
-        const rho = Math.hypot(X / st.s.ax, Y / st.s.ay) + 0.25 * (tex - 1);
-        const c = smooth(1, 0.45, rho) * a;
+        const rho = Math.hypot(X / st.s.ax, Y / st.s.ay) + 0.35 * (tex - 1);
+        // Streets along the wind and clusters, clear lanes between (away from the middle).
+        const streets = 0.5 + 0.5 * nz.fbm(X * 2.2 + st.ox, Y * 7 + st.oy, 3.3, 2);
+        const patchy = 1 - smooth(0.2, 0.55, rho) * (1 - smooth(0.32, 0.62, streets));
+        const c = smooth(1, 0.5, rho) * patchy * a;
         add(c * 0.5, 800, 2300, 0.92, 0.12);
         break;
       }

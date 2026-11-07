@@ -179,6 +179,13 @@ const CLOUD_GLSL = /* glsl */ `
     b = mix(textureLod(tWxB0, uv, 0.0), textureLod(tWxB1, uv, 0.0), uWxBlend);
   }
 
+  // A hash of a point: 0..1.
+  float hash13(vec3 p) {
+    p = fract(p * 0.1031);
+    p += dot(p, p.zyx + 31.32);
+    return fract((p.x + p.y) * p.z);
+  }
+
   // Mip level for noise of period "scale" (m) seen from distance t: about one texel per pixel.
   float noiseLod(float t, float scale) {
     return max(0.0, log2(max(t, 1.0) * uPixAng * ${NOISE_SIZE}.0 / scale));
@@ -207,7 +214,12 @@ const CLOUD_GLSL = /* glsl */ `
     vec3 warp = textureLod(tNoise, q * 7.0 + vec3(0.1, 0.8, 0.5), noiseLod(t, uRc / 7.0) + 1.0).rgr - vec3(0.6, 0.45, 0.6);
     float c1 = (textureLod(tNoise, q * 27.0 + warp * 0.9 + vec3(0.6, 0.3, 0.9), lodM + 1.0).g - 0.478) / 0.115;
     float c2 = (textureLod(tNoise, q.zxy * 61.0 + warp * 1.7 + vec3(0.2, 0.9, 0.4), lod2 + 1.0).g - 0.478) / 0.115;
-    float z1 = 0.8 * c1 + 0.45 * c2 * (1.0 - smoothstep(-1.0, 1.0, lod2));
+    float z1 = 0.8 * c1 + 0.45 * c2 * (1.0 - smoothstep(0.0, 1.5, lod2));
+    // (And clusters ~90 km across, seen from far out: from thousands of km the finer cells are
+    // below a pixel, and without these the map's own 40 km texels would be all there is: a blur.)
+    float lod0 = noiseLod(t, uRc / 9.0);
+    float c0 = (textureLod(tNoise, q.yzx * 9.0 + warp * 0.35 + vec3(0.45, 0.15, 0.7), lod0 + 0.5).g - 0.478) / 0.115;
+    float fade0 = 1.0 - smoothstep(1.0, 2.5, lod0);
     z1 = mix(z1, -z1, smoothstep(0.45, 0.85, a.w));
     float z2 = (textureLod(tNoise, q * 120.0 + vec3(0.2, 0.4, 0.6), noiseLod(t, uRc / 120.0)).r - 0.67) / 0.065;
     // Mesoscale cells (tens of km: open / closed cells, cloud clusters) where the map says the
@@ -217,11 +229,40 @@ const CLOUD_GLSL = /* glsl */ `
     float ampM = mix(0.45, 1.6, max(b.w, 0.75 * smoothstep(0.6, 0.95, a.w)));
     float ampF = mix(0.5, 2.6, a.w);
     // (The mesoscale fades too once its cells shrink to a few pixels: the whole Earth in view.)
-    float meso = 1.0 - smoothstep(-0.5, 1.5, noiseLod(t, uRc / 27.0));
-    float v = a.x + 0.13 * ampM * z1 * meso + 0.07 * ampF * z2 * fine;
-    float soft = 0.05 + 0.12 * ampF * (1.0 - fine) + 0.14 * ampM * (1.0 - meso);
-    gRelief = clamp(0.5 * z1 * meso, -1.0, 1.0);
-    float cov = smoothstep(0.5 - soft, 0.5 + soft, v) * smoothstep(0.015, 0.08, a.x);
+    // (Kept until its cells are ~2 pixels across.)
+    float meso = 1.0 - smoothstep(1.0, 2.5, lodM);
+    // (Solid sheets, the fronts' and lows' shields and decks: whole inside, the cells only
+    // roughening their edges and their tops. Broken weather is broken all through.)
+    float solid = smoothstep(0.7, 0.97, a.x) * (1.0 - smoothstep(0.3, 0.7, a.w));
+    float brk = 1.0 - 0.8 * solid;
+    // From so far out that even the clusters are under a pixel (the whole Earth in view): the
+    // map's middling cover sharpened toward clear sea or cloud (as cloud is, at that scale: an
+    // even mid-grey everywhere would wash the whole planet out).
+    float farK = 1.0 - fade0;
+    float ax = mix(a.x, smoothstep(0.2, 0.8, a.x), 0.8 * farK);
+    // The breakup: cells at each scale, each as strong as the weather is broken and as it still
+    // shows from here (sd: how much of it is left to see).
+    float brkN = brk * (0.13 * ampM * z1 * meso + 0.08 * c0 * fade0) + 0.07 * ampF * z2 * fine;
+    float sd = length(vec3(brk * 0.13 * ampM * meso, brk * 0.08 * fade0, 0.07 * ampF * fine));
+    // Cloud where the breakup, spread evenly over 0..1, is under the map's cover: the share
+    // covered is the map's cover, whether that's 10% or 90% (a fixed threshold would leave thin
+    // cover with next to nothing and fill thick cover solid). Where little of the breakup is left
+    // to see (far off, or a solid sheet), the cover as it is, averaged.
+    float y = 1.1 * brkN / max(sd, 1e-3);
+    // (Squeezed toward the middle for stratiform cloud: there the map's own large-scale cover
+    // shows through as whole decks and clear sky, as layer cloud is at that scale; broken cumulus
+    // keeps nearly its whole share, thin as it is.)
+    float spread = mix(0.55, 0.92, smoothstep(0.55, 0.9, a.w));
+    float u = 0.5 + 0.5 * spread * y / sqrt(1.0 + y * y);
+    float detail = smoothstep(0.02, 0.1, sd);
+    // (Broken cumulus: the clouds themselves far smaller than these cells, so only partly a mask:
+    // the cells organize a film of it rather than cutting it into flakes.)
+    float maskK = detail * mix(0.85, 0.55, smoothstep(0.6, 0.95, a.w));
+    // (Edges crisp close up, softer once the finest breakup is below a pixel: from far off a
+    // cloud field's edge frays over many pixels, not a cut line.)
+    float edge = mix(0.08, 0.26, 1.0 - fine);
+    float cov = mix(ax, smoothstep(u - edge, u + edge, ax), maskK) * smoothstep(0.015, 0.08, a.x);
+    gRelief = clamp(0.5 * z1 * meso + 0.3 * c0 * fade0, -1.0, 1.0);
     float base = a.z * 4000.0;
     float top = max(base + 200.0, a.y * 16000.0);
     // Towers: in broken, deep weather each column reaches its own height.
@@ -259,6 +300,10 @@ const CLOUD_GLSL = /* glsl */ `
     // (Light cover is thin: you see through it.)
     // (Soft-edged: a hard threshold aliases into crawling edges seen from far off.)
     float dens = smoothstep(0.0, 1.0, (shape - (1.0 - base)) / max(base, 0.05)) * (0.3 + 0.7 * w.x);
+    // (Far off, the cells blur toward their average, which the shape's cutoff above would erase:
+    // there, an even density as thick as the cover, the same cloud on average.)
+    float avgK = smoothstep(1.0, 3.0, noiseLod(t, 7000.0));
+    dens = mix(dens, base * (0.3 + 0.7 * w.x) * 0.6, avgK);
     if (detailed && dens > 0.0) {
       float det = textureLod(tNoise, p / ${CLOUD_DETAIL_SCALE}.0 + uDrift * 40.0, noiseLod(t, ${CLOUD_DETAIL_SCALE}.0)).g;
       dens = max(0.0, dens - det * 0.35 * (1.0 - dens));
@@ -327,6 +372,9 @@ const CLOUD_GLSL = /* glsl */ `
     return vec4(col * a, a);
   }
 
+  // How thick (deep) the clouds in weather w are, 0..1.
+  float thickW(vec4 w) { return smoothstep(400.0, 6000.0, w.z - w.y); }
+
   // The clouds as a layer (seen from far off): where the ray crosses the clouds' middle height
   // there, their cover and thickness give how opaque, lit like the march lights a cloud top.
   // Returns (light, transmittance); tHit: its distance.
@@ -357,7 +405,9 @@ const CLOUD_GLSL = /* glsl */ `
     // obliquely; seen edge-on, clouds hide the gaps between them).
     float cov = 1.0 - pow(1.0 - clamp(w.x / 0.85, 0.0, 1.0), 0.6 + 0.4 * cosv);
     float od = SIGMA * 0.45 * (w.z - w.y) * 0.7 / cosv;
-    float alpha = cov * (1.0 - exp(-od));
+    // (Broken cumulus from far off: small clouds with sea between them even inside the share
+    // "covered", and thin: a film over the sea, as from orbit, not a white sheet.)
+    float alpha = cov * (1.0 - exp(-od)) * (1.0 - (r0 > uRc + mid ? 0.45 : 0.0) * smoothstep(0.6, 0.95, a.w) * (1.0 - thickW(w)));
     vec3 p = ro + rd * t;
     vec3 sunCol = sunAt(p + n * (w.z - mid));
     float phase = 0.55 + 1.6 * mix(cloudPhase(mu, 0.55), cloudPhase(mu, -0.25), 0.3);
@@ -398,8 +448,13 @@ const CLOUD_GLSL = /* glsl */ `
       float hi = max(max(aA.y, aB.y), aM.y) * 16000.0;
       float tA;
       float tB;
+      bool inSlab = covMax > 0.015 && slab(ro, rd, uRc + lo, uRc + hi + 50.0, tEnd, tA, tB);
+      // From inside or below, a ray low over the horizon crosses tens of km of the layer: its
+      // steps would be longer than the clouds are wide, and which cloud each pixel's steps hit
+      // would be noise (stripes). There, the lit layer too.
+      if (inSlab && length(ro) <= uRc + hi + 50.0) far = max(far, smoothstep(800.0, 1800.0, (tB - tA) / 28.0));
       // March only the heights this weather has cloud at.
-      if (far < 0.99 && covMax > 0.015 && slab(ro, rd, uRc + lo, uRc + hi + 50.0, tEnd, tA, tB)) {
+      if (far < 0.99 && inSlab) {
         const int NC = 28;
         float rTop = uRc + hi + 50.0;
         float rBase = uRc + lo;
@@ -411,22 +466,34 @@ const CLOUD_GLSL = /* glsl */ `
         // (Spacing 150 m, doubled as often as needed for tall towers to fit in NC shells.)
         float SHELL_DH = 150.0 * exp2(max(0.0, ceil(log2((rTop - rBase) / (150.0 * float(NC))))));
         float kTop = floor((rTop - uRc - SHELL_LO) / SHELL_DH);
-        // (From above: the shells' middles, steady. Else a fixed offset per pixel into the step.)
-        float jit = fromAbove ? 0.5 : fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+        // An offset into the step for each pixel, so the steps' edges don't line up from pixel to
+        // pixel as bands (and the composite smooths what's left of it). From above, fixed to the
+        // ground, not the screen: a hash of where the ray meets the clouds' top, on cells about
+        // a pixel across (a power of two in size, so they keep still as the camera moves).
+        // Inside or below the layer, per pixel on the screen.
+        float jit;
+        if (fromAbove) {
+          float tTop = hitSphere(ro, rd, rTop).x;
+          vec3 pt = ro + rd * tTop;
+          float cell = exp2(ceil(log2(max(tTop * uPixAng / max(abs(dot(rd, normalize(pt))), 0.2), 1.0))));
+          jit = hash13(floor(pt / cell));
+        } else {
+          jit = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+        }
         float phase = 0.55 + 1.6 * mix(cloudPhase(mu, 0.55), cloudPhase(mu, -0.25), 0.3);
         float T = 1.0;
         vec3 C = vec3(0.0);
         float tw = 0.0;
         float sw = 0.0;
         float tPrev = tA;
-        if (fromAbove) tPrev = hitSphere(ro, rd, uRc + SHELL_LO + (kTop + 1.0) * SHELL_DH).x;
+        if (fromAbove) tPrev = hitSphere(ro, rd, uRc + SHELL_LO + (kTop + 1.0 + jit) * SHELL_DH).x;
         for (int i = 0; i < NC; i++) {
           float t;
           float dt;
           if (fromAbove) {
             // Altitudes on one fixed grid (every SHELL_DH), from just under this weather's tops
             // down: the same heights for every ray and every frame.
-            float h = SHELL_LO + (kTop - float(i) + 0.5) * SHELL_DH;
+            float h = SHELL_LO + (kTop - float(i) + jit) * SHELL_DH;
             if (uRc + h < rBase - SHELL_DH) break;
             vec2 hs = hitSphere(ro, rd, uRc + h);
             if (hs.x <= 0.0 || hs.x > 9e29 || hs.x > tB) break;
@@ -570,6 +637,7 @@ const fragment = /* glsl */ `
   uniform sampler2D tColor;
   uniform sampler2D tCloudTex;   // the cloud pass: light and transmittance
   uniform sampler2D tCloudDist;  // and the clouds' distance, km
+  uniform vec2 uCloudTexel;      // its texel, uv
   varying vec2 vUv;
   ${ATMO_COMMON}
 
@@ -603,7 +671,10 @@ const fragment = /* glsl */ `
     float tCloud = 1e30;
     vec4 cl = vec4(0.0, 0.0, 0.0, 1.0);
     if (uClouds > 0.5) {
-      vec4 c4 = texture2D(tCloudTex, vUv);
+      // (Smoothed a little: a tent over ~3x3 of the half-resolution pass, four bilinear taps.)
+      vec2 o = 0.5 * uCloudTexel;
+      vec4 c4 = 0.25 * (texture2D(tCloudTex, vUv + vec2(o.x, o.y)) + texture2D(tCloudTex, vUv + vec2(-o.x, o.y))
+                      + texture2D(tCloudTex, vUv + vec2(o.x, -o.y)) + texture2D(tCloudTex, vUv - o));
       float tf = texture2D(tCloudDist, vUv).r * 1000.0;
       if (c4.a < 0.999 && !(sceneDist < tf * 0.97)) {
         cl = c4;
@@ -738,6 +809,7 @@ export class SceneAtmospherePass extends Pass {
     tNoise: { value: null as THREE.Texture | null },
     tCloudTex: FX_SHARED.tCloudTex,
     tCloudDist: FX_SHARED.tCloudDist,
+    uCloudTexel: { value: new THREE.Vector2(1, 1) },
     uClouds: FX_SHARED.uClouds,
     uFog: FX_SHARED.uFog,
     tWxA0: { value: null as THREE.Texture | null },
@@ -794,6 +866,7 @@ export class SceneAtmospherePass extends Pass {
   setSize(width: number, height: number): void {
     this.sceneTarget.setSize(width, height);
     this.cloudTarget.setSize(Math.max(1, Math.ceil(width / 2)), Math.max(1, Math.ceil(height / 2)));
+    this.uniforms.uCloudTexel.value.set(1 / this.cloudTarget.width, 1 / this.cloudTarget.height);
   }
 
   /**
