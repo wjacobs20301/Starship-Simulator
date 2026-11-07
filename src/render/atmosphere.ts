@@ -11,6 +11,7 @@
 import * as THREE from 'three';
 import { FullScreenQuad, Pass } from 'three/examples/jsm/postprocessing/Pass.js';
 import { NOISE_SIZE } from './cloudNoise';
+import { RE, RP } from '../sim/constants';
 
 export const FX_LAYER = 1;
 
@@ -27,15 +28,14 @@ export const FX_SHARED = {
   uCamWorld: { value: new THREE.Matrix4() },
   uCenter: { value: new THREE.Vector3() },
   uRg: { value: 6371e3 },
-  uLocalDir: { value: new THREE.Vector3(0, 1, 0) },
-  uLocalR: { value: new THREE.Vector2(0.99889, 0.99972) },
   uFog: { value: 0 },
 };
 
 /**
- * Ground fog around Starbase: extinction FOG_K (1/m) at the ground, thinning with height
- * (scale FOG_H), faded out beyond the local weather's radius. Optical depth along a ray from ro
- * (relative to the Earth's centre) over distance t (flat ground: fine over tens of km).
+ * Ground fog where the camera is (uFog, from the weather there): extinction FOG_K (1/m) at the
+ * ground, thinning with height (scale FOG_H). Optical depth along a ray from ro (relative to the
+ * Earth's centre) over distance t (flat ground: fine over tens of km). Fog banks seen from afar
+ * are drawn by the clouds (the weather map has them as cloud at the ground).
  */
 const FOG_GLSL = /* glsl */ `
   float fogDepth(vec3 ro, vec3 rd, float t) {
@@ -47,8 +47,7 @@ const FOG_GLSL = /* glsl */ `
     float a = dot(rd, up);
     float hEnd = max(hc + a * t, 0.0);
     float od = abs(a) < 1e-4 ? t * exp(-hc / FOG_H) : FOG_H / a * (exp(-hc / FOG_H) - exp(-hEnd / FOG_H));
-    float w = max(smoothstep(uLocalR.x, uLocalR.y, dot(up, uLocalDir)), smoothstep(uLocalR.x, uLocalR.y, dot(normalize(ro + rd * min(t, 3e5)), uLocalDir)));
-    return uFog * FOG_K * max(od, 0.0) * w;
+    return uFog * FOG_K * max(od, 0.0);
   }
 `;
 
@@ -61,8 +60,6 @@ const FX_OCCLUSION_GLSL = /* glsl */ `
   uniform mat4 uCamWorld;
   uniform vec3 uCenter;
   uniform float uRg;
-  uniform vec3 uLocalDir;
-  uniform vec2 uLocalR;
   uniform float uFog;
   varying vec3 vFxView;
   ${FOG_GLSL}
@@ -150,74 +147,36 @@ function sunDepthTable(): THREE.DataTexture {
 }
 
 /**
- * The cloud layer's bounds above the ground (m): no cloud below or above. Within them the base
- * and top vary with the weather (weatherAt). The noise's scales, m.
+ * The cloud layer's bounds above the ground (m): no cloud below or above (fog is cloud at the
+ * ground; storm tops reach ~15 km). Within them the base and top vary with the weather map.
  */
-export const CLOUD_SHELL_LO = 500;
-export const CLOUD_SHELL_HI = 12000;
-export const CLOUD_SHAPE_SCALE = 12000;
+export const CLOUD_SHELL_LO = 0;
+export const CLOUD_SHELL_HI = 16000;
 const CLOUD_DETAIL_SCALE = 2600;
 /** Cirrus: a thin sheet this high, m. */
 const CIRRUS_ALT = 10000;
 
 /**
- * Clouds over the whole planet, marched per pixel:
- *  - weather systems: cloud cover from domain-warped noise (swirled, not blobby), wetter at the
- *    equator and in the storm tracks of the mid-latitudes, clear over much of the subtropics;
- *  - the base and top vary: shallow fair-weather cumulus in light cover, thick decks where it's
- *    heavy, and here and there storm towers reaching ~11 km;
- *  - cells shaped by the billow noise and frayed by the finer one;
- *  - thin streaky cirrus up at ~10 km;
- *  - lit by the sun through the air (reddening at sunset, dark on the night side) and through the
- *    cloud above each point, plus sky light.
- * weatherAt() must match weather.ts (the CPU uses it for rain and overcast lighting).
+ * Clouds over the whole planet, marched per pixel, from the weather map (weather.ts): where
+ * there's cloud, its base and top, sheet or broken cells, cirrus and anvils above. The map
+ * holds the weather systems and climate (weather/model.ts); the shader adds what it's too
+ * coarse for: the fields' ragged edges, cells, towers and wisps. Lit by the sun through the air
+ * (reddening at sunset, dark on the night side) and through the cloud above each point, plus
+ * sky light.
  */
 const CLOUD_GLSL = /* glsl */ `
   const float SHELL_LO = ${CLOUD_SHELL_LO}.0;
   const float SHELL_HI = ${CLOUD_SHELL_HI}.0;
   const float SIGMA = 0.02;
 
-  // The weather over a point on the globe (n: unit, from the Earth's centre), in two parts.
-  // The broad part (weatherBroad) changes over hundreds of km: a ray's clouds take it from where
-  // the ray enters and leaves the layer, interpolated. The fine part (weatherFine: the smallest
-  // scales, which set the edges of the cloud fields) is taken at each sample itself, so the edges
-  // are fixed on the ground: interpolated from far-apart points, they'd swim as the view moved.
-  // Broad: x = cover before the fine scales and the threshold, y = cloud base (m),
-  // z = where towers grow (0..1), w = the kind of cells; warp: the offset of the warped field.
-  vec4 weatherBroad(vec3 n, out vec3 warp) {
-    // The whole field is offset by uDrift: a new random weather map each flight, drifting slowly.
-    vec3 m = n + uDrift;
-    // Warped twice: large swirls, then curls and comma shapes within them (fronts, lows), not blobs.
-    vec3 w1 = vec3(
-      textureLod(tNoise, m * 1.1 + vec3(0.1, 0.2, 0.3), 0.0).r,
-      textureLod(tNoise, m * 1.1 + vec3(0.6, 0.9, 0.4), 0.0).r,
-      textureLod(tNoise, m * 1.1 + vec3(0.35, 0.05, 0.8), 0.0).r
-    );
-    vec3 q1 = m + (w1 - 0.5) * 0.7;
-    vec3 w2 = vec3(
-      textureLod(tNoise, q1 * 2.7 + vec3(0.8, 0.15, 0.55), 0.0).r,
-      textureLod(tNoise, q1 * 2.7 + vec3(0.25, 0.65, 0.05), 0.0).r,
-      textureLod(tNoise, q1 * 2.7 + vec3(0.45, 0.35, 0.95), 0.0).r
-    );
-    vec3 q = q1 + (w2 - 0.5) * 0.28;
-    warp = q - m;
-    // Three broad scales, from ocean-wide systems down to cloud fields a few hundred km across
-    // (a fourth, finer, in weatherFine).
-    float c = 0.4 * textureLod(tNoise, q * 1.9, 0.0).r
-            + 0.28 * textureLod(tNoise, q * 4.7 + vec3(0.4, 0.1, 0.7), 0.0).r
-            + 0.18 * textureLod(tNoise, q * 11.3 + vec3(0.2, 0.8, 0.5), 0.0).r;
-    float lat = asin(clamp(dot(n, uAxis), -1.0, 1.0)) * 57.29578;
-    float al = abs(lat);
-    float band = 0.42 + 0.3 * exp(-lat * lat / 80.0) - 0.26 * exp(-(al - 24.0) * (al - 24.0) / 90.0)
-               + 0.18 * exp(-(al - 55.0) * (al - 55.0) / 140.0) - 0.08 * exp(-(al - 78.0) * (al - 78.0) / 100.0);
-    // (Summed octaves bunch up round the middle: stretched back out. Latitude only nudges it:
-    // wetter tropics and storm tracks, drier subtropics.)
-    float pre = (c - 0.5) * 2.4 + 0.5 + (band - 0.45) * 0.45;
-    float conv = textureLod(tNoise, q * 9.0 + vec3(0.7, 0.3, 0.1), 0.0).g;
-    float base = 650.0 + 1000.0 * textureLod(tNoise, q * 4.0 + vec3(0.9, 0.5, 0.2), 0.0).r;
-    // What kind of cells: small puffy cumulus (0) to broad stratocumulus sheets (1), by region.
-    float kind = smoothstep(0.35, 0.65, textureLod(tNoise, q * 6.0 + vec3(0.15, 0.85, 0.35), 0.0).r);
-    return vec4(pre, base, conv, kind);
+  // The weather map (weather.ts, baked from weather/model.ts) at n (unit, from the Earth's
+  // centre, world axes): a = cover, top (/16 km), base (/4 km), broken; b = high cloud, rain, fog,
+  // cell size. Two bakes, blended by time.
+  void weatherMap(vec3 n, out vec4 a, out vec4 b) {
+    vec3 e = uWorldToEcef * n;
+    vec2 uv = vec2(atan(e.y, e.x) * 0.15915494 + 0.5, asin(clamp(e.z, -1.0, 1.0)) * 0.31830989 + 0.5);
+    a = mix(textureLod(tWxA0, uv, 0.0), textureLod(tWxA1, uv, 0.0), uWxBlend);
+    b = mix(textureLod(tWxB0, uv, 0.0), textureLod(tWxB1, uv, 0.0), uWxBlend);
   }
 
   // Mip level for noise of period "scale" (m) seen from distance t: about one texel per pixel.
@@ -225,47 +184,61 @@ const CLOUD_GLSL = /* glsl */ `
     return max(0.0, log2(max(t, 1.0) * uPixAng * ${NOISE_SIZE}.0 / scale));
   }
 
-  // Cover, base, top from the broad weather and a cover value.
-  vec4 weatherFrom(vec4 b, float cov) {
-    float depth = 350.0 + 3000.0 * cov * cov + 7000.0 * smoothstep(0.62, 0.85, b.z) * smoothstep(0.6, 0.9, cov);
-    return vec4(cov, b.y, min(b.y + depth, SHELL_HI - 200.0), b.w);
+  // The clouds over n from the map's weather (a, b) with the fine detail the map is too coarse
+  // for: x = cover 0..1, y = base (m), z = top (m), w = cell size. The map's cover is broken up
+  // by noise at ~60 and ~13 km (much more where the weather is broken cumulus than in a sheet),
+  // thresholded so the share covered follows the map. Convective clouds' tops vary from column to
+  // column (towers). t: seen from this far (m; the pixel's footprint on the layer, stretched when
+  // seen edge-on): from far off the finest scale is averaged, not sampled sparsely (pixel-sized
+  // fields would blink on and off as the view moved), and the threshold softens to match.
+  // (weatherFine's cell pattern there, -1..1: lumpier tops are lit unevenly, seen from far off.)
+  float gRelief = 0.0;
+  vec4 weatherFine(vec3 n, vec4 a, vec4 b, float t) {
+    gRelief = 0.0;
+    if (a.x < 0.015) return vec4(0.0, 0.0, 0.0, b.w);
+    vec3 q = n + uDrift;
+    float fine = 1.0 - smoothstep(-2.0, 0.0, log2(max(t, 1.0) * uPixAng * ${NOISE_SIZE}.0 * 120.0 / uRc));
+    // Mesoscale cells, as cloud seen from orbit organizes: closed cells (cloud cells parted by
+    // thin clear lines) in decks, open cells (rings of cloud round clear middles) in broken
+    // weather. Cellular noise, warped so no two cells are alike, at two scales.
+    // (A mip blurrier than one texel a pixel: the noise's own finer octaves would be grain.)
+    float lodM = noiseLod(t, uRc / 27.0);
+    float lod2 = noiseLod(t, uRc / 61.0);
+    vec3 warp = textureLod(tNoise, q * 7.0 + vec3(0.1, 0.8, 0.5), noiseLod(t, uRc / 7.0) + 1.0).rgr - vec3(0.6, 0.45, 0.6);
+    float c1 = (textureLod(tNoise, q * 27.0 + warp * 0.9 + vec3(0.6, 0.3, 0.9), lodM + 1.0).g - 0.478) / 0.115;
+    float c2 = (textureLod(tNoise, q.zxy * 61.0 + warp * 1.7 + vec3(0.2, 0.9, 0.4), lod2 + 1.0).g - 0.478) / 0.115;
+    float z1 = 0.8 * c1 + 0.45 * c2 * (1.0 - smoothstep(-1.0, 1.0, lod2));
+    z1 = mix(z1, -z1, smoothstep(0.45, 0.85, a.w));
+    float z2 = (textureLod(tNoise, q * 120.0 + vec3(0.2, 0.4, 0.6), noiseLod(t, uRc / 120.0)).r - 0.67) / 0.065;
+    // Mesoscale cells (tens of km: open / closed cells, cloud clusters) where the map says the
+    // cells are big; fine breakup (~13 km) where the weather is broken. (As the fine scale fades
+    // with distance, the threshold softens by as much: the share covered stays the same.)
+    // (Fair-weather cumulus too: it gathers in streets and clusters, not sprinkled evenly.)
+    float ampM = mix(0.45, 1.6, max(b.w, 0.75 * smoothstep(0.6, 0.95, a.w)));
+    float ampF = mix(0.5, 2.6, a.w);
+    // (The mesoscale fades too once its cells shrink to a few pixels: the whole Earth in view.)
+    float meso = 1.0 - smoothstep(-0.5, 1.5, noiseLod(t, uRc / 27.0));
+    float v = a.x + 0.13 * ampM * z1 * meso + 0.07 * ampF * z2 * fine;
+    float soft = 0.05 + 0.12 * ampF * (1.0 - fine) + 0.14 * ampM * (1.0 - meso);
+    gRelief = clamp(0.5 * z1 * meso, -1.0, 1.0);
+    float cov = smoothstep(0.5 - soft, 0.5 + soft, v) * smoothstep(0.015, 0.08, a.x);
+    float base = a.z * 4000.0;
+    float top = max(base + 200.0, a.y * 16000.0);
+    // Towers: in broken, deep weather each column reaches its own height.
+    float conv = smoothstep(3000.0, 7000.0, top - base) * smoothstep(0.15, 0.5, a.w);
+    if (conv > 0.0) {
+      float tw = clamp((textureLod(tNoise, q * 330.0 + vec3(0.3, 0.7, 0.1), noiseLod(t, uRc / 330.0)).r - 0.58) / 0.17, 0.0, 1.0);
+      top = mix(top, base + (top - base) * (0.25 + 0.75 * tw), conv);
+    }
+    // (Cells in broken weather: less of each field filled.)
+    return vec4(cov * (1.0 - 0.4 * a.w), base, top, b.w);
   }
 
-  // The full weather at n from its broad part: x = cloud cover 0..1, y = base (m), z = top (m),
-  // w = the kind of cells. (The finest scale breaks the masses up: fields ~80 km across.)
-  // t: seen from this far (m; over the pixel's footprint on the layer, stretched when seen
-  // edge-on); from far off the fine scales are averaged, not sampled sparsely
-  // (which makes the cloud fields' edges shimmer as the view moves).
-  vec4 weatherFine(vec3 n, vec4 b, vec3 warp, float t) {
-    vec3 q = n + uDrift + warp;
-    // (The finest scale fades out once its fields shrink to a pixel or so: thresholded into
-    // cover, pixel-sized fields blink on and off as the view moves. As it fades, the threshold
-    // widens by as much, so the average cover stays the same: where it would have broken thin
-    // cover into flecks there's a faint veil, not nothing, and no ring where the fade happens.)
-    float fine = 1.0 - smoothstep(-2.0, 0.0, log2(max(t, 1.0) * uPixAng * ${NOISE_SIZE}.0 * 120.0 / uRg));
-    float pre = b.x + 0.336 * textureLod(tNoise, q * 27.0 + vec3(0.6, 0.3, 0.9), noiseLod(t, uRg / 27.0)).g
-              + (textureLod(tNoise, q * 120.0 + vec3(0.2, 0.4, 0.6), noiseLod(t, uRg / 120.0)).r - 0.5) * 0.35 * fine;
-    float soft = 0.14 * (1.0 - fine);
-    return weatherFrom(b, smoothstep(0.85 - soft, 1.07 + soft, pre));
-  }
-
-  // The most the fine scales could make of the broad weather (for bounding the march).
-  vec4 weatherMost(vec4 b) {
-    return weatherFrom(b, smoothstep(0.85, 1.07, b.x + 0.336 + 0.175));
-  }
-
-  vec4 weatherAt(vec3 n) {
-    vec3 warp;
-    vec4 b = weatherBroad(n, warp);
-    return weatherFine(n, b, warp, 0.0);
-  }
-
-
-  // Cloud density 0..1 at p (relative to the Earth's centre), in weather w (see weatherAt),
+  // Cloud density 0..1 at p (relative to the Earth's centre), in weather w (see weatherFine),
   // seen from distance t.
   float cloudDensity(vec3 p, vec4 w, bool detailed, float t) {
     if (w.x < 0.02) return 0.0;
-    float h = length(p) - uRg;
+    float h = length(p) - uRc;
     float hn = (h - w.y) / max(w.z - w.y, 100.0);
     if (hn <= 0.0 || hn >= 1.0) return 0.0;
     // Flat bases, rounded tops.
@@ -274,9 +247,15 @@ const CLOUD_GLSL = /* glsl */ `
     if (base < 0.01) return 0.0;
     // Cells at two scales (different periods: no visible repeat); the light samples take one.
     // Cumulus cells ~2 km across, or broad sheets ~15 km; the light samples take the nearer kind.
-    float small = textureLod(tNoise, p / 7000.0 + uDrift * 40.0, noiseLod(t, 7000.0)).r;
+    // (Two copies at unrelated scales and turned: the noise's 7 km repeat would show from orbit as
+    // a lattice.)
+    vec3 pr = vec3(0.6 * p.x + 0.8 * p.z, p.y, -0.8 * p.x + 0.6 * p.z);
+    float small = 0.5 * (textureLod(tNoise, p / 7000.0 + uDrift * 40.0, noiseLod(t, 7000.0)).r
+                       + textureLod(tNoise, pr / 11300.0 + vec3(0.31, 0.57, 0.12) + uDrift * 25.0, noiseLod(t, 11300.0)).r);
     float shape = small;
     if (detailed || w.w > 0.5) shape = mix(small, textureLod(tNoise, p / 30000.0 + vec3(0.7, 0.1, 0.4) + uDrift * 40.0, noiseLod(t, 30000.0)).r, w.w);
+    // (The noise's values bunch round 0.67: spread out, so light cover forms separate cells.)
+    shape = clamp((shape - 0.57) / 0.2, 0.0, 1.0);
     // (Light cover is thin: you see through it.)
     // (Soft-edged: a hard threshold aliases into crawling edges seen from far off.)
     float dens = smoothstep(0.0, 1.0, (shape - (1.0 - base)) / max(base, 0.05)) * (0.3 + 0.7 * w.x);
@@ -308,29 +287,91 @@ const CLOUD_GLSL = /* glsl */ `
 
   // Sunlight reaching p: through the air (reddened, none in the Earth's shadow).
   vec3 sunAt(vec3 p) {
-    if (hitSphere(p, uSun, uRg).x > 0.0) return vec3(0.0);
+    if (hitSphere(p, uSun, uRc).x > 0.0) return vec3(0.0);
     float rp = length(p);
-    vec2 l = sunDepth(rp - uRg, dot(p, uSun) / rp);
+    vec2 l = sunDepth(rp - uRc, dot(p, uSun) / rp);
     return exp(-(BR * l.x + BM * 1.1 * l.y));
   }
 
   // Thin cirrus where the ray crosses CIRRUS_ALT: (light, opacity) and its distance.
   vec4 cirrus(vec3 ro, vec3 rd, float tEnd, float mu, out float tc) {
-    float rc = uRg + ${CIRRUS_ALT}.0;
+    float rc = uRc + ${CIRRUS_ALT}.0;
     vec2 h = hitSphere(ro, rd, rc);
     tc = length(ro) > rc ? h.x : h.y;
-    if (tc <= 0.0 || tc > tEnd || tc > 4e5) return vec4(0.0);
+    if (tc <= 0.0 || tc > tEnd) return vec4(0.0);
     vec3 p = ro + rd * tc;
     vec3 n = p / rc;
-    float cov = smoothstep(0.6, 0.85, texture(tNoise, n * 3.3 + vec3(0.5, 0.5, 0.1) + uDrift).r);
+    vec4 wa;
+    vec4 wb;
+    weatherMap(n, wa, wb);
+    float hc = wb.x;
+    float cov = smoothstep(0.12, 0.6, hc);
     if (cov < 0.01) return vec4(0.0);
     // Wisps: fibres drawn out along the wind, broken up by rounder noise, faint.
     vec3 q = vec3(p.x / 60000.0, p.y / 15000.0, p.z / 30000.0) + uDrift * 4.0;
     float fib = textureLod(tNoise, q, noiseLod(tc, 15000.0)).r * 0.6 + textureLod(tNoise, p / 9000.0 + uDrift * 7.0, noiseLod(tc, 9000.0)).g * 0.4;
-    float a = cov * smoothstep(0.5, 0.85, fib) * 0.18;
+    // (Dense anvils and hurricanes' canopies: thick and smooth, not wisps.)
+    float dense = smoothstep(0.55, 0.95, hc);
+    fib = mix(fib, 0.95, dense * 0.8);
+    float a = cov * smoothstep(0.5 - 0.3 * hc, 0.85, fib) * (0.2 + 0.55 * dense);
+    // From far off (the wisps far smaller than a pixel): their average, as a sheet of the same
+    // overall opacity, streaked along the jet at a scale a pixel still resolves.
+    float farC = smoothstep(1500.0, 3500.0, tc * uPixAng / max(abs(dot(rd, n)), 0.1));
+    if (farC > 0.0) {
+      float streak = textureLod(tNoise, vec3(p.x / 900000.0, p.y / 220000.0, p.z / 450000.0) + uDrift * 0.5, noiseLod(tc, 220000.0)).r;
+      float aFar = cov * mix(0.05 + 0.08 * hc, 0.65, dense) * smoothstep(0.5 - 0.3 * hc, 0.8, mix(streak, 0.9, dense * 0.8));
+      a = mix(a, aFar, farC);
+    }
     if (a < 0.005) return vec4(0.0);
     vec3 col = uCloudSun * (sunAt(p) * (0.7 + 1.2 * cloudPhase(mu, 0.7)) + vec3(0.2, 0.26, 0.36) * smoothstep(-0.15, 0.1, dot(n, uSun)));
     return vec4(col * a, a);
+  }
+
+  // The clouds as a layer (seen from far off): where the ray crosses the clouds' middle height
+  // there, their cover and thickness give how opaque, lit like the march lights a cloud top.
+  // Returns (light, transmittance); tHit: its distance.
+  vec4 cloudLayer(vec3 ro, vec3 rd, float tEnd, float mu, out float tHit) {
+    tHit = 1e30;
+    float r0 = length(ro);
+    vec2 h = hitSphere(ro, rd, uRc + 2000.0);
+    float t = r0 > uRc + 2000.0 ? h.x : h.y;
+    if (t <= 0.0 || t > tEnd) return vec4(0.0, 0.0, 0.0, 1.0);
+    vec3 n = normalize(ro + rd * t);
+    vec4 a;
+    vec4 b;
+    weatherMap(n, a, b);
+    if (a.x < 0.015) return vec4(0.0, 0.0, 0.0, 1.0);
+    // (Again at the clouds' own middle height.)
+    float mid = 0.5 * (a.z * 4000.0 + a.y * 16000.0);
+    h = hitSphere(ro, rd, uRc + mid);
+    float t2 = r0 > uRc + mid ? h.x : h.y;
+    if (t2 > 0.0 && t2 < tEnd) {
+      t = t2;
+      n = normalize(ro + rd * t);
+      weatherMap(n, a, b);
+    }
+    float cosv = max(abs(dot(rd, n)), 0.06);
+    vec4 w = weatherFine(n, a, b, t / cosv);
+    if (w.x < 0.005) return vec4(0.0, 0.0, 0.0, 1.0);
+    // The share of the pixel covered, each cloud as opaque as its depth through it (longer seen
+    // obliquely; seen edge-on, clouds hide the gaps between them).
+    float cov = 1.0 - pow(1.0 - clamp(w.x / 0.85, 0.0, 1.0), 0.6 + 0.4 * cosv);
+    float od = SIGMA * 0.45 * (w.z - w.y) * 0.7 / cosv;
+    float alpha = cov * (1.0 - exp(-od));
+    vec3 p = ro + rd * t;
+    vec3 sunCol = sunAt(p + n * (w.z - mid));
+    float phase = 0.55 + 1.6 * mix(cloudPhase(mu, 0.55), cloudPhase(mu, -0.25), 0.3);
+    float day = smoothstep(-0.15, 0.1, dot(n, uSun));
+    // (Seen from below, the sunlit side is above: darker.)
+    float below = r0 < uRc + mid ? 0.45 : 1.0;
+    vec3 sky = vec3(0.22, 0.3, 0.42) * 0.8 * day;
+    // (Thin, low cloud is greyer than the thick decks and towers: some light gets through it,
+    // and from far off it's a film over the dark sea, not a white sheet.)
+    float thick = smoothstep(400.0, 6000.0, w.z - w.y);
+    float relief = 1.0 + 0.12 * gRelief * (0.4 + 0.6 * (1.0 - abs(dot(n, uSun))));
+    vec3 S = uCloudSun * (sunCol * phase * 0.85 * below * (0.72 + 0.33 * thick) * relief + sky);
+    tHit = t;
+    return vec4(S * alpha, 1.0 - alpha);
   }
 
   // Returns (light, transmittance); tFirst: the clouds' distance along the ray.
@@ -343,21 +384,25 @@ const CLOUD_GLSL = /* glsl */ `
     float tLow = 1e30;
     float tA0;
     float tB0;
-    if (slab(ro, rd, uRg + SHELL_LO, uRg + SHELL_HI, tEnd, tA0, tB0)) {
-      vec3 warpA;
-      vec3 warpB;
-      vec4 bA = weatherBroad(normalize(ro + rd * tA0), warpA);
-      vec4 bB = weatherBroad(normalize(ro + rd * tB0), warpB);
-      // (Bounds for the march: the most cloud the fine scales could give.)
-      vec4 wA = weatherMost(bA);
-      vec4 wB = weatherMost(bB);
+    if (slab(ro, rd, uRc + SHELL_LO, uRc + SHELL_HI, tEnd, tA0, tB0)) {
+      // From far off (a pixel spans kilometres: the whole Earth, the horizon from orbit) the
+      // clouds are drawn as a lit layer; nearer, marched through; blended between.
+      float far = smoothstep(1500.0, 3500.0, max(tA0, 1.0) * uPixAng);
+      // (Bounds for the march: the weather where the ray enters, leaves and halfway between.)
+      vec4 aA, bA, aB, bB, aM, bM;
+      weatherMap(normalize(ro + rd * tA0), aA, bA);
+      weatherMap(normalize(ro + rd * tB0), aB, bB);
+      weatherMap(normalize(ro + rd * (0.5 * (tA0 + tB0))), aM, bM);
+      float covMax = max(max(aA.x, aB.x), aM.x);
+      float lo = min(min(aA.z, aB.z), aM.z) * 4000.0;
+      float hi = max(max(aA.y, aB.y), aM.y) * 16000.0;
       float tA;
       float tB;
       // March only the heights this weather has cloud at.
-      if (max(wA.x, wB.x) > 0.02 && slab(ro, rd, uRg + min(wA.y, wB.y), uRg + max(wA.z, wB.z) + 50.0, tEnd, tA, tB)) {
+      if (far < 0.99 && covMax > 0.015 && slab(ro, rd, uRc + lo, uRc + hi + 50.0, tEnd, tA, tB)) {
         const int NC = 28;
-        float rTop = uRg + max(wA.z, wB.z) + 50.0;
-        float rBase = uRg + min(wA.y, wB.y);
+        float rTop = uRc + hi + 50.0;
+        float rBase = uRc + lo;
         // From above the clouds (orbit), sample on fixed-altitude shells through the layer: the
         // samples stay put in the world as the camera moves (stepping along the ray from the
         // camera, they'd slide through the clouds every frame and the edges would crawl).
@@ -365,7 +410,7 @@ const CLOUD_GLSL = /* glsl */ `
         bool fromAbove = length(ro) > rTop;
         // (Spacing 150 m, doubled as often as needed for tall towers to fit in NC shells.)
         float SHELL_DH = 150.0 * exp2(max(0.0, ceil(log2((rTop - rBase) / (150.0 * float(NC))))));
-        float kTop = floor((rTop - uRg - SHELL_LO) / SHELL_DH);
+        float kTop = floor((rTop - uRc - SHELL_LO) / SHELL_DH);
         // (From above: the shells' middles, steady. Else a fixed offset per pixel into the step.)
         float jit = fromAbove ? 0.5 : fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
         float phase = 0.55 + 1.6 * mix(cloudPhase(mu, 0.55), cloudPhase(mu, -0.25), 0.3);
@@ -374,7 +419,7 @@ const CLOUD_GLSL = /* glsl */ `
         float tw = 0.0;
         float sw = 0.0;
         float tPrev = tA;
-        if (fromAbove) tPrev = hitSphere(ro, rd, uRg + SHELL_LO + (kTop + 1.0) * SHELL_DH).x;
+        if (fromAbove) tPrev = hitSphere(ro, rd, uRc + SHELL_LO + (kTop + 1.0) * SHELL_DH).x;
         for (int i = 0; i < NC; i++) {
           float t;
           float dt;
@@ -382,8 +427,8 @@ const CLOUD_GLSL = /* glsl */ `
             // Altitudes on one fixed grid (every SHELL_DH), from just under this weather's tops
             // down: the same heights for every ray and every frame.
             float h = SHELL_LO + (kTop - float(i) + 0.5) * SHELL_DH;
-            if (uRg + h < rBase - SHELL_DH) break;
-            vec2 hs = hitSphere(ro, rd, uRg + h);
+            if (uRc + h < rBase - SHELL_DH) break;
+            vec2 hs = hitSphere(ro, rd, uRc + h);
             if (hs.x <= 0.0 || hs.x > 9e29 || hs.x > tB) break;
             t = hs.x;
             dt = max(t - tPrev, 1.0);
@@ -393,9 +438,11 @@ const CLOUD_GLSL = /* glsl */ `
             t = tA + (float(i) + jit) * dt;
           }
           vec3 p = ro + rd * t;
-          float f = clamp((t - tA0) / max(1.0, tB0 - tA0), 0.0, 1.0);
           vec3 up = normalize(p);
-          vec4 w = weatherFine(up, mix(bA, bB, f), mix(warpA, warpB, f), t / max(abs(dot(rd, up)), 0.15));
+          vec4 wa;
+          vec4 wb;
+          weatherMap(up, wa, wb);
+          vec4 w = weatherFine(up, wa, wb, t / max(abs(dot(rd, up)), 0.15));
           float dens = cloudDensity(p, w, true, t);
           if (dens <= 0.002) continue;
           vec3 sunCol = sunAt(p);
@@ -406,7 +453,7 @@ const CLOUD_GLSL = /* glsl */ `
             sunCol *= max(exp(-SIGMA * od), 0.3 * exp(-SIGMA * 0.25 * od));
           }
           float rp = length(p);
-          float hn = clamp((rp - uRg - w.y) / max(w.z - w.y, 100.0), 0.0, 1.0);
+          float hn = clamp((rp - uRc - w.y) / max(w.z - w.y, 100.0), 0.0, 1.0);
           float day = smoothstep(-0.15, 0.1, dot(p, uSun) / rp);
           vec3 sky = vec3(0.22, 0.3, 0.42) * (0.45 + 0.55 * hn) * day;
           float powder = 1.0 - exp(-dens * 5.0);
@@ -420,6 +467,12 @@ const CLOUD_GLSL = /* glsl */ `
         }
         low = vec4(C, T);
         if (sw > 0.0) tLow = tw / sw;
+      }
+      if (far > 0.01) {
+        float tL;
+        vec4 lay = cloudLayer(ro, rd, tEnd, mu, tL);
+        low = mix(low, lay, far);
+        if (lay.a < 0.999) tLow = tLow < 1e29 ? mix(tLow, tL, far) : tL;
       }
     }
     // Put the cirrus in front of or behind the lower clouds (it's above them).
@@ -454,14 +507,18 @@ const ATMO_COMMON = /* glsl */ `
   // Clouds (weather.ts): the noise volume, and the weather.
   uniform highp sampler3D tNoise;
   uniform float uClouds;       // 0 = off
-  uniform vec3 uAxis;          // the Earth's axis (world)
-  uniform vec3 uLocalDir;      // Starbase, from the Earth's centre (world)
-  uniform vec2 uLocalR;        // cos of the local weather's outer / inner radius
-  uniform float uLocalCover;   // cloud cover set for Starbase (0..1), < 0: none set
-  uniform vec3 uDrift;         // the weather's slow drift (noise-space offset)
+  uniform sampler2D tWxA0;     // the weather map, two bakes (weather.ts)
+  uniform sampler2D tWxB0;
+  uniform sampler2D tWxA1;
+  uniform sampler2D tWxB1;
+  uniform float uWxBlend;      // between the two bakes
+  uniform mat3 uWorldToEcef;   // world -> Earth-fixed directions (the map's axes)
+  uniform vec3 uDrift;         // the fine detail's slow drift (noise-space offset)
   uniform float uCloudSun;     // brightness of sunlit cloud
-  uniform float uFog;          // ground fog around Starbase, 0..1
+  uniform float uFog;          // ground fog where the camera is, 0..1
   uniform float uPixAng;       // angle one cloud-pass pixel spans, rad
+  uniform float uRc;           // the clouds' ground radius: the equator's (see cloudFragment)
+  uniform vec3 uPolar;         // the Earth's axis (world)
   uniform vec2 uProjOff;       // projection off-centre terms (elements 8, 9)
 
   const vec3 BR = vec3(5.8e-6, 13.5e-6, 33.1e-6); // Rayleigh scattering at sea level, 1/m
@@ -636,10 +693,24 @@ const cloudFragment = /* glsl */ `
     float sceneDist;
     float mu;
     viewRay(vUv, ro, rd, sceneDist, mu);
-    vec2 tg = hitSphere(ro, rd, uRg);
-    float tEnd = tg.x > 0.0 ? min(sceneDist, tg.x) : sceneDist;
+    // The clouds sit on the ellipsoid, not a sphere (its radius varies 21 km from the equator to
+    // the poles: a sphere of the radius under the camera would put clouds under the ground in
+    // places). Stretched along the axis, the ellipsoid becomes a sphere of the equator's radius:
+    // march in that space (distances scale by k), where every height is measured right.
+    vec3 rdS = rd + uPolar * (dot(rd, uPolar) * ${(RE / RP - 1).toExponential(8)});
+    float k = length(rdS);
+    rd = rdS / k;
+    ro = ro + uPolar * (dot(ro, uPolar) * ${(RE / RP - 1).toExponential(8)});
+    sceneDist = sceneDist < 1e29 ? sceneDist * k : sceneDist;
+    vec2 tg = hitSphere(ro, rd, uRc);
+    // Up to the ground (the ellipsoid), or anything solid well in front of it. (Not the globe's
+    // own surface: its tiles are chords, sagging up to ~2 km below the ellipsoid from far off,
+    // and would cut low clouds off in a stipple.)
+    float tEnd = tg.x > 0.0 ? (sceneDist < tg.x * 0.97 - 50.0 ? sceneDist : tg.x) : sceneDist;
     float tFirst = 1e30;
     vec4 c = uClouds > 0.5 ? clouds(ro, rd, tEnd, tFirst) : vec4(0.0, 0.0, 0.0, 1.0);
+    tFirst /= k;
+    tEnd /= k;
     outCloud = c;
     // Where there's no cloud, store where the ray ends (the ground, or whatever's in front), not a
     // "none" value: the atmosphere pass reads this upscaled (blended between pixels), and a huge
@@ -669,13 +740,17 @@ export class SceneAtmospherePass extends Pass {
     tCloudDist: FX_SHARED.tCloudDist,
     uClouds: FX_SHARED.uClouds,
     uFog: FX_SHARED.uFog,
-    uAxis: { value: new THREE.Vector3(0, 1, 0) },
-    uLocalDir: FX_SHARED.uLocalDir,
-    uLocalR: FX_SHARED.uLocalR,
-    uLocalCover: { value: -1 },
+    tWxA0: { value: null as THREE.Texture | null },
+    tWxB0: { value: null as THREE.Texture | null },
+    tWxA1: { value: null as THREE.Texture | null },
+    tWxB1: { value: null as THREE.Texture | null },
+    uWxBlend: { value: 0 },
+    uWorldToEcef: { value: new THREE.Matrix3() },
     uDrift: { value: new THREE.Vector3() },
     uCloudSun: { value: 1.4 },
     uPixAng: { value: 0.001 },
+    uRc: { value: RE },
+    uPolar: { value: new THREE.Vector3(0, 1, 0) },
     uProjOff: { value: new THREE.Vector2() },
   };
   private quad: FullScreenQuad;

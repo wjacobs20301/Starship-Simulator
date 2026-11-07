@@ -1,11 +1,12 @@
 // Player-adjustable settings. A settings panel can call updateSettings(); anything that
 // depends on a setting subscribes with onSettingsChange(). Values persist per browser.
 
-/** Weather (clouds, rain, fog) is switched off for now: the settings for it are hidden. */
-export const WEATHER_AVAILABLE = false;
+/** Weather (clouds, rain, fog): on. (False hides its settings and turns it off.) */
+export const WEATHER_AVAILABLE = true;
 
 /** Weather over Starbase: as the global weather has it, or set. */
-export type StarbaseWeather = 'natural' | 'clear' | 'partly' | 'overcast' | 'rain' | 'fog';
+export type { SiteWeather as StarbaseWeather } from './weather/model';
+import type { SiteWeather as StarbaseWeather } from './weather/model';
 
 export interface Settings {
   /** Serial painted on the ship's side, e.g. "SN44". */

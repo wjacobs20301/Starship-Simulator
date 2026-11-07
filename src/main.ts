@@ -144,7 +144,7 @@ loadModels(world.renderer, (f) => (loadingBar.style.transform = `scaleX(${f})`))
     loadingBar.style.transform = 'scaleX(1)';
     loading.classList.add('done');
     setTimeout(() => loading.remove(), 1000);
-    if (import.meta.env.DEV) Object.assign(window, { __debug: { models, padRig, world, meshes, terrain, settings, updateSettings, rig, fx, sound, showScene, pr: () => pixelRatio, frame, globeTiles, mapView, flightPanel, hud, plot, ambience, audioEngine, menu, menuAudio, weather, moon, origin } });
+    if (import.meta.env.DEV) Object.assign(window, { __debug: { models, padRig, world, meshes, terrain, settings, updateSettings, rig, fx, sound, pr: () => pixelRatio, frame, globeTiles, mapView, flightPanel, hud, plot, ambience, audioEngine, menu, menuAudio, weather, moon, origin, showScene } });
   })
   .catch((err) => {
     loadingText.textContent = import.meta.env.DEV
@@ -794,30 +794,42 @@ function daylightPhase(wants: DaylightAt[], missionTime: number, vehicle: { lat:
 }
 
 // --- Weather: planet-wide clouds, rain under them --------------------------------------------
-const weather = new Weather(EARTH_AXIS_WORLD.clone(), new THREE.Vector3(...EARTH_CENTER_WORLD).negate().normalize());
+/** Render world -> Earth-fixed (ECEF) directions (the weather map's axes). */
+const WORLD_TO_ECEF = (() => {
+  const c = new THREE.Vector3(...EARTH_CENTER_WORLD);
+  const [ex, ey, ez] = ([[1e6, 0, 0], [0, 1e6, 0], [0, 0, 1e6]] as const).map((p) => new THREE.Vector3(...ecefToWorld([...p])).sub(c).normalize());
+  return new THREE.Matrix3().set(ex.x, ex.y, ex.z, ey.x, ey.y, ey.z, ez.x, ez.y, ez.z);
+})();
+const weather = new Weather(EARTH_AXIS_WORLD.clone(), WORLD_TO_ECEF, PAD.latDeg, PAD.lonDeg);
+// (The physics flies through the same weather: its wind.)
+weather.onConfig = (cfg, land) => send({ type: 'weather', cfg, land });
+/** The season: the sun's latitude (it stays put through a flight's days), degrees. */
+const SEASON = THREE.MathUtils.radToDeg(Math.asin(SUN_AT_DAY0.dot(EARTH_AXIS_WORLD)));
 const rain = new Rain();
 world.scene.add(rain.lines);
 /** A menu scene's own weather over Starbase (else the setting's). */
 let sceneWeather: StarbaseWeather | null = null;
 /**
- * A new weather map (each flight, each menu scene): with the weather asked for over Starbase,
- * or on 'Random' whatever the day brings (fog now and then).
+ * New weather (each flight, each menu scene): a new world of weather systems, with the weather
+ * asked for over Starbase, or on 'Random' whatever the day brings. Missions get fair weather.
  */
 const applyWeatherSetting = () => {
   if (!WEATHER_AVAILABLE) {
     weather.enabled = false;
-    weather.fog = 0;
     return;
   }
-  const w = sceneWeather ?? settings.weather;
-  weather.set(w === 'natural' ? (Math.random() < 0.2 ? 'fog' : 'any') : w);
+  // Missions always fly in fair weather with light wind (the setting is free roam's).
+  if (sceneWeather) weather.configure(sceneWeather, SEASON);
+  else if (tracker.mission.id !== 'free') weather.configure('partly', SEASON, true);
+  else weather.configure(settings.weather, SEASON);
 };
 let weatherSetting = settings.weather;
 onSettingsChange((s) => {
   weather.enabled = WEATHER_AVAILABLE && s.clouds;
   if (s.weather !== weatherSetting) {
     weatherSetting = s.weather;
-    applyWeatherSetting();
+    // (Free roam's: a mission keeps its fair weather.)
+    if (tracker.mission.id === 'free') applyWeatherSetting();
   }
 });
 applyWeatherSetting();
@@ -1134,6 +1146,8 @@ function frame(): void {
   const cos2 = 1 - sinLat * sinLat;
   const camAlt = camR - Math.sqrt(((RE * RE) ** 2 * cos2 + (RP * RP) ** 2 * sinLat * sinLat) / (RE * RE * cos2 + RP * RP * sinLat * sinLat));
   camFromCentre.set(cam[0] - EARTH_CENTER_WORLD[0], cam[1] - EARTH_CENTER_WORLD[1], cam[2] - EARTH_CENTER_WORLD[2]);
+  // (Fresh: the snapshot is from the latest flight / scene, so its clock can start new weather.)
+  weather.update(simTime, world.sunDir, workerSceneId >= scenesSent);
   const wx = weather.local(camFromCentre, camAlt);
   audio.update(heard.level, heard.distance, Math.exp(-Math.max(0, camAlt) / 8500), paused);
   // Everything else you hear: wind, surf, air rush, tower machinery, deluge, venting.
@@ -1163,7 +1177,6 @@ function frame(): void {
   earthCenterRel.set(EARTH_CENTER_WORLD[0] - cam[0], EARTH_CENTER_WORLD[1] - cam[1], EARTH_CENTER_WORLD[2] - cam[2]);
   world.updateSky(camAlt, camUp, earthCenterRel, camR - camAlt);
   // Weather: the clouds (drawn by the atmosphere pass), overcast dimming the sun, rain.
-  weather.update(simTime);
   weather.apply(world.atmosphere);
   world.sun.intensity *= wx.sun;
   if (!paused) rainClock += frameDt;

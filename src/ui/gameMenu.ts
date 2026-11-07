@@ -262,7 +262,7 @@ export class GameMenu {
           `<div class="mn-row"><span>Sound</span><button class="mn-toggle${settings.muted ? '' : ' on'}" data-act="sound"><i></i></button></div>` +
           (WEATHER_AVAILABLE ?
           `<div class="mn-row"><span>Clouds</span><button class="mn-toggle${settings.clouds ? ' on' : ''}" data-act="clouds"><i></i></button></div>` +
-          `<div class="mn-row"><span>Starbase weather</span><div class="mn-seg">` +
+          `<div class="mn-row"><span>Free roam weather</span><div class="mn-seg">` +
           (['clear', 'partly', 'overcast', 'rain', 'fog', 'natural'] as const)
             .map((w) => `<button data-weather="${w}"${settings.weather === w ? ' class="on"' : ''}>${WEATHER_LABEL[w]}</button>`)
             .join('') +

@@ -4,6 +4,7 @@ import { DEG, MU } from './constants';
 import type { Aux } from './dynamics';
 import { localBasisEci } from './frames';
 import { type V3, add, clamp, dot, norm, normalize, scale, sub } from './math';
+import { LIMITS } from './limits';
 import type { Vehicle } from './vehicle';
 
 /** Horizontal unit vector along a launch azimuth (deg from north, clockwise). */
@@ -40,8 +41,31 @@ export class GravityTurnGuidance {
       if (norm(aux.vAir) > 50 && vAirUp <= Math.cos(k)) this.phase = 'turn';
       else return kickDir;
     }
-    return normalize(aux.vAir);
+    return loadRelief(normalize(aux.vAir), aux);
   }
+}
+
+/** Most the ascent turns into the wind to ease the side load, rad. */
+const RELIEF_MAX = 3 * DEG;
+
+/**
+ * Load relief: the gravity turn flies along the ground-relative velocity, so the wind puts the
+ * air on the hull at an angle. When that side load nears the stack's limit (strong winds aloft
+ * through max-q), turn partway toward the airflow (at most RELIEF_MAX) to keep it in bounds, as
+ * launch vehicles' flight software does. (Only then: every degree of it bends the climb.)
+ */
+export function loadRelief(dir: V3, aux: Aux): V3 {
+  const sa = norm(aux.vAirTrue);
+  if (sa < 1) return dir;
+  const air = scale(aux.vAirTrue, 1 / sa);
+  const c = clamp(dot(dir, air), -1, 1);
+  const ang = Math.acos(c);
+  if (ang < 1e-5) return dir;
+  const w = clamp(((aux.q * Math.sin(ang)) / LIMITS.stackQAlpha - 0.4) / 0.3, 0, 1);
+  const turn = Math.min(ang, RELIEF_MAX) * w;
+  // Rotate dir toward air by `turn` (in their plane).
+  const perp = normalize(sub(air, scale(dir, c)));
+  return normalize(add(scale(dir, Math.cos(turn)), scale(perp, Math.sin(turn))));
 }
 
 /**

@@ -2,6 +2,7 @@ import type { PilotCommand } from '../sim/pilot';
 import type { ManeuverNode, MenuScene, MissionStart, Snapshot } from '../sim/simulation';
 import type { ReturnTarget } from '../sim/shipReturn';
 import type { Trajectory } from '../sim/trajectory';
+import type { WeatherConfig } from '../weather/model';
 
 export type ToWorker =
   | { type: 'launch' }
@@ -24,6 +25,8 @@ export type ToWorker =
   | { type: 'node'; node: ManeuverNode | null }
   /** Ship: go home (tower / ocean target) under autopilot, or cancel (null). */
   | { type: 'return'; target: ReturnTarget | null }
+  /** The weather (the same as the renderer's): its wind acts on the vehicles. null: still air. */
+  | { type: 'weather'; cfg: WeatherConfig | null; land: Uint8Array | null }
   /** Speed time up until just before the maneuver node's burn / the autopilot's next event, then back to 1x. */
   | { type: 'warpTo'; target: WarpTarget };
 

@@ -7,7 +7,7 @@ import { CMQ, REF_AREA, axialCoefficient, normalCoefficient } from './aero';
 import { type Flow, surfaceLoads } from './surfaces';
 import { atmosphere } from './atmosphere';
 import { engineMassFlow, engineThrust } from './engine';
-import { airRelativeVelocity, ecefToGeodetic, eciToEcef, type Geodetic } from './frames';
+import { airRelativeVelocity, ecefToGeodetic, eciToEcef, type Geodetic, localBasisEci } from './frames';
 import { gravityJ2 } from './gravity';
 import { type Q, type V3, cross, norm, qnormalize, qrot, qrotInv } from './math';
 import { type MassProps, type Vehicle, massProps } from './vehicle';
@@ -15,6 +15,11 @@ import { type MassProps, type Vehicle, massProps } from './vehicle';
 export interface Env {
   gravity: boolean;
   aero: boolean;
+  /**
+   * The wind at a place (geodetic) and time: m/s east, north, up (none: still air). gusts: false
+   * for the steady wind alone (what a forecast / balloon sounding gives guidance).
+   */
+  wind?: (geo: Geodetic, t: number, gusts?: boolean) => V3;
 }
 
 export const DEFAULT_ENV: Env = { gravity: true, aero: true };
@@ -26,7 +31,10 @@ export interface Aux {
   pAmb: number;
   rho: number;
   soundSpeed: number;
+  /** Velocity relative to the ground (the Earth's rotating frame), ECI: what guidance flies by. */
   vAir: V3;
+  /** Velocity relative to the air itself (ground-relative minus the wind), ECI. */
+  vAirTrue: V3;
   mach: number;
   q: number;
   alpha: number;
@@ -102,7 +110,15 @@ export function evaluate(veh: Vehicle, y: Float64Array, t: number, env: Env): { 
 
   // --- Aerodynamics ---
   const vAir = airRelativeVelocity(r, v);
-  const speed = norm(vAir);
+  // The wind: the air itself moving (below ~100 km; above it there's no air to speak of). The
+  // aerodynamics see the velocity through the air.
+  const vAirT: V3 = [vAir[0], vAir[1], vAir[2]];
+  if (env.wind && env.aero && geo.h < 100e3) {
+    const [we, wn, wu] = env.wind(geo, t);
+    const b = localBasisEci(geo, t);
+    for (let k = 0; k < 3; k++) vAirT[k] -= we * b.e[k] + wn * b.n[k] + wu * b.u[k];
+  }
+  const speed = norm(vAirT);
   const aeroTorque: V3 = [0, 0, 0];
   let surfaceTorque: V3 = [0, 0, 0];
   let flow: Flow = { vHat: [0, 0, 0], q: 0, mach: 0 };
@@ -112,7 +128,7 @@ export function evaluate(veh: Vehicle, y: Float64Array, t: number, env: Env): { 
   if (env.aero && atm.rho > 0 && speed > 1) {
     qDyn = 0.5 * atm.rho * speed * speed;
     mach = speed / atm.a;
-    const vb = qrotInv(q, vAir);
+    const vb = qrotInv(q, vAirT);
     alpha = Math.acos(Math.max(-1, Math.min(1, vb[0] / speed)));
     const [xLo, xHi] = veh.extent;
     const length = xHi - xLo;
@@ -183,6 +199,7 @@ export function evaluate(veh: Vehicle, y: Float64Array, t: number, env: Env): { 
       rho: env.aero ? atm.rho : 0,
       soundSpeed: atm.a,
       vAir,
+      vAirTrue: vAirT,
       mach,
       q: qDyn,
       alpha,

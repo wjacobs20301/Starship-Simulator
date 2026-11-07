@@ -1,10 +1,13 @@
 // Runs the simulation off the main thread at a fixed 100 Hz physics rate
 // (times warp), and posts a snapshot ~60 times a second.
 
+import { DEFAULT_ENV } from '../sim/dynamics';
 import { DT, PHYSICS_WARP_MAX, Simulation } from '../sim/simulation';
+import { Land, WeatherModel } from '../weather/model';
 import type { FromWorker, ToWorker, WarpTarget } from './protocol';
 
-const sim = new Simulation();
+const sim = new Simulation({ ...DEFAULT_ENV });
+let land: Land | null = null;
 let warp = 1;
 let sceneId = 0;
 let paused = false;
@@ -88,6 +91,17 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       sim.commandReturn(msg.target);
       lastPredict = -Infinity;
       break;
+    case 'weather': {
+      if (msg.land && !land) land = new Land(msg.land);
+      if (!msg.cfg) {
+        sim.env.wind = undefined;
+        break;
+      }
+      const model = new WeatherModel(msg.cfg, land);
+      const DEG = 180 / Math.PI;
+      sim.env.wind = (geo, t, gusts = true) => model.wind(geo.lat * DEG, geo.lon * DEG, Math.max(0, geo.h), t, gusts);
+      break;
+    }
   }
 };
 

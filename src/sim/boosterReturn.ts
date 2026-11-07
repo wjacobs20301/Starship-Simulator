@@ -117,6 +117,14 @@ const TERMINAL_TILT = 10 * DEG;
 /** Stiffer attitude control while landing on 13 engines; gentler on 3 (less gimbal authority). */
 const LANDING_GAINS = { wn: 1.4, zeta: 0.9, rollDamp: 0.5 };
 /** Final-approach tuning (exported for tests / tuning scripts). */
+/** Steady wind at the tower's top over which the catch is called off, m/s (~23 knots). */
+export const CATCH_WIND_LIMIT = 11.8;
+/** Height the catch wind is judged at (the tower's top), m. */
+const TOWER_TOP = 150;
+/** Where a booster that can't be caught comes down instead: the Gulf offshore, pad ENU m. */
+const CATCH_DIVERT: [number, number] = [32000, -4000];
+/** The landing burn's aim: how hard it steers the predicted end point onto the mount. */
+const LAND_AIM_GAIN = 2;
 export const HOVER_TUNING = { wn: 1.6, zeta: 1.0, kp: 0.15, kd: 1.0, byFins: true };
 const FIN_TILT_MAX = 12 * DEG;
 /**
@@ -160,9 +168,10 @@ interface Impact {
 
 /**
  * Ballistic flight with drag (engines-first) from the current state until the geodetic altitude
- * drops below `stopAlt` (m above the pad's ground level).
+ * drops below `stopAlt` (m above the pad's ground level). wind: the wind by height (pad ENU,
+ * m/s), as guidance knows it (the day's sounding over the site); none: still air.
  */
-export function predictImpact(r0: V3, v0: V3, t0: number, mass: number, stopAlt: number): Impact | null {
+export function predictImpact(r0: V3, v0: V3, t0: number, mass: number, stopAlt: number, wind?: (h: number) => V3): Impact | null {
   let r = r0;
   let v = v0;
   let t = t0;
@@ -171,7 +180,8 @@ export function predictImpact(r0: V3, v0: V3, t0: number, mass: number, stopAlt:
     const h = ecefToGeodetic(eciToEcef(rr, tt)).h;
     const atm = atmosphere(h);
     if (atm.rho <= 0) return g;
-    const va = airRelativeVelocity(rr, vv);
+    let va = airRelativeVelocity(rr, vv);
+    if (wind) va = sub(va, padDirToEci(wind(h - PAD.groundAlt), tt));
     const s = norm(va);
     if (s < 1) return g;
     const k = (-0.5 * atm.rho * s * REF_AREA * axialCoefficient(s / atm.a, true)) / mass;
@@ -206,6 +216,8 @@ export class BoosterReturn {
   phase: ReturnPhase = 'flip';
   private closing = false;
   private hovering = false;
+  /** The hover's integral term (a steady push, the wind, learnt and leant against), m s. */
+  private hoverI: [number, number] = [0, 0];
   private start: number;
   private nextPredict = 0;
   private impact: Impact | null = null;
@@ -251,6 +263,17 @@ export class BoosterReturn {
     private ocean: [number, number] | null = null,
   ) {
     this.start = sim.t;
+    // Catch commit: in too much wind at the tower the catch is called off, and the booster comes
+    // down on the Gulf offshore instead (holding a hover over the arms in it would run it dry).
+    const w = this.ocean ? undefined : sim.env.wind;
+    if (w) {
+      const v = w({ lat: PAD.latDeg * DEG, lon: PAD.lonDeg * DEG, h: PAD.groundAlt + TOWER_TOP }, sim.t, false);
+      const speed = Math.hypot(v[0], v[1]);
+      if (speed > CATCH_WIND_LIMIT) {
+        this.ocean = CATCH_DIVERT;
+        this.log(`Catch no-go: wind ${speed.toFixed(1)} m/s at the tower (limit ${CATCH_WIND_LIMIT}); landing offshore`);
+      }
+    }
   }
 
   /** The booster's catch-fin axis (body +z) should lie along the arms' gap. */
@@ -302,7 +325,7 @@ export class BoosterReturn {
     const fresh = this.phase !== 'landing' && this.phase !== 'terminal' && this.phase !== 'caught' && t >= this.nextPredict;
     if (fresh) {
       this.nextPredict = t + (this.trimming || this.correcting ? 0.1 : 0.25);
-      this.impact = predictImpact(booster.r, booster.v, t, mass, this.targetAlt);
+      this.impact = predictImpact(booster.r, booster.v, t, mass, this.targetAlt, this.windProfile(t));
       this.dvSince = [0, 0, 0];
       if (this.impact) this.impact.pos = this.rel(this.impact.pos);
       this.miss = this.impact ? this.aimMiss(this.impact, booster, this.aimMass(booster, aux)) : null;
@@ -332,7 +355,7 @@ export class BoosterReturn {
         // pressure goes with the speed squared).
         const entryDv = normal ? 0 : 1.2 * p.vBallistic * Math.max(0, 1 - Math.sqrt(ENTRY_BURN_Q_END / Math.max(1, p.qBallistic)));
         const entry = mass * (1 - Math.exp(-entryDv / (lander.type.ispVac * 9.80665)));
-        const keep = landing * PROP_NEED_FACTOR + PROP_NEED_EXTRA + entry;
+        const keep = landing * PROP_NEED_FACTOR + PROP_NEED_EXTRA + this.windReserve(t) + entry;
         // The most it can carry into the landing burn and still hover on its 3 center engines
         // at the end of it.
         const dry = mass - this.propLeft(booster);
@@ -504,7 +527,7 @@ export class BoosterReturn {
           const tgC = Math.max(4, tg);
           const qTilt = aux.q > 1e3 ? Math.asin(Math.min(1, STEER_Q_ALPHA / aux.q)) : Math.PI / 2;
           const cMax = Math.min(10, (aDec + 9.8) * Math.tan(Math.min(10 * DEG, qTilt)));
-          const corr = (e: number) => clamp((-2 * e) / (tgC * tgC), -cMax, cMax);
+          const corr = (e: number) => clamp((-LAND_AIM_GAIN * e) / (tgC * tgC), -cMax, cMax);
           aCmd = [(-velPad[0] * aDec) / vz, (-velPad[1] * aDec) / vz, aDec + 9.8];
           // (Over the water the last few hundred metres are straight retrograde: no re-aiming, so
           // it arrives with the sideways speed gone rather than exactly on the mark.)
@@ -547,17 +570,44 @@ export class BoosterReturn {
           // it, stay (or climb back) above the rails so the body can't sweep through an arm.
           const inCorridor = off < ARMS_CORRIDOR;
           const clear = baseHeight - (this.arms.top + ARMS_CLEARANCE);
-          const go = inCorridor && (aboveArms > 25 || (off < 1.2 && drift < 0.6));
-          const vzCmd = go ? -clamp(0.1 * aboveArms + 1.5, 1.5, 4) : !inCorridor && clear < 0 ? clamp(-0.5 * clear, 0.5, 3) : 0;
+          // (The arms capture within CAPTURE_RADIUS: lined up well inside that is enough. Waiting for
+          // better in gusty air only burns the hover's propellant.)
+          const go = inCorridor && (aboveArms > 25 || (off < 1.8 && drift < 0.9));
+          // (Quicker while well above them: hovering burns ~1 t/s, more than a windy day leaves.)
+          const vzCmd = go ? -Math.min(6, clamp(0.1 * aboveArms + 1.5, 1.5, 4) + 0.06 * Math.max(0, aboveArms - 30)) : !inCorridor && clear < 0 ? clamp(-0.5 * clear, 0.5, 3) : 0;
           // Position loop well inside the attitude loop's bandwidth.
           aCmd = [0, 0, 1.4 * (vzCmd - velPad[2]) + 9.79];
           const ref = HOVER_TUNING.byFins ? finPos : posPad;
           const refV = HOVER_TUNING.byFins ? finVel : velPad;
-          aCorr = [-HOVER_TUNING.kp * ref[0] - HOVER_TUNING.kd * refV[0], -HOVER_TUNING.kp * ref[1] - HOVER_TUNING.kd * refV[1], 0];
+          // (Integral: a steady crosswind would otherwise hold it off-centre, never lined up.)
+          const KI = 0.025;
+          const IMAX = 2.5 / KI;
+          // (Only once close and slow: through the approach's big errors it would wind up and
+          // overshoot.)
+          if (Math.hypot(ref[0], ref[1]) < 4 && Math.hypot(refV[0], refV[1]) < 1.5) {
+            for (let k = 0; k < 2; k++) this.hoverI[k] = clamp(this.hoverI[k] + ref[k] * dt, -IMAX, IMAX);
+          }
+          aCorr = [
+            -HOVER_TUNING.kp * ref[0] - HOVER_TUNING.kd * refV[0] - KI * this.hoverI[0],
+            -HOVER_TUNING.kp * ref[1] - HOVER_TUNING.kd * refV[1] - KI * this.hoverI[1],
+            0,
+          ];
         }
-        // Remove the drag we're already getting (engines-first, it's a big help early on).
+        // Remove the drag we're already getting (engines-first, it's a big help early on). Drag
+        // acts along the velocity through the air, not over the ground: taken that way, the
+        // thrust also cancels what the wind pushes, and the burn flies its plan.
         const sp = norm(velPad);
-        if (sp > 1) aCmd = add(aCmd, scale(velPad, this.dragAccel(aux, sp) / sp));
+        const velAir = eciDirToPad(aux.vAirTrue, t);
+        const spAir = norm(velAir);
+        if (spAir > 1) aCmd = add(aCmd, scale(velAir, this.dragAccel(aux, spAir) / spAir));
+        // A crosswind also meets the hull at an angle and pushes it sideways (body lift, downwind):
+        // lean against that through the burn (in the hover the position loop's integral does).
+        if (this.phase === 'landing' && sp > 5 && spAir > 5) {
+          const wind = sub(velPad, velAir);
+          const cross = sub(wind, scale(velPad, dot(wind, velPad) / (sp * sp)));
+          const push = (aux.q * this.liftPerRad(booster)) / (mass * spAir);
+          aCorr = sub(aCorr, scale(cross, push));
+        }
         if (aCmd[2] < 0.5) aCmd[2] = 0.5;
         const force = mass * norm(aCmd);
         // Sideways correction by tilting. What a tilt buys is the thrust's sideways component
@@ -753,6 +803,40 @@ export class BoosterReturn {
   }
 
   /** Engines-first drag acceleration at this speed and height, m/s^2. */
+  /**
+   * The wind over the site by height (pad ENU, m/s), as of time t: the steady wind (no gusts),
+   * as a launch team's balloon soundings give it; null in still air. (Tabulated every 500 m.)
+   */
+  private windProfile(t: number): ((h: number) => V3) | undefined {
+    const w = this.sim.env.wind;
+    if (!w) return undefined;
+    if (!this.windTab || Math.abs(t - this.windTab.t) > 60) {
+      const rows: V3[] = [];
+      for (let h = 0; h <= 100e3; h += 500) rows.push(w({ lat: PAD.latDeg * DEG, lon: PAD.lonDeg * DEG, h: h + PAD.groundAlt }, t, false));
+      this.windTab = { t, rows };
+    }
+    const rows = this.windTab.rows;
+    return (h: number) => {
+      const x = clamp(h / 500, 0, rows.length - 1.001);
+      const i = Math.floor(x);
+      const f = x - i;
+      const a = rows[i], b = rows[i + 1];
+      return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, 0];
+    };
+  }
+  private windTab: { t: number; rows: V3[] } | null = null;
+
+  /**
+   * Extra propellant kept for a windy catch, kg: holding a hover against the wind and its gusts
+   * takes longer to line up (1.5 t per m/s of wind at the arms' height, up to 8 t).
+   */
+  private windReserve(t: number): number {
+    const w = this.sim.env.wind;
+    if (!w) return 0;
+    const v = w({ lat: PAD.latDeg * DEG, lon: PAD.lonDeg * DEG, h: PAD.groundAlt + TOWER_TOP }, t, false);
+    return Math.min(8e3, 1.5e3 * Math.hypot(v[0], v[1]));
+  }
+
   private dragAccel(aux: Aux, speed: number): number {
     return (0.5 * aux.rho * speed * speed * REF_AREA * axialCoefficient(aux.mach, true)) / aux.mp.mass;
   }
@@ -796,7 +880,7 @@ export class BoosterReturn {
     if (this.plan) return dry + Math.min(prop, this.plan.ventTo);
     if (!this.keepEst || this.sim.t >= this.keepEst.t + 5) {
       const lander = this.landingEngines(booster);
-      const keep = normalLandingProp(aux.mp.mass, this.hoverHeight, lander) * PROP_NEED_FACTOR + PROP_NEED_EXTRA;
+      const keep = normalLandingProp(aux.mp.mass, this.hoverHeight, lander) * PROP_NEED_FACTOR + PROP_NEED_EXTRA + this.windReserve(this.sim.t);
       this.keepEst = { keep, t: this.sim.t };
     }
     return dry + Math.min(prop, this.keepEst.keep);
@@ -811,7 +895,7 @@ export class BoosterReturn {
     for (let k = 0; k < 3; k++) {
       const e: V3 = [0, 0, 0];
       e[k] = JAC_DV;
-      const imp = predictImpact(booster.r, add(booster.v, padDirToEci(e, t)), t, mass, this.targetAlt);
+      const imp = predictImpact(booster.r, add(booster.v, padDirToEci(e, t)), t, mass, this.targetAlt, this.windProfile(t));
       if (!imp) continue;
       imp.pos = this.rel(imp.pos);
       const m = this.aimMiss(imp, booster, this.aimMass(booster, this.sim.aux.get('booster')!));
