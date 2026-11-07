@@ -35,17 +35,39 @@
 		file_server
 	}
 
+	# The dev site's map tiles (/dev/terrain/..., /dev/globe/tiles/...): the same tiles.
+	@devtiles path /dev/terrain/* /dev/globe/tiles/*
+	handle @devtiles {
+		uri strip_prefix /dev
+		root * /srv/tiles
+		header Cache-Control "public, max-age=2592000"
+		file_server
+	}
+
 	# An address that isn't on the site: the 404 page (still with a 404 status). Not for the
 	# map tiles, code and models: the game asks for tiles that may not exist, and only needs the
 	# status.
 	handle_errors 404 {
-		@page not path /terrain/* /globe/tiles/* /assets/* /models/*
+		@page not path /terrain/* /globe/tiles/* /assets/* /models/* /dev/terrain/* /dev/globe/tiles/* /dev/assets/* /dev/models/*
 		handle @page {
 			root * /srv/site
 			rewrite * /404.html
 			header Cache-Control "no-cache"
 			file_server
 		}
+	}
+
+	# The dev site (the dev branch, deploy.sh): the next version, for testing before it goes live.
+	# Kept out of search engines; nothing but its hashed code cached, so each change shows up on a
+	# reload.
+	handle /dev/* {
+		root * /srv/site
+		header X-Robots-Tag "noindex, nofollow"
+		@devhashed path /dev/assets/*
+		header @devhashed Cache-Control "public, max-age=31536000, immutable"
+		@devfresh not path /dev/assets/*
+		header @devfresh Cache-Control "no-cache"
+		file_server
 	}
 
 	# The built site.

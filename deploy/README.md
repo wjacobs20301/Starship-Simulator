@@ -95,7 +95,16 @@ settings).
 
 ## Updating the site
 
-Push to `main` on GitHub: the site updates within 10 minutes. Or straight away, on the server:
+Push to `main` on GitHub: the site updates within 10 minutes.
+
+Push to `dev` for the test site, https://starship.wjacobs.space/dev/ : the next version, built
+the same way (into `~/starship/site/dev`, from its own checkout `~/starship/app-dev`), not
+listed by search engines, and nothing but its hashed code cached. The game at `/` is untouched
+until `dev` is merged into `main`. (Its map tiles come from the same folder, but Cloudflare's
+cache rule only covers `/terrain/` and `/globe/`: add `/dev/terrain/` and `/dev/globe/` to it if
+the dev site's terrain loads slowly.)
+
+Or deploy both straight away, on the server:
 
 ```bash
 ~/starship/app/deploy/deploy.sh
