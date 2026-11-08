@@ -295,7 +295,9 @@ const CLOUD_GLSL = /* glsl */ `
     float hn = (h - w.y) / max(w.z - w.y, 100.0);
     if (hn <= 0.0 || hn >= 1.0) return 0.0;
     // Flat bases, rounded tops.
-    float grad = smoothstep(0.0, 0.1, hn) * (1.0 - smoothstep(0.5, 1.0, hn));
+    // (Narrowing from low down: domed tops, not flat-topped mesas, which seen in rows toward the
+    // horizon line up as stripes.)
+    float grad = smoothstep(0.0, 0.1, hn) * (1.0 - smoothstep(0.35, 1.0, hn));
     float base = w.x * grad;
     if (base < 0.01) return 0.0;
     // Cells at two scales (different periods: no visible repeat); the light samples take one.
@@ -339,21 +341,30 @@ const CLOUD_GLSL = /* glsl */ `
     if (!detailed || gDetBias > 0.0) soft = max(soft, 0.12);
     // (Close up, the cells' surfaces roughened by finer noise, billows on billows, a cumulus's
     // cauliflower; a deck's top lumpier still, its cells.)
+    // (Close up, the cells' surfaces roughened by finer noise, billows on billows, a cumulus's
+    // cauliflower; a deck's top lumpier still, its cells.)
     if (detailed) {
       float dl = noiseLod(max(t, gDetT), ${CLOUD_DETAIL_SCALE}.0) + gDetBias;
       float det = textureLod(tNoise, p / ${CLOUD_DETAIL_SCALE}.0 + uDrift * 40.0, dl).g;
       u += mix(0.22, 0.11, smoothstep(0.3, 0.8, gBroken)) * (det - 0.478) / 0.12 * (1.0 - smoothstep(0.5, 2.5, dl));
       // (And finer still, close up: wisps and knots a few tens of metres across.)
       float dl2 = noiseLod(max(t, gDetT), 610.0) + gDetBias;
-      if (dl2 < 2.5) {
+      if (dl2 < 2.5 && gDetBias == 0.0) {
         float det2 = textureLod(tNoise, pr0 / 610.0 + vec3(0.37, 0.11, 0.83) + uDrift * 60.0, dl2).g;
         u += 0.06 * (det2 - 0.478) / 0.12 * (1.0 - smoothstep(0.5, 2.5, dl2));
       }
     }
     // (Broken cumulus a little less than the cover: seen at a slant, their sides fill the gaps.)
     float fill = mix(1.0, 0.8, smoothstep(0.3, 0.8, gBroken));
+    // (And in clumps and thinner stretches ~25 km across, as a cumulus field is, not one even
+    // lattice of cells.)
+    float cumulus = smoothstep(0.3, 0.8, gBroken);
+    if (cumulus > 0.0 && detailed && gDetBias == 0.0) {
+      float clump = textureLod(tNoise, pc / 26000.0 + vec3(0.13, 0.71, 0.29), noiseLod(t, 26000.0)).r;
+      fill *= mix(1.0, clamp(1.0 + 5.0 * (clump - 0.669), 0.3, 1.5), cumulus);
+    }
     gMargin = u - (1.0 - fill * base);
-    float dens = smoothstep(0.0, 1.0, gMargin / soft) * (0.3 + 0.7 * w.x);
+    float dens = smoothstep(0.0, 1.0, gMargin / max(soft, 0.025)) * (0.3 + 0.7 * w.x);
     // (So far off the cells are a few pixels across or less: their average, an even density, as
     // thick as lets through what the gaps between them would, the same cloud on average. (A
     // broken field averaged as thick as its clouds would be one white sheet.))
@@ -492,12 +503,13 @@ const CLOUD_GLSL = /* glsl */ `
     float top = max(base + 200.0, wa.y * 16000.0);
     float h = r - uRc;
     if (h > top) return 1.0;
-    // Three samples up through the clouds' heights along the sun's ray (from where it enters them).
+    // Two samples up through the clouds' heights along the sun's ray (from where it enters them).
     float h0 = max(h, base);
-    float dh = (top - h0) / 3.0;
+    float dh = (top - h0) / 2.0;
     float od = 0.0;
-    gDetT = 0.0;
-    for (int i = 0; i < 3; i++) {
+    // (Soft-edged: a cloud a kilometre or two up casts a shadow with a wide penumbra.)
+    gDetT = 400.0 / uPixAng;
+    for (int i = 0; i < 2; i++) {
       float hs = h0 + (float(i) + 0.5) * dh;
       vec3 q = P + uSun * ((hs - h) / mus);
       vec3 up = normalize(q);
@@ -547,10 +559,13 @@ const CLOUD_GLSL = /* glsl */ `
 
   // The march's step through clear air at distance t along a ray (mu: its slope, up = 1):
   // growing with distance (4.5% of it: the clouds are smaller on screen), but never so long it
-  // could step over a cloud (150 m in height, 300 m across the ground, both more far off).
+  // could step over a cloud: 300 m across the ground (more far off, where they're smaller on
+  // screen), 150 m in height (up to 400 m far off: never more, or from orbit a step would cross
+  // the whole layer, catching it in some pixels and not others: a halftone of dots).
   float clearStep(float t, float mu) {
-    float lim = min(150.0 / max(abs(mu), 0.01), 300.0 / max(sqrt(max(1.0 - mu * mu, 0.0)), 0.01));
-    return clamp(0.045 * t, 50.0, lim * max(1.0, t / 20000.0));
+    float far = max(1.0, t / 20000.0);
+    float lim = min(min(150.0 * far, 400.0) / max(abs(mu), 0.01), 300.0 * far / max(sqrt(max(1.0 - mu * mu, 0.0)), 0.01));
+    return clamp(0.045 * t, 50.0, lim);
   }
 
   // Returns (light, transmittance); tFirst: the clouds' distance along the ray. jit: 0..1, this
@@ -608,7 +623,9 @@ const CLOUD_GLSL = /* glsl */ `
           vec3 p = ro + rd * t;
           float rp = length(p);
           float muv = dot(rd, p) / rp;
-          float dIn = max(0.25 * clearStep(t, muv), 30.0);
+          // (Through cloud: a quarter of the clear step, never under 30 m, nor under half a
+          // pixel's breadth there: from orbit, finer steps only cost.)
+          float dIn = max(max(0.25 * clearStep(t, muv), 30.0), 0.5 * t * uPixAng);
           gDetT = dIn / uPixAng;
           float skip;
           float dens = marchDensity(ro, rd, t, w, pw, skip);
@@ -634,6 +651,7 @@ const CLOUD_GLSL = /* glsl */ `
           }
           if (dens > 0.002) {
             vec3 sunCol = sunAt(p);
+            float odSun = 0.0;
             if (sunCol.r + sunCol.g > 0.0) {
               // Through the cloud toward the sun (two samples: one close, with the fine detail,
               // so each billow shades the next, the cauliflower; one farther, of the cloud seen
@@ -642,17 +660,18 @@ const CLOUD_GLSL = /* glsl */ `
               float od = cloudDensity(p + uSun * 60.0, w, true, t) * 150.0;
               gDetBias = 0.0;
               od += cloudDensity(p + uSun * 400.0, w, false, t) * 500.0;
+              odSun = od;
               // (Light scattered on through the cloud: the shadowed side greys gradually, not black.)
-              sunCol *= max(max(exp(-SIGMA * od), 0.3 * exp(-SIGMA * 0.25 * od)), 0.12 * exp(-SIGMA * 0.06 * od));
+              sunCol *= exp(-SIGMA * od) + 0.25 * exp(-SIGMA * 0.25 * od) + 0.08 * exp(-SIGMA * 0.06 * od);
             }
             float hn = clamp((rp - uRc - w.y) / max(w.z - w.y, 100.0), 0.0, 1.0);
             float sunUp = dot(p, uSun) / rp;
             float day = smoothstep(-0.15, 0.1, sunUp);
-            // Ambient light: the blue sky's from above (less of it in the creases and under the
-            // tops), and the sunlit ground and sea's, grey, from below (lighting the flat bases).
-            float odUp = cloudDensity(p + p * (300.0 / rp), w, false, t) * 300.0;
+            // Ambient light: the blue sky's from above (less of it down in the cloud, where the
+            // light toward the sun is cut off too), and the sunlit ground and sea's, grey, from
+            // below (lighting the flat bases).
             vec3 sky = mix(vec3(0.2, 0.21, 0.23) * (0.3 + 0.7 * max(sunUp, 0.0)), vec3(0.22, 0.3, 0.42), hn)
-                     * day * (0.35 + 0.65 * exp(-SIGMA * 0.5 * odUp));
+                     * day * (0.45 + 0.55 * exp(-SIGMA * 0.15 * odSun)) * 0.65;
             float powder = 1.0 - exp(-dens * 5.0);
             vec3 S = uCloudSun * (sunCol * phase * (0.55 + 0.45 * powder) + sky);
             // (Cloud is optically thick: a few hundred metres of it hides what's behind, so its
@@ -741,7 +760,6 @@ const ATMO_COMMON = /* glsl */ `
   uniform float uRc;           // the clouds' ground radius: the equator's (see cloudFragment)
   uniform vec3 uPolar;         // the Earth's axis (world)
   uniform vec2 uProjOff;       // projection off-centre terms (elements 8, 9)
-  uniform float uFrame;        // frame count (the cloud pass's offsets move on every frame)
 
   const vec3 BR = vec3(5.8e-6, 13.5e-6, 33.1e-6); // Rayleigh scattering at sea level, 1/m
   const float BM = 7e-6;                          // Mie scattering at sea level, 1/m (a clear Gulf day)
@@ -949,9 +967,10 @@ const cloudFragment = /* glsl */ `
     // and would cut low clouds off in a stipple.)
     float tEnd = tg.x > 0.0 ? (sceneDist < tg.x * 0.97 - 50.0 ? sceneDist : tg.x) : sceneDist;
     float tFirst = 1e30;
-    // (Each pixel's offset into the march's first step: interleaved gradient noise, moved on
-    // every frame.)
-    float jit = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))) + 0.618034 * uFrame);
+    // (Each screen pixel's offset into the march's first step: interleaved gradient noise, the
+    // same every frame (moving it on would make the clouds' edges shimmer).)
+    vec2 fullPx = 2.0 * floor(gl_FragCoord.xy) + uSub;
+    float jit = fract(52.9829189 * fract(dot(fullPx, vec2(0.06711056, 0.00583715))));
     vec4 c = uClouds > 0.5 ? clouds(ro, rd, tEnd, jit, tFirst) : vec4(0.0, 0.0, 0.0, 1.0);
     tFirst /= k;
     tEnd /= k;
@@ -961,7 +980,27 @@ const cloudFragment = /* glsl */ `
     // value blended into a cloud edge would make the edge look farther than the ground behind it
     // and drop it, pixel by pixel, flickering as the view moves.
     // (And in .g: the clouds' shadow on whatever the ray ends at, the ground or a vehicle.)
-    float shadow = uClouds > 0.5 && tEnd < 1e29 ? cloudShadow(ro + rd * (tEnd * k), tEnd * k) : 1.0;
+    // (Through the middle of the pixel's 2x2 block, the same every frame: the sub-pixel moving
+    // from frame to frame would make the shadows' edges shimmer.)
+    float shadow = 1.0;
+    if (uClouds > 0.5 && tEnd < 1e29) {
+      vec3 roC;
+      vec3 rdC;
+      float dC;
+      float muC;
+      viewRay((2.0 * floor(gl_FragCoord.xy) + 1.0) / uFullSize, roC, rdC, dC, muC);
+      vec3 rdCS = rdC + uPolar * (dot(rdC, uPolar) * ${(RE / RP - 1).toExponential(8)});
+      float kC = length(rdCS);
+      rdC = rdCS / kC;
+      roC = roC + uPolar * (dot(roC, uPolar) * ${(RE / RP - 1).toExponential(8)});
+      vec2 tgC = hitSphere(roC, rdC, uRc);
+      float dS = dC < 1e29 ? dC * kC : dC;
+      float tC = tgC.x > 0.0 ? (dS < tgC.x * 0.97 - 50.0 ? dS : tgC.x) : dS;
+      // (Not from far off, a pixel spanning hundreds of metres: from orbit a cloud's shadow is
+      // offset from it by a pixel or two.)
+      float fade = smoothstep(250.0, 500.0, tC * uPixAng);
+      if (tC < 1e29 && fade < 1.0) shadow = mix(cloudShadow(roC + rdC * tC, tC), 1.0, fade);
+    }
     outDist = vec4(min(tFirst < 1e29 ? tFirst : tEnd, 6e7) / 1000.0, shadow, 0.0, 1.0);
   }
 `;
@@ -1023,9 +1062,8 @@ const resolveFragment = /* glsl */ `
       return;
     }
     vec4 hist = clamp(texture(tHist, uvPrev), lo, hi);
-    // (A pixel's new sample blended in, not swapped: each is a little noisy, the march's offsets
-    // moving on every frame; averaged over a few, they settle.)
-    outColor = fresh ? mix(hist, here, 0.3) : hist;
+    // (A pixel's new sample blended in, not swapped: steadier.)
+    outColor = fresh ? mix(hist, here, 0.2) : hist;
   }
 `;
 
@@ -1061,7 +1099,6 @@ export class SceneAtmospherePass extends Pass {
     uRc: { value: RE },
     uPolar: { value: new THREE.Vector3(0, 1, 0) },
     uProjOff: { value: new THREE.Vector2() },
-    uFrame: { value: 0 },
     uSub: { value: new THREE.Vector2() },
     uFullSize: { value: new THREE.Vector2(1, 1) },
   };
@@ -1195,7 +1232,6 @@ export class SceneAtmospherePass extends Pass {
       const r = this.resolveUniforms;
       u.uPixAng.value = (2 / pe[5]) / this.cloudTarget.height;
       const f = this.frame++;
-      u.uFrame.value = f % 64;
       u.uSub.value.set(...SUBPIXELS[f % 4]);
       renderer.setRenderTarget(this.cloudTarget);
       this.cloudQuad.render(renderer);

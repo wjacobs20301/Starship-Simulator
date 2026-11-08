@@ -297,7 +297,9 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
   const composer = new EffectComposer(renderer, target);
   const atmosphere = new SceneAtmospherePass(scene, camera);
   composer.addPass(atmosphere);
-  const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.3, 0.3, 1.4);
+  // (Threshold over the brightest sunlit cloud, ~1.7: clouds blooming would wash the whole view
+  // into a milky haze from above them.)
+  const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.3, 0.3, 2.0);
   composer.addPass(bloom);
   composer.addPass(new OutputPass());
 
