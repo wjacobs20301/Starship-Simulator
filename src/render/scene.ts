@@ -7,6 +7,7 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import type { V3 } from '../sim/math';
 import { SceneAtmospherePass } from './atmosphere';
+import { AutoExposurePass } from './exposure';
 import { StarSky } from './stars';
 import { TowerRigging } from './towerRigging';
 import type { FloatingOrigin } from './floatingOrigin';
@@ -58,6 +59,7 @@ export interface World {
   render(): void;
   bloom: UnrealBloomPass;
   atmosphere: SceneAtmospherePass;
+  exposure: AutoExposurePass;
   setSize(width: number, height: number): void;
   /** Render resolution: device pixels per CSS pixel (below the display's = rendered smaller and scaled up). */
   setPixelRatio(ratio: number): void;
@@ -284,7 +286,11 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
   };
 
   // The whole Earth at low resolution; the streamed terrain covers the 200 km around Starbase.
-  new THREE.TextureLoader().loadAsync(`${import.meta.env.BASE_URL}globe/earth.jpg`).then((tex) => add(createGlobe(tex), [0, 0, 0]));
+  new THREE.TextureLoader().loadAsync(`${import.meta.env.BASE_URL}globe/earth.jpg`).then((tex) => {
+    const globe = createGlobe(tex);
+    add(globe, [0, 0, 0]);
+    atmosphere.setBackground(globe);
+  });
 
   // The sky is drawn by the atmosphere pass over a black background (space).
   scene.background = null;
@@ -296,12 +302,24 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
   target.depthTexture = new THREE.DepthTexture(1, 1, THREE.FloatType);
   const composer = new EffectComposer(renderer, target);
   const atmosphere = new SceneAtmospherePass(scene, camera);
+  atmosphere.setPixelRatio(renderer.getPixelRatio());
   composer.addPass(atmosphere);
+  // (The background, the clouds drawn against it; the Moon and the map tiles join it from main.)
+  atmosphere.setBackground(stars.group);
   // (Threshold over the brightest sunlit cloud, ~1.7: clouds blooming would wash the whole view
   // into a milky haze from above them.)
   const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.3, 0.3, 2.0);
+  // (At half the screen's resolution (its blur chain at a quarter): it's a soft glow, and the
+  // full-resolution one cost ~1.5 ms a frame at 2x pixel density.)
+  const bloomSize = bloom.setSize.bind(bloom);
+  bloom.setSize = (w: number, h: number) => bloomSize(Math.max(1, Math.round(w / 2)), Math.max(1, Math.round(h / 2)));
   composer.addPass(bloom);
-  composer.addPass(new OutputPass());
+  // (The view's exposure, down over a bright cloud field: see exposure.ts.)
+  const exposure = new AutoExposurePass();
+  composer.addPass(exposure);
+  const output = new OutputPass();
+  exposure.attachTo(output);
+  composer.addPass(output);
 
   return {
     renderer,
@@ -310,6 +328,7 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
     statics,
     sun,
     bloom,
+    exposure,
     atmosphere,
     composer,
     render() {
@@ -325,6 +344,7 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
       if (Math.abs(renderer.getPixelRatio() - ratio) < 1e-3) return;
       renderer.setPixelRatio(ratio);
       renderer.setSize(size.x, size.y, false);
+      atmosphere.setPixelRatio(ratio);
       composer.setPixelRatio(ratio);
       composer.setSize(size.x, size.y);
     },

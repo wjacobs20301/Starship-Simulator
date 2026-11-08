@@ -14,6 +14,14 @@ import { NOISE_SIZE } from './cloudNoise';
 import { RE, RP } from '../sim/constants';
 
 export const FX_LAYER = 1;
+/**
+ * The two halves of the solid scene, drawn apart (set each frame from setBackground's roots):
+ * the background (terrain, the globe, the Moon, stars), which the clouds are marched against,
+ * and everything else (vehicles, the pad, buildings), drawn over the clouds and the air with
+ * its own smooth (multisampled) edges.
+ */
+const BG_LAYER = 2;
+const NEAR_LAYER = 3;
 
 /**
  * Uniforms shared by the atmosphere pass and every glowing effect (smoke, plumes, sparks,
@@ -343,17 +351,24 @@ const CLOUD_GLSL = /* glsl */ `
     // cauliflower; a deck's top lumpier still, its cells.)
     // (Close up, the cells' surfaces roughened by finer noise, billows on billows, a cumulus's
     // cauliflower; a deck's top lumpier still, its cells.)
+    float u0 = u;
     if (detailed) {
       float dl = noiseLod(max(t, gDetT), ${CLOUD_DETAIL_SCALE}.0) + gDetBias;
-      float det = textureLod(tNoise, p / ${CLOUD_DETAIL_SCALE}.0 + uDrift * 40.0, dl).g;
-      u += mix(0.22, 0.11, smoothstep(0.3, 0.8, gBroken)) * (det - 0.478) / 0.12 * (1.0 - smoothstep(0.5, 2.5, dl));
+      // (Mostly billows of several sizes (the shape noise again, finer), a little of the even
+      // Worley cells: those alone are bubbles all one size, a foam, not a cauliflower.)
+      vec2 det = textureLod(tNoise, p / ${CLOUD_DETAIL_SCALE}.0 + uDrift * 40.0, dl).rg;
+      u += (0.12 * (det.x - 0.669) + 0.07 * (det.y - 0.478)) / 0.12 * (1.0 - smoothstep(0.5, 2.5, dl));
       // (And finer still, close up: wisps and knots a few tens of metres across.)
       float dl2 = noiseLod(max(t, gDetT), 610.0) + gDetBias;
       if (dl2 < 2.5 && gDetBias == 0.0) {
         float det2 = textureLod(tNoise, pr0 / 610.0 + vec3(0.37, 0.11, 0.83) + uDrift * 60.0, dl2).g;
-        u += 0.06 * (det2 - 0.478) / 0.12 * (1.0 - smoothstep(0.5, 2.5, dl2));
+        u += 0.04 * (det2 - 0.478) / 0.12 * (1.0 - smoothstep(0.5, 2.5, dl2));
       }
     }
+    // (The detail roughens a cloud's surface, eating into it as far as it likes, but builds out
+    // from it only a little: unbounded, it made new little clouds of its own all over the clear
+    // sky, grainy grey specks and balls.)
+    u = min(u, u0 + 0.07);
     // (Broken cumulus a little less than the cover: seen at a slant, their sides fill the gaps.)
     float fill = mix(1.0, 0.8, smoothstep(0.3, 0.8, gBroken));
     // (And in clumps and thinner stretches ~25 km across, as a cumulus field is, not one even
@@ -364,7 +379,9 @@ const CLOUD_GLSL = /* glsl */ `
       fill *= mix(1.0, clamp(1.0 + 5.0 * (clump - 0.669), 0.3, 1.5), cumulus);
     }
     gMargin = u - (1.0 - fill * base);
-    float dens = smoothstep(0.0, 1.0, gMargin / max(soft, 0.025)) * (0.3 + 0.7 * w.x);
+    // (A cloud as dense inside in light cover as in heavy: the cover is how many there are, not
+    // how thin. (Thinned, small cumulus were half see-through, soft-edged puffs.))
+    float dens = smoothstep(0.0, 1.0, gMargin / max(soft, 0.012)) * (0.75 + 0.25 * w.x);
     // (So far off the cells are a few pixels across or less: their average, an even density, as
     // thick as lets through what the gaps between them would, the same cloud on average. (A
     // broken field averaged as thick as its clouds would be one white sheet.))
@@ -812,6 +829,9 @@ const fragment = /* glsl */ `
   uniform sampler2D tCloudDist;  // and the clouds' distance, km
   uniform vec2 uCloudTexel;      // the half-resolution pass's texel, uv
   uniform float uLocalSun;       // the scene's sunlight already dimmed by cloud over the camera, 0..1
+  uniform sampler2D tNear;       // the near solids (vehicles, the pad, buildings): premultiplied, alpha = coverage
+  uniform sampler2D tNearDepth;
+  uniform vec2 uScreen;          // the screen's size, pixels
   varying vec2 vUv;
   ${ATMO_COMMON}
 
@@ -824,6 +844,25 @@ const fragment = /* glsl */ `
     float mu0;
     viewRay(vUv, ro, rd, sceneDist, mu0);
     bool sky = sceneDist >= 1e30;
+    // The near solids here, and how far. (Their depth is one sample of the four: at an edge it
+    // can miss the solid the colour has a share of; then the nearest of the neighbours'.)
+    vec4 near = texture2D(tNear, vUv);
+    float nearD = 0.0;
+    float nearDist = 1e30;
+    if (near.a > 0.002) {
+      nearD = texture2D(tNearDepth, vUv).x;
+      if (nearD <= 0.0) {
+        vec2 e = 1.0 / uScreen;
+        nearD = max(max(texture2D(tNearDepth, vUv + vec2(e.x, 0.0)).x, texture2D(tNearDepth, vUv - vec2(e.x, 0.0)).x),
+                    max(texture2D(tNearDepth, vUv + vec2(0.0, e.y)).x, texture2D(tNearDepth, vUv - vec2(0.0, e.y)).x));
+      }
+      vec3 vd = normalize(vec3((vUv * 2.0 - 1.0 + uProjOff) * uTanHalf, -1.0));
+      if (nearD > 0.0) nearDist = (uDepthDecode.y / (nearD + uDepthDecode.x)) / max(1e-4, -vd.z);
+      // (Behind the ground or sea: hidden.)
+      if (nearD <= 0.0 || nearDist > sceneDist * 1.001 + 0.5) near = vec4(0.0);
+    }
+    if (near.a <= 0.002) near = vec4(0.0);
+    gl_FragDepthEXT = near.a > 0.5 ? nearD : texture2D(tDepth, vUv).x;
 
     vec2 ta = hitSphere(ro, rd, uRa);
     vec2 tg = hitSphere(ro, rd, uRg);
@@ -833,7 +872,7 @@ const fragment = /* glsl */ `
     if (ta.y < 0.0 || t1 <= t0) {
       // Out in space, clear of the air: the sun's disk as it is (in the map, from orbit).
       if (sky && (tg.x < 0.0 || tg.y < 0.0)) col.rgb += smoothstep(0.99996, 0.99999, mu0) * 40.0;
-      gl_FragColor = col;
+      gl_FragColor = vec4(col.rgb * (1.0 - near.a) + near.rgb, 1.0);
       return;
     }
 
@@ -866,6 +905,11 @@ const fragment = /* glsl */ `
     vec3 sumM = vec3(0.0);
     float odR = 0.0;
     float odM = 0.0;
+    // (The same, up to the near solid.)
+    vec3 sumRN = vec3(0.0);
+    vec3 sumMN = vec3(0.0);
+    float odRN = 0.0;
+    float odMN = 0.0;
     for (int i = 0; i < N; i++) {
       float a0 = float(i) / float(N);
       float a1 = float(i + 1) / float(N);
@@ -888,6 +932,10 @@ const fragment = /* glsl */ `
       }
       odR += hr;
       odM += hm;
+      // (The share of this step in front of the near solid.)
+      float fN = clamp((nearDist - s0) / max(seg, 1.0), 0.0, 1.0);
+      odRN += hr * fN;
+      odMN += hm * fN;
       // In the Earth's shadow: no sunlight to scatter.
       if (hitSphere(p, uSun, uRg).x > 0.0) continue;
       float rp = length(p);
@@ -897,6 +945,8 @@ const fragment = /* glsl */ `
       float behind = mix(cl.a, 1.0, front);
       sumR += att * hr * behind;
       sumM += att * hm * behind;
+      sumRN += att * hr * behind * fN;
+      sumMN += att * hm * behind * fN;
     }
     float mu = dot(rd, uSun);
     float phaseR = 3.0 / (16.0 * 3.14159265) * (1.0 + mu * mu);
@@ -907,11 +957,19 @@ const fragment = /* glsl */ `
     if (!pastCloud) transToCloud = trans;
     // The clouds' shadows on the scene (the sunlight it's lit by; less of it where the whole scene
     // is dimmed already, the camera under an overcast).
-    if (!sky && uClouds > 0.5) {
-      float sh = 0.3 + 0.7 * texture2D(tCloudDist, vUv).g;
-      col.rgb *= clamp(sh / max(uLocalSun, 0.05), 0.0, 1.0);
+    if (uClouds > 0.5) {
+      vec2 shd = 0.3 + 0.7 * texture2D(tCloudDist, vUv).gb;
+      if (!sky) col.rgb *= clamp(shd.x / max(uLocalSun, 0.05), 0.0, 1.0);
+      near.rgb *= clamp(shd.y / max(uLocalSun, 0.05), 0.0, 1.0);
     }
     vec3 outc = col.rgb * trans * cl.a + cl.rgb * transToCloud + inscatter;
+    // The near solid: through the air in front of it, and any cloud in front of it.
+    vec3 nearC = vec3(0.0);
+    if (near.a > 0.0) {
+      vec3 transN = exp(-(BR * odRN + BM * 1.1 * odMN));
+      float cf = tCloud < 1e29 ? 1.0 - smoothstep(0.97, 1.03, tCloud / nearDist) : 0.0;
+      nearC = near.rgb * transN * mix(1.0, cl.a, cf) + near.a * (cl.rgb * transToCloud * cf + uSunI * (sumRN * BR * phaseR + sumMN * BM * phaseM));
+    }
     // The sun's disk, reddened by the air in front of it (and hidden by cloud).
     // (No ground ahead: the ray misses it, or it's all behind the camera.)
     if (sky && (tg.x < 0.0 || tg.y < 0.0)) outc += trans * cl.a * smoothstep(0.99996, 0.99999, mu) * 40.0;
@@ -923,8 +981,10 @@ const fragment = /* glsl */ `
       float day = smoothstep(-0.1, 0.25, dot(up, uSun));
       vec3 fogCol = vec3(0.6, 0.63, 0.67) * (0.06 + 0.94 * day);
       outc = mix(fogCol, outc, exp(-fogOD));
+      if (near.a > 0.0) nearC = mix(fogCol * near.a, nearC, exp(-fogDepth(ro, rd, min(nearDist, 8e4))));
     }
-    if (any(notEqual(outc, outc)) || any(greaterThan(outc, vec3(6e4)))) outc = col.rgb;
+    outc = outc * (1.0 - near.a) + nearC;
+    if (any(notEqual(outc, outc)) || any(greaterThan(outc, vec3(6e4)))) outc = col.rgb * (1.0 - near.a) + near.rgb;
     gl_FragColor = vec4(max(outc, vec3(0.0)), 1.0);
   }
 `;
@@ -941,8 +1001,9 @@ const cloudFragment = /* glsl */ `
   layout(location = 0) out vec4 outCloud;
   layout(location = 1) out vec4 outDist;
   ${ATMO_COMMON}
-  uniform vec2 uSub;       // this frame's sub-pixel: which of each 2x2 block of screen pixels
-  uniform vec2 uFullSize;  // the screen's size, pixels
+  uniform vec2 uSub;       // this frame's sub-pixel: which of each 2x2 block of (cloud) pixels
+  uniform vec2 uFullSize;  // the clouds' full resolution (the screen's, or less: see setPixelRatio)
+  uniform sampler2D tNearDepth; // the near solids' depth (their shadows)
   void main() {
     vec3 ro;
     vec3 rd;
@@ -979,16 +1040,19 @@ const cloudFragment = /* glsl */ `
     // "none" value: the atmosphere pass reads this upscaled (blended between pixels), and a huge
     // value blended into a cloud edge would make the edge look farther than the ground behind it
     // and drop it, pixel by pixel, flickering as the view moves.
-    // (And in .g: the clouds' shadow on whatever the ray ends at, the ground or a vehicle.)
+    // (And in .g: the clouds' shadow on whatever the ray ends at, the ground or the sea; in .b,
+    // on the near solid there, if any (a vehicle, the pad, a building).)
     // (Through the middle of the pixel's 2x2 block, the same every frame: the sub-pixel moving
     // from frame to frame would make the shadows' edges shimmer.)
     float shadow = 1.0;
-    if (uClouds > 0.5 && tEnd < 1e29) {
+    float shadowNear = 1.0;
+    if (uClouds > 0.5) {
+      vec2 uvC = (2.0 * floor(gl_FragCoord.xy) + 1.0) / uFullSize;
       vec3 roC;
       vec3 rdC;
       float dC;
       float muC;
-      viewRay((2.0 * floor(gl_FragCoord.xy) + 1.0) / uFullSize, roC, rdC, dC, muC);
+      viewRay(uvC, roC, rdC, dC, muC);
       vec3 rdCS = rdC + uPolar * (dot(rdC, uPolar) * ${(RE / RP - 1).toExponential(8)});
       float kC = length(rdCS);
       rdC = rdCS / kC;
@@ -1000,8 +1064,15 @@ const cloudFragment = /* glsl */ `
       // offset from it by a pixel or two.)
       float fade = smoothstep(250.0, 500.0, tC * uPixAng);
       if (tC < 1e29 && fade < 1.0) shadow = mix(cloudShadow(roC + rdC * tC, tC), 1.0, fade);
+      float dN = texture(tNearDepth, uvC).x;
+      if (dN > 0.0) {
+        vec3 vd = normalize(vec3((uvC * 2.0 - 1.0 + uProjOff) * uTanHalf, -1.0));
+        float tN = (uDepthDecode.y / (dN + uDepthDecode.x)) / max(1e-4, -vd.z) * kC;
+        float fadeN = smoothstep(250.0, 500.0, tN * uPixAng);
+        shadowNear = tN < tC * 1.001 + 1.0 ? (fadeN < 1.0 ? mix(cloudShadow(roC + rdC * tN, tN), 1.0, fadeN) : 1.0) : shadow;
+      } else shadowNear = shadow;
     }
-    outDist = vec4(min(tFirst < 1e29 ? tFirst : tEnd, 6e7) / 1000.0, shadow, 0.0, 1.0);
+    outDist = vec4(min(tFirst < 1e29 ? tFirst : tEnd, 6e7) / 1000.0, shadow, shadowNear, 1.0);
   }
 `;
 
@@ -1030,6 +1101,26 @@ const resolveFragment = /* glsl */ `
   uniform mat3 uPrevView;      // the last frame's world -> view rotation
   uniform vec2 uPrevTanHalf;
   uniform vec2 uPrevProjOff;
+
+  // The history at uv, Catmull-Rom filtered (five bilinear taps). (Bilinear alone blurs it a
+  // little more every frame it's moved: in flight, the clouds went soft.)
+  vec4 histAt(vec2 uv) {
+    vec2 sp = uv * uFullSize;
+    vec2 tc = floor(sp - 0.5) + 0.5;
+    vec2 f = sp - tc;
+    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    vec2 w3 = f * f * (-0.5 + 0.5 * f);
+    vec2 w12 = w1 + w2;
+    vec2 t0 = (tc - 1.0) / uFullSize;
+    vec2 t3 = (tc + 2.0) / uFullSize;
+    vec2 t12 = (tc + w2 / w12) / uFullSize;
+    vec4 r = texture(tHist, vec2(t12.x, t0.y)) * (w12.x * w0.y) + texture(tHist, vec2(t0.x, t12.y)) * (w0.x * w12.y)
+           + texture(tHist, t12) * (w12.x * w12.y) + texture(tHist, vec2(t3.x, t12.y)) * (w3.x * w12.y)
+           + texture(tHist, vec2(t12.x, t3.y)) * (w12.x * w3.y);
+    return r / (w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y);
+  }
 
   void main() {
     ivec2 px = ivec2(gl_FragCoord.xy);
@@ -1061,7 +1152,7 @@ const resolveFragment = /* glsl */ `
       outColor = fresh ? here : cur;
       return;
     }
-    vec4 hist = clamp(texture(tHist, uvPrev), lo, hi);
+    vec4 hist = clamp(histAt(uvPrev), lo, hi);
     // (A pixel's new sample blended in, not swapped: steadier.)
     outColor = fresh ? mix(hist, here, 0.2) : hist;
   }
@@ -1078,13 +1169,19 @@ export class SceneAtmospherePass extends Pass {
     uRa: { value: 6371e3 + 100e3 },
     uDepthDecode: { value: new THREE.Vector2(0, 1) },
     uSun: { value: new THREE.Vector3(0, 1, 0) },
-    uSunI: { value: 18 },
+    // (Sunlight for the air's glow: the sky's colour from the ground. Brighter, looking down
+    // from high up the haze over the ground was several times the ground's own light: a milky
+    // wash over everything, the clouds included.)
+    uSunI: { value: 10 },
     tSunDepth: { value: sunDepthTable() as THREE.Texture },
     tNoise: { value: null as THREE.Texture | null },
     tCloudTex: FX_SHARED.tCloudTex,
     tCloudDist: FX_SHARED.tCloudDist,
     uCloudTexel: { value: new THREE.Vector2(1, 1) },
     uLocalSun: { value: 1 },
+    tNear: { value: null as THREE.Texture | null },
+    tNearDepth: { value: null as THREE.Texture | null },
+    uScreen: FX_SHARED.uScreen,
     uClouds: FX_SHARED.uClouds,
     uFog: FX_SHARED.uFog,
     tWxA0: { value: null as THREE.Texture | null },
@@ -1129,14 +1226,16 @@ export class SceneAtmospherePass extends Pass {
   private cloudQuad: FullScreenQuad;
   private cloudTarget = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, count: 2, depthBuffer: false });
   private clearColor = new THREE.Color();
-  private fxLayers = new THREE.Layers();
-  /**
-   * The solids are drawn here, multisampled (4x MSAA: smooth edges). Only this target needs the
-   * samples: the atmosphere and everything after it work on the resolved image, in the
-   * composer's plain targets, which is much cheaper than carrying 4 samples per pixel through
-   * every full-screen pass.
-   */
+  /** The background (see BG_LAYER) is drawn here, with its depth. */
   private sceneTarget: THREE.WebGLRenderTarget;
+  /**
+   * The near solids (see NEAR_LAYER), over nothing (alpha 0), multisampled (4x MSAA: smooth
+   * edges). Only this target needs the samples: the atmosphere and everything after it work on
+   * the resolved image, much cheaper than carrying 4 samples per pixel through every pass.
+   */
+  private nearTarget: THREE.WebGLRenderTarget;
+  /** The background's roots (see BG_LAYER). */
+  private background = new Set<THREE.Object3D>();
 
   constructor(
     private scene: THREE.Scene,
@@ -1144,9 +1243,11 @@ export class SceneAtmospherePass extends Pass {
   ) {
     super();
     this.needsSwap = true;
-    this.fxLayers.set(FX_LAYER);
     this.quad = new FullScreenQuad(
-      new THREE.ShaderMaterial({ vertexShader: vertex, fragmentShader: fragment, uniforms: this.uniforms, depthTest: false, depthWrite: false }),
+      // (Writes the solids' depth, both halves', for the effects drawn after: always. Under the
+      // reversed depth buffer three.js swaps each test for its complement: "never" is drawn as
+      // "always".)
+      new THREE.ShaderMaterial({ vertexShader: vertex, fragmentShader: fragment, uniforms: this.uniforms, depthTest: true, depthWrite: true, depthFunc: THREE.NeverDepth }),
     );
     this.cloudQuad = new FullScreenQuad(
       new THREE.ShaderMaterial({
@@ -1174,15 +1275,39 @@ export class SceneAtmospherePass extends Pass {
         tex.magFilter = THREE.LinearFilter;
       }
     }
-    this.sceneTarget = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
+    // (The background without multisampling: its edges are the horizon and hills, against the
+    // sky's haze; the near solids, drawn apart, keep it. ~5 ms a frame at 2x pixel density.)
+    this.sceneTarget = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType });
     this.sceneTarget.depthTexture = new THREE.DepthTexture(1, 1, THREE.FloatType);
+    this.nearTarget = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
+    this.nearTarget.depthTexture = new THREE.DepthTexture(1, 1, THREE.FloatType);
+  }
+
+  /** The background's roots: drawn first, the clouds marched against them (see BG_LAYER). */
+  setBackground(...roots: THREE.Object3D[]): void {
+    for (const r of roots) this.background.add(r);
+  }
+
+  /** The clouds' resolution, as a share of the screen's (see setPixelRatio). */
+  private cloudRes = 1;
+
+  /**
+   * The screen's pixel density: the clouds are drawn at no more than 1.25 pixels per point (on a
+   * high-density screen, the soft clouds don't need every pixel; the upscale is invisible, and it
+   * saves a third or more of their cost). Before setSize.
+   */
+  setPixelRatio(ratio: number): void {
+    this.cloudRes = Math.min(1, 1.25 / ratio);
   }
 
   setSize(width: number, height: number): void {
     this.sceneTarget.setSize(width, height);
-    this.cloudTarget.setSize(Math.max(1, Math.ceil(width / 2)), Math.max(1, Math.ceil(height / 2)));
-    for (const h of this.history) h.setSize(width, height);
-    this.uniforms.uFullSize.value.set(width, height);
+    this.nearTarget.setSize(width, height);
+    const cw = Math.max(1, Math.round(width * this.cloudRes));
+    const ch = Math.max(1, Math.round(height * this.cloudRes));
+    this.cloudTarget.setSize(Math.max(1, Math.ceil(cw / 2)), Math.max(1, Math.ceil(ch / 2)));
+    for (const h of this.history) h.setSize(cw, ch);
+    this.uniforms.uFullSize.value.set(cw, ch);
     this.resolveUniforms.uHalfSize.value.set(this.cloudTarget.width, this.cloudTarget.height);
     this.uniforms.uCloudTexel.value.set(1 / this.cloudTarget.width, 1 / this.cloudTarget.height);
     this.histValid = false;
@@ -1208,13 +1333,26 @@ export class SceneAtmospherePass extends Pass {
     const clearAlpha = renderer.getClearAlpha();
     const scene = this.sceneTarget;
 
-    // 1. Solid objects, with depth, over black (space).
+    // 1. The background (terrain, the globe, the Moon, stars), with depth, over black (space).
+    // (The shadow map, drawn here, has everything in it: the shadow camera sees layer 0.)
+    const fxAny = this.sortLayers();
     renderer.autoClear = false;
     renderer.setClearColor(0x000000, 1);
-    cam.layers.set(0);
+    cam.layers.set(BG_LAYER);
     renderer.setRenderTarget(scene);
     renderer.clear();
     renderer.render(this.scene, cam);
+    // And the near solids apart, over nothing: put over the clouds and air after, their edges
+    // smooth. (Drawn in with the background, the clouds' depth test would cut their edges to
+    // the pixel, and the half-resolution clouds would leave a blocky fringe round them.)
+    renderer.shadowMap.autoUpdate = false;
+    renderer.setClearColor(0x000000, 0);
+    cam.layers.set(NEAR_LAYER);
+    renderer.setRenderTarget(this.nearTarget);
+    renderer.clear();
+    renderer.render(this.scene, cam);
+    this.uniforms.tNear.value = this.nearTarget.texture;
+    this.uniforms.tNearDepth.value = this.nearTarget.depthTexture;
 
     // 2. Atmosphere over them, into the composer's buffer.
     cam.updateMatrixWorld();
@@ -1256,12 +1394,12 @@ export class SceneAtmospherePass extends Pass {
       this.histValid = false;
     }
     renderer.setRenderTarget(writeBuffer);
+    (this.quad.material as THREE.ShaderMaterial).depthFunc = renderer.capabilities.reversedDepthBuffer ? THREE.NeverDepth : THREE.AlwaysDepth;
     this.quad.render(renderer);
 
-    // 3. The glowing effects on top, depth-tested against the solids: their (resolved) depth is
-    // copied into this buffer's depth first.
-    if (this.fxVisible() && writeBuffer.depthTexture) {
-      this.copyDepth(renderer, scene, writeBuffer);
+    // 3. The glowing effects on top, depth-tested against the solids (whose depth the pass above
+    // wrote into this buffer).
+    if (fxAny && writeBuffer.depthTexture) {
       renderer.setRenderTarget(writeBuffer);
       renderer.shadowMap.autoUpdate = false;
       cam.layers.set(FX_LAYER);
@@ -1274,36 +1412,35 @@ export class SceneAtmospherePass extends Pass {
     renderer.setClearColor(this.clearColor, clearAlpha);
   }
 
-  /** Blit the resolved depth of one target into another's (same size and depth format). */
-  private copyDepth(renderer: THREE.WebGLRenderer, from: THREE.WebGLRenderTarget, to: THREE.WebGLRenderTarget): void {
-    const gl = renderer.getContext() as WebGL2RenderingContext;
-    // (Make sure both have their GL framebuffers.)
-    renderer.setRenderTarget(to);
-    const props = renderer.properties as unknown as { get(o: object): { __webglFramebuffer?: WebGLFramebuffer } };
-    const src = props.get(from).__webglFramebuffer;
-    const dst = props.get(to).__webglFramebuffer;
-    if (!src || !dst) return;
-    renderer.state.bindFramebuffer(gl.READ_FRAMEBUFFER, src);
-    renderer.state.bindFramebuffer(gl.DRAW_FRAMEBUFFER, dst);
-    gl.blitFramebuffer(0, 0, from.width, from.height, 0, 0, to.width, to.height, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
-    renderer.state.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
-    renderer.state.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
-    renderer.setRenderTarget(null);
-  }
-
-  /** Whether anything on the effects layer is showing (exhaust, smoke, plasma...). */
-  private fxVisible(): boolean {
-    let any = false;
-    const fx = this.fxLayers;
-    this.scene.traverseVisible((o) => {
-      const drawable = (o as THREE.Mesh).isMesh || (o as THREE.Points).isPoints || (o as THREE.Sprite).isSprite || (o as THREE.Line).isLine;
-      if (!drawable || !o.layers.test(fx)) return;
-      any = true;
-      // (Every effect fades behind clouds and into fog: patched the first time it's seen.)
-      const mat = (o as THREE.Mesh).material as THREE.Material | THREE.Material[];
-      for (const m of Array.isArray(mat) ? mat : [mat]) if ((m as THREE.ShaderMaterial).isShaderMaterial) occludeFx(m as THREE.ShaderMaterial);
-    });
-    return any;
+  /**
+   * Each solid onto the background's layer or the near one (by its root: see setBackground),
+   * lights onto both; effects patched to fade behind clouds and into fog. Whether any effect is
+   * showing (exhaust, smoke, plasma...).
+   */
+  private sortLayers(): boolean {
+    let fx = false;
+    const BG = 1 << BG_LAYER;
+    const NEAR = 1 << NEAR_LAYER;
+    const FX = 1 << FX_LAYER;
+    const visit = (o: THREE.Object3D, bg: boolean) => {
+      if (!o.visible) return;
+      bg ||= this.background.has(o);
+      const L = o.layers;
+      if ((o as THREE.Light).isLight) L.mask |= BG | NEAR;
+      else if (L.mask & 1) L.mask = (L.mask & ~(BG | NEAR)) | (bg ? BG : NEAR);
+      if (L.mask & FX) {
+        const drawable = (o as THREE.Mesh).isMesh || (o as THREE.Points).isPoints || (o as THREE.Sprite).isSprite || (o as THREE.Line).isLine;
+        if (drawable) {
+          fx = true;
+          // (Every effect fades behind clouds and into fog: patched the first time it's seen.)
+          const mat = (o as THREE.Mesh).material as THREE.Material | THREE.Material[];
+          for (const m of Array.isArray(mat) ? mat : [mat]) if ((m as THREE.ShaderMaterial).isShaderMaterial) occludeFx(m as THREE.ShaderMaterial);
+        }
+      }
+      for (const c of o.children) visit(c, bg);
+    };
+    visit(this.scene, false);
+    return fx;
   }
 
   dispose(): void {
@@ -1313,5 +1450,6 @@ export class SceneAtmospherePass extends Pass {
     this.resolveQuad.dispose();
     for (const h of this.history) h.dispose();
     this.sceneTarget.dispose();
+    this.nearTarget.dispose();
   }
 }

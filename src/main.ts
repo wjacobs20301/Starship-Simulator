@@ -63,6 +63,8 @@ world.scene.add(mapView.group);
 // The Moon, in the sky and on the map.
 const moon = new Moon();
 world.scene.add(moon.mesh, moon.halo, moon.light, moon.light.target);
+// (The background: the clouds are drawn against these, the vehicles and buildings over them.)
+world.atmosphere.setBackground(globeTiles.group, terrain.group, moon.mesh, moon.halo);
 mapView.bodies = { sunDir: world.sunDir, moon };
 const PAD_UP = new THREE.Vector3(0, 1, 0);
 /** Latest predicted trajectories, by vehicle id. */
@@ -890,12 +892,14 @@ function governResolution(gapMs: number, cpuMs: number, now: number): void {
   if (gap > TARGET_MS * 1.2 && cpu < TARGET_MS * 0.75) {
     // Missing frames and it's not the scripts: fewer pixels.
     failedPr = pixelRatio;
-    failedUntil = now + 20000;
+    // (Not retried for a minute: every change of resolution resizes the buffers and restarts the
+    // clouds' history, a visible hitch, so it shouldn't bounce between two levels.)
+    failedUntil = now + 60000;
     pixelRatio = Math.max(MIN_PR, pixelRatio * 0.85);
     goodWindows = 0;
   } else if (gap < TARGET_MS * 1.08) {
     const next = Math.min(NATIVE_PR, pixelRatio * 1.12);
-    if (++goodWindows >= 3 && next > pixelRatio && !(next >= failedPr && now < failedUntil)) {
+    if (++goodWindows >= 6 && next > pixelRatio && !(next >= failedPr && now < failedUntil)) {
       pixelRatio = next;
       goodWindows = 0;
     }
