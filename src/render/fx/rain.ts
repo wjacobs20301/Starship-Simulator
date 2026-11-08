@@ -28,7 +28,7 @@ const fragment = /* glsl */ `
   uniform vec3 uColor;
   varying float vTail;
   void main() {
-    float a = uRain * 0.5 * (1.0 - 0.75 * vTail);
+    float a = uRain * 0.3 * (1.0 - 0.75 * vTail);
     gl_FragColor = vec4(uColor, a);
   }
 `;
@@ -70,12 +70,15 @@ export class Rain {
   /**
    * amount: 0..1; cam: camera world position (float64); up: local vertical there; time: s
    * (real time: rain keeps falling at any time warp, and freezes only when paused).
+   * light: the daylight there, 0..1 (dimmed by the overcast): the drops are only as bright as
+   * the grey light they catch, faint streaks, not white lines.
    */
-  update(amount: number, cam: readonly number[], up: THREE.Vector3, time: number): void {
+  update(amount: number, cam: readonly number[], up: THREE.Vector3, time: number, light = 1): void {
     this.lines.visible = amount > 0.01;
     if (!this.lines.visible) return;
     const u = this.mat.uniforms;
     u.uRain.value = amount;
+    (u.uColor.value as THREE.Color).setRGB(0.84, 0.87, 0.92).multiplyScalar(0.3 + 0.7 * Math.min(1, Math.max(0, light)));
     u.uTime.value = time;
     (u.uCamera.value as THREE.Vector3).set(cam[0] % BOX, cam[1] % BOX, cam[2] % BOX);
     // (The camera sits at the floating origin: the box is drawn around 0.)

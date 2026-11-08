@@ -21,15 +21,16 @@ export const SUN_AT_DAY0 = new THREE.Vector3(0.7, 0.55, 0.3).normalize();
  * Image-based lighting for polished stainless steel: a sky gradient with a bright
  * horizon, a sun hotspot, and sand-colored ground below (Boca Chica beach).
  */
-function outdoorEnvironment(): { env: THREE.Scene; sunDir: THREE.Vector3 } {
+function outdoorEnvironment(): { env: THREE.Scene; sunDir: THREE.Vector3; overcast: { value: number } } {
   const env = new THREE.Scene();
   const mat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     depthWrite: false,
-    uniforms: { sunDir: { value: new THREE.Vector3(0.7, 0.55, 0.3).normalize() } },
+    uniforms: { sunDir: { value: new THREE.Vector3(0.7, 0.55, 0.3).normalize() }, overcast: { value: 0 } },
     vertexShader: `varying vec3 vDir; void main() { vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
     fragmentShader: `
       uniform vec3 sunDir;
+      uniform float overcast;
       varying vec3 vDir;
       void main() {
         vec3 d = normalize(vDir);
@@ -39,13 +40,16 @@ function outdoorEnvironment(): { env: THREE.Scene; sunDir: THREE.Vector3 } {
         vec3 ground = vec3(0.42, 0.37, 0.28);
         vec3 sky = mix(horizon, zenith, pow(max(h, 0.0), 0.45));
         vec3 col = h >= 0.0 ? sky : mix(horizon * 0.8, ground, smoothstep(0.0, 0.08, -h));
+        // Under an overcast: a grey deck overhead (a little brighter toward the zenith), no sun.
+        vec3 deck = vec3(0.5, 0.52, 0.55) * mix(0.8, 1.0, max(h, 0.0));
+        col = mix(col, h >= 0.0 ? deck : mix(deck * 0.8, ground * 0.55, smoothstep(0.0, 0.08, -h)), overcast);
         float s = max(dot(d, sunDir), 0.0);
-        col += vec3(1.0, 0.92, 0.8) * (pow(s, 600.0) * 40.0 + pow(s, 12.0) * 0.35);
+        col += (1.0 - overcast) * vec3(1.0, 0.92, 0.8) * (pow(s, 600.0) * 40.0 + pow(s, 12.0) * 0.35);
         gl_FragColor = vec4(col, 1.0);
       }`,
   });
   env.add(new THREE.Mesh(new THREE.SphereGeometry(100, 64, 32), mat));
-  return { env, sunDir: mat.uniforms.sunDir.value };
+  return { env, sunDir: mat.uniforms.sunDir.value, overcast: mat.uniforms.overcast };
 }
 
 export interface World {
@@ -82,6 +86,11 @@ export interface World {
    * about its axis (world axes, unit). The sun and the stars turn the other way.
    */
   setDay(angle: number, earthAxis: THREE.Vector3): void;
+  /**
+   * How overcast it is where the camera is, 0 (clear) .. 1: the sky that lights and is reflected
+   * in everything turns to a grey deck without a sun, and the ambient light grey.
+   */
+  setOvercast(k: number): void;
   /** Direction to the sun (world axes, unit). */
   readonly sunDir: THREE.Vector3;
   /** Equatorial (celestial) -> world rotation now: the star sky's, turning with the day. */
@@ -252,6 +261,12 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
   let envTarget = pmrem.fromScene(outdoor.env, 0.02);
   scene.environment = envTarget.texture;
   scene.environmentIntensity = 0.75;
+  const redrawEnv = () => {
+    const next = pmrem.fromScene(outdoor.env, 0.02);
+    scene.environment = next.texture;
+    envTarget.dispose();
+    envTarget = next;
+  };
 
   // (Far enough for the Moon, and the map zoomed out to its orbit.)
   const camera = new THREE.PerspectiveCamera(50, 1, 0.5, 2e9);
@@ -270,7 +285,9 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
   sun.shadow.bias = -0.0004;
   sun.shadow.normalBias = 0.06;
   scene.add(sun, sun.target);
-  const hemi = new THREE.HemisphereLight(0xbcd7ff, 0x8a7a5c, 0.3);
+  const HEMI_SKY = new THREE.Color(0xbcd7ff);
+  const HEMI_OVERCAST = new THREE.Color(0xc4c8cc);
+  const hemi = new THREE.HemisphereLight(HEMI_SKY, 0x8a7a5c, 0.3);
   scene.add(hemi);
   // Night: faint cool starlight from the whole sky, so a vehicle in the dark still shows its shape.
   const starlight = new THREE.HemisphereLight(0x9fb4e6, 0x1c2230, 0);
@@ -388,10 +405,16 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
         envAt = now;
         // (Its sky is the pad's: up is the world's y.)
         outdoor.sunDir.copy(sunDir);
-        const next = pmrem.fromScene(outdoor.env, 0.02);
-        scene.environment = next.texture;
-        envTarget.dispose();
-        envTarget = next;
+        redrawEnv();
+      }
+    },
+    setOvercast(k: number) {
+      hemi.color.copy(HEMI_SKY).lerp(HEMI_OVERCAST, k);
+      const now = performance.now();
+      if (Math.abs(k - outdoor.overcast.value) > 0.06 && now - envAt > 1000) {
+        envAt = now;
+        outdoor.overcast.value = k;
+        redrawEnv();
       }
     },
     updateShadow(focus: THREE.Vector3, radius: number, reach = 0) {

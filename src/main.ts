@@ -1183,8 +1183,9 @@ function frame(): void {
   // Weather: the clouds (drawn by the atmosphere pass), overcast dimming the sun, rain.
   weather.apply(world.atmosphere);
   world.sun.intensity *= wx.sun;
+  world.setOvercast(Math.min(1, Math.max(0, (1 - wx.sun) / 0.65)));
   if (!paused) rainClock += frameDt;
-  rain.update(rig.map ? 0 : wx.rain, cam, camUp, rainClock);
+  rain.update(rig.map ? 0 : wx.rain, cam, camUp, rainClock, wx.sun * Math.min(1, Math.max(0.05, (world.sunDir.dot(camUp) + 0.1) / 0.35)));
   // Main menu: frame the pad off to the right, clear of the menu (eased in and out).
   menuShift += ((menu.kind === 'main' ? 1 : 0) - menuShift) * Math.min(1, frameDt * 3);
   if (menuShift > 0.001) {
