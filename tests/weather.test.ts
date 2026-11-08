@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { Land, type SiteWeather, WeatherModel } from '../src/weather/model';
+import { Land, type SiteWeather, WeatherModel, starbaseDay } from '../src/weather/model';
+import { STORM_GRID, stormCells, stormFace, stormFaceDir } from '../src/weather/storms';
 
 const land = new Land(new Uint8Array(readFileSync(resolve(import.meta.dirname, '../public/data/landmask.bin'))));
 const SITE = { lat: 25.99613, lon: -97.15442 };
@@ -31,6 +32,75 @@ describe('global weather model', () => {
       expect(partly).toBeGreaterThan(0.25);
       expect(partly).toBeLessThan(0.75);
     }
+  });
+
+  it('sunny days have a few small clouds, stormy ones thunderstorms nearby', () => {
+    for (const seed of [1, 2, 3, 4, 7]) {
+      const fair = model(seed, 'fair').sample(SITE.lat, SITE.lon, 0);
+      expect(fair.cover).toBeGreaterThan(0.03);
+      expect(fair.cover).toBeLessThan(0.3);
+      expect(fair.precip).toBeLessThan(0.1);
+      // Thunderstorms within ~120 km: deep convection, tops past 9 km.
+      const m = model(seed, 'storm');
+      let conv = 0;
+      let top = 0;
+      for (let k = 0; k < 16; k++) {
+        for (const d of [0, 0.3, 0.6, 0.9]) {
+          const s = m.sample(SITE.lat + d * Math.sin(k), SITE.lon + d * Math.cos(k), 0);
+          conv = Math.max(conv, s.conv);
+          top = Math.max(top, s.top);
+        }
+      }
+      expect(conv).toBeGreaterThan(0.6);
+      expect(top).toBeGreaterThan(9000);
+      // No thunderstorms on a clear day.
+      expect(model(seed, 'clear').sample(SITE.lat, SITE.lon, 0).conv).toBeLessThan(0.05);
+    }
+  });
+
+  it("deals Starbase's days out as its climate does: mostly fair, now and then the rest", () => {
+    const n = 4000;
+    const count: Record<string, number> = {};
+    for (let i = 0; i < n; i++) {
+      const w = starbaseDay(-1.7, (i + 0.5) / n);
+      count[w] = (count[w] ?? 0) + 1;
+    }
+    expect(Object.keys(count).sort()).toEqual(['clear', 'fair', 'fog', 'overcast', 'partly', 'rain', 'storm']);
+    expect((count.fair + count.partly + count.clear) / n).toBeGreaterThan(0.55);
+    for (const w of ['rain', 'storm', 'fog', 'overcast']) expect(count[w] / n).toBeLessThan(0.15);
+    // Thunderstorms in summer, fog in winter.
+    const share = (season: number, w: string) => {
+      let c = 0;
+      for (let i = 0; i < n; i++) if (starbaseDay(season, (i + 0.5) / n) === w) c++;
+      return c / n;
+    };
+    expect(share(23, 'storm')).toBeGreaterThan(share(-23, 'storm') * 2);
+    expect(share(-23, 'fog')).toBeGreaterThan(share(23, 'fog') * 2);
+  });
+
+  it('places thunderstorm cells on a grid over cube faces, the same from anywhere', () => {
+    const R = 6378137;
+    // Face coordinates and back.
+    for (const e of [[0.3, -0.8, 0.52], [-0.9, 0.1, -0.42], [0.05, 0.2, 0.98]]) {
+      const l = Math.hypot(...e);
+      const u = e.map((x) => x / l);
+      const [f, a, b] = stormFace(u, R);
+      const d = stormFaceDir(f, a, b, R);
+      for (let i = 0; i < 3; i++) expect(d[i]).toBeCloseTo(u[i], 9);
+    }
+    // Where it's all thunderstorms, about a cell per grid square; seen from 20 km away, the same.
+    const D = Math.PI / 180;
+    const at = (lat: number, lon: number) => [Math.cos(lat * D) * Math.cos(lon * D), Math.cos(lat * D) * Math.sin(lon * D), Math.sin(lat * D)];
+    const a = stormCells(at(26, -97), R, 200e3, () => 1, 900, 12000);
+    const b = stormCells(at(26.18, -97), R, 200e3, () => 1, 900, 12000);
+    const area = Math.PI * 200e3 ** 2;
+    expect(a.length).toBeGreaterThan(0.5 * (area / STORM_GRID ** 2));
+    const key = (c: { dir: number[] }) => c.dir.map((x) => x.toFixed(6)).join();
+    const inB = new Set(b.map(key));
+    const near = a.filter((c) => Math.acos(c.dir[0] * at(26.09, -97)[0] + c.dir[1] * at(26.09, -97)[1] + c.dir[2] * at(26.09, -97)[2]) * R < 150e3);
+    for (const c of near) expect(inB.has(key(c))).toBe(true);
+    // None where there's no deep convection.
+    expect(stormCells(at(26, -97), R, 200e3, () => 0, 900, 12000)).toHaveLength(0);
   });
 
   it('has weather all over the globe, in roughly Earth-like amounts', () => {

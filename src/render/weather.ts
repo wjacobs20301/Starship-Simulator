@@ -12,6 +12,7 @@ import { CloudNoise } from './cloudNoise';
 import { Land, type Sample, type SiteWeather, type WeatherConfig, WeatherModel, calmSeed, newSample } from '../weather/model';
 import type { FromBake, ToBake } from '../weather/bake.worker';
 import BakeWorker from '../weather/bake.worker.ts?worker';
+import { underStorms } from '../weather/storms';
 
 /** The weather map's size (~39 km per texel at the equator). */
 export const WX_W = 1024;
@@ -29,6 +30,7 @@ interface Slot {
   t: number;
   a: THREE.DataTexture;
   b: THREE.DataTexture;
+  c: THREE.DataTexture;
 }
 
 function mapTexture(): THREE.DataTexture {
@@ -55,7 +57,7 @@ export class Weather {
   private landBytes: Uint8Array | null = null;
   private workers: Worker[] = [];
   /** [blend from, blend to, staged next]. */
-  private slots: Slot[] = [0, 1, 2].map(() => ({ t: -Infinity, a: mapTexture(), b: mapTexture() }));
+  private slots: Slot[] = [0, 1, 2].map(() => ({ t: -Infinity, a: mapTexture(), b: mapTexture(), c: mapTexture() }));
   private filled = 0;
   private pending: { id: number; t: number; left: number; slot: Slot } | null = null;
   private nextId = 1;
@@ -65,7 +67,7 @@ export class Weather {
   private blend = 0;
   private t = 0;
   private sunEcef = [1, 0, 0];
-  private local0 = { t: -Infinity, at: new THREE.Vector3(), sample: newSample() };
+  private local0 = { t: -Infinity, at: new THREE.Vector3(), sample: newSample(), storm: null as { rain: number; shade: number } | null };
   private q = new THREE.Quaternion();
   private v = new THREE.Vector3();
 
@@ -139,10 +141,12 @@ export class Weather {
     if (!p || m.id !== p.id) return;
     (p.slot.a.image.data as Uint8Array).set(m.a, m.j0 * WX_W * 4);
     (p.slot.b.image.data as Uint8Array).set(m.b, m.j0 * WX_W * 4);
+    (p.slot.c.image.data as Uint8Array).set(m.c, m.j0 * WX_W * 4);
     if (--p.left > 0) return;
     p.slot.t = p.t;
     p.slot.a.needsUpdate = true;
     p.slot.b.needsUpdate = true;
+    p.slot.c.needsUpdate = true;
     this.pending = null;
     this.filled++;
   }
@@ -199,6 +203,8 @@ export class Weather {
     u.tWxB0.value = a.b;
     u.tWxA1.value = this.filled >= 2 ? b.a : a.a;
     u.tWxB1.value = this.filled >= 2 ? b.b : a.b;
+    u.tWxC0.value = a.c;
+    u.tWxC1.value = this.filled >= 2 ? b.c : a.c;
     u.uWxBlend.value = this.filled >= 2 ? this.blend : 0;
     u.uWorldToEcef.value.copy(this.worldToEcef);
     u.uPolar.value.copy(this.axis);
@@ -238,6 +244,15 @@ export class Weather {
       this.model.sample(lat, lon, this.t, this.sunEcef, l.sample);
       l.t = this.t;
       l.at.copy(camFromCentre);
+      // (In thunderstorms: rain under their towers, shade under them and their anvils, not
+      // everywhere the map has them.)
+      if (l.sample.conv > 0.05) {
+        const m = this.model;
+        const t = this.t;
+        const probe = this.rainProbe;
+        const conv = (d: [number, number, number]) => m.sample((Math.asin(d[2]) * 180) / Math.PI, (Math.atan2(d[1], d[0]) * 180) / Math.PI, t, undefined, probe).conv;
+        l.storm = underStorms([this.v.x, this.v.y, this.v.z], 6378137, conv, l.sample.base, l.sample.top);
+      } else l.storm = null;
     }
     const s: Sample = l.sample;
     // (Around the camera, now and then: any rain out to ~150 km.)
@@ -261,8 +276,13 @@ export class Weather {
       this.rainNear = any;
     }
     const under = 1 - smooth(s.base, s.top, height);
-    const rain = smooth(0.12, 0.5, s.precip) * smooth(s.top, s.base, height) * smooth(0.5, 0.8, s.cover);
-    const dim = 0.7 * smooth(0.45, 0.95, s.cover) * (1 - 0.6 * s.broken) * under + 0.15 * s.high * (1 - smooth(8000, 11000, height));
+    let rain = smooth(0.12, 0.5, s.precip) * smooth(s.top, s.base, height) * smooth(0.5, 0.8, s.cover);
+    let dim = 0.7 * smooth(0.45, 0.95, s.cover) * (1 - 0.6 * s.broken) * under + 0.15 * s.high * (1 - smooth(8000, 11000, height));
+    if (l.storm) {
+      const k = Math.min(1, s.conv * 1.5);
+      rain += (l.storm.rain * smooth(s.top, s.base, height) - rain) * k;
+      dim += (0.78 * l.storm.shade * under - dim) * k;
+    }
     this.fogHere = s.fog * (1 - smooth(150, 600, height));
     this.rainHere = rain;
     this.sunHere = 1 - Math.min(0.75, dim);

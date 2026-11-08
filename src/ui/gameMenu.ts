@@ -3,12 +3,22 @@
 // frozen flight. One overlay: a column of big text items on the left, the chosen page beside it.
 
 import { MISSIONS, type MissionId } from '../game/missions';
-import { type Settings, WEATHER_AVAILABLE, onSettingsChange, settings, updateSettings } from '../settings';
+import { FREE_WEATHER, type FreeWeather, WEATHER_AVAILABLE, WEATHER_NAME, onSettingsChange, settings, updateSettings } from '../settings';
 import { loadBest } from './missionUi';
 
 export type MenuKind = 'main' | 'pause';
 
-const WEATHER_LABEL: Record<Settings['weather'], string> = { clear: 'Clear', partly: 'Partly', overcast: 'Overcast', rain: 'Rain', fog: 'Fog', natural: 'Random' };
+/** Free roam's weather picks: name and what it brings. */
+const WEATHER_PICK: Record<FreeWeather, [string, string]> = {
+  starbase: ['Starbase', 'Whatever the day brings, as the climate on the Texas Gulf coast deals it out: mostly sunny with a few clouds, sometimes overcast, rain, sea fog or thunderstorms. A new day each time.'],
+  clear: [WEATHER_NAME.clear, 'Blue sky, not a cloud over the coast.'],
+  fair: [WEATHER_NAME.fair, 'Blue sky and sun, a few small cumulus drifting in off the Gulf.'],
+  partly: [WEATHER_NAME.partly, 'A field of fair-weather cumulus, in clusters and streets.'],
+  overcast: [WEATHER_NAME.overcast, 'A grey stratus deck from horizon to horizon.'],
+  rain: [WEATHER_NAME.rain, 'A cold front coming through: low cloud and steady rain.'],
+  storm: [WEATHER_NAME.storm, 'Storms building inland and drifting toward the coast: towering clouds, downpours, lightning and thunder.'],
+  fog: [WEATHER_NAME.fog, 'Fog rolling in off the Gulf, the tower fading into it.'],
+};
 
 const START_LABEL: Record<string, string> = {
   separation: 'at stage separation',
@@ -112,7 +122,8 @@ export class GameMenu {
       }
       const button = t.closest<HTMLElement>('button');
       if (button?.dataset.weather) {
-        updateSettings({ weather: button.dataset.weather as Settings['weather'] });
+        updateSettings({ freeWeather: button.dataset.weather as FreeWeather });
+        if (this.current === 'free') this.render();
         return;
       }
       if (button?.dataset.res) {
@@ -213,6 +224,15 @@ export class GameMenu {
     return `<div class="mn-pads"><div class="mn-label">Launch pad</div><div class="mn-seg">${b(0)}${b(1)}</div></div>`;
   }
 
+  /** Free roam's weather over Starbase (as the climate deals it out, or one picked). */
+  private weatherPicker(): string {
+    if (!WEATHER_AVAILABLE || !settings.clouds) return '';
+    const w = settings.freeWeather;
+    const b = (x: FreeWeather) => `<button data-weather="${x}"${w === x ? ' class="on"' : ''}>${WEATHER_PICK[x][0]}</button>`;
+    return `<div class="mn-wx"><div class="mn-label">Weather</div><div class="mn-wx-grid">${FREE_WEATHER.map(b).join('')}</div>` +
+      `<div class="mn-wx-note">${WEATHER_PICK[w][1]}</div></div>`;
+  }
+
   private pageHtml(page: Page): string {
     switch (page) {
       case 'missions':
@@ -253,6 +273,7 @@ export class GameMenu {
           `launch whenever you like with <kbd>Space</kbd>. You're at the controls from the start (manual). After staging you fly the ship; ` +
           `the booster flies itself home to the tower unless you take it over (<kbd>V</kbd> to switch to it, <kbd>L</kbd> for the controls).</p>` +
           this.padPicker() +
+          this.weatherPicker() +
           `<button class="mn-go" data-act="free">Go to the pad <b>›</b></button></div>`
         );
       case 'settings':
@@ -261,12 +282,7 @@ export class GameMenu {
           `<div class="mn-row"><span>Full screen <kbd>F</kbd></span><button class="mn-toggle${document.fullscreenElement ? ' on' : ''}" data-act="fullscreen"><i></i></button></div>` +
           `<div class="mn-row"><span>Sound</span><button class="mn-toggle${settings.muted ? '' : ' on'}" data-act="sound"><i></i></button></div>` +
           (WEATHER_AVAILABLE ?
-          `<div class="mn-row"><span>Clouds</span><button class="mn-toggle${settings.clouds ? ' on' : ''}" data-act="clouds"><i></i></button></div>` +
-          `<div class="mn-row"><span>Free roam weather</span><div class="mn-seg">` +
-          (['clear', 'partly', 'overcast', 'rain', 'fog', 'natural'] as const)
-            .map((w) => `<button data-weather="${w}"${settings.weather === w ? ' class="on"' : ''}>${WEATHER_LABEL[w]}</button>`)
-            .join('') +
-          `</div></div>` : '') +
+          `<div class="mn-row"><span>Clouds and weather</span><button class="mn-toggle${settings.clouds ? ' on' : ''}" data-act="clouds"><i></i></button></div>` : '') +
           `<div class="mn-row"><span>Resolution</span><div class="mn-seg">` +
           ([1, 0.75, 0.5, 'auto'] as const)
             .map((r) => `<button data-res="${r}"${settings.renderScale === r ? ' class="on"' : ''}>${r === 'auto' ? 'Auto' : r === 1 ? 'Full' : `${r * 100}%`}</button>`)

@@ -91,6 +91,8 @@ export interface World {
    * in everything turns to a grey deck without a sun, and the ambient light grey.
    */
   setOvercast(k: number): void;
+  /** Lightning's light on everything near: 0 (none) .. 1 (a stroke a km or two away). */
+  setFlash(k: number): void;
   /** Direction to the sun (world axes, unit). */
   readonly sunDir: THREE.Vector3;
   /** Equatorial (celestial) -> world rotation now: the star sky's, turning with the day. */
@@ -292,6 +294,9 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
   // Night: faint cool starlight from the whole sky, so a vehicle in the dark still shows its shape.
   const starlight = new THREE.HemisphereLight(0x9fb4e6, 0x1c2230, 0);
   scene.add(starlight);
+  // Lightning: a blue-white flash from the whole sky (the cloud lit from inside).
+  const flash = new THREE.HemisphereLight(0xd8e2ff, 0x404650, 0);
+  scene.add(flash);
   const stars = new StarSky(sunDir);
   scene.add(stars.group);
 
@@ -407,6 +412,9 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
         outdoor.sunDir.copy(sunDir);
         redrawEnv();
       }
+    },
+    setFlash(k: number) {
+      flash.intensity = 2.5 * k;
     },
     setOvercast(k: number) {
       hemi.color.copy(HEMI_SKY).lerp(HEMI_OVERCAST, k);

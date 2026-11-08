@@ -225,7 +225,7 @@ export class Ambience {
   }
 
   /** A burst of noise through a filter with an attack / decay envelope. */
-  private burst(buffer: AudioBuffer, at: number, peak: number, decay: number, type: BiquadFilterType, freq: number, sweepTo?: number): void {
+  private burst(buffer: AudioBuffer, at: number, peak: number, decay: number, type: BiquadFilterType, freq: number, sweepTo?: number, attack = 0.01): void {
     const ctx = this.ctx!;
     const src = ctx.createBufferSource();
     src.buffer = buffer;
@@ -235,12 +235,12 @@ export class Ambience {
     if (sweepTo !== undefined) f.frequency.exponentialRampToValueAtTime(Math.max(20, sweepTo), at + decay);
     const g = ctx.createGain();
     g.gain.setValueAtTime(0, at);
-    g.gain.linearRampToValueAtTime(peak, at + 0.01);
-    g.gain.setTargetAtTime(0, at + 0.02, decay / 3);
+    g.gain.linearRampToValueAtTime(peak, at + attack);
+    g.gain.setTargetAtTime(0, at + attack + 0.01, decay / 3);
     src.loop = true; // (long decays outlast the buffer)
     src.connect(f).connect(g).connect(this.out!);
     src.start(at, Math.random() * buffer.duration * 0.9);
-    src.stop(at + decay * 2 + 0.2);
+    src.stop(at + attack + decay * 2 + 0.2);
   }
 
   /** Struck steel: a handful of inharmonic partials ringing down, plus the hit. */
@@ -263,6 +263,34 @@ export class Ambience {
       o.start(at);
       o.stop(at + decay * 1.5 + 0.1);
     });
+  }
+
+  /**
+   * Thunder from a lightning stroke d m away (it arrives d / 343 s later): close by, the crack of
+   * the channel and a heavy boom, then the rumble rolling on for seconds (the sound from each
+   * part of a channel kilometres long arriving in turn); from far off, only a low rumble, its
+   * highs soaked up by the air. Out of earshot past ~25 km. ground: a stroke to the ground (in the
+   * cloud: higher up, softer).
+   */
+  thunder(d: number, ground: boolean): void {
+    if (!this.ctx || !this.buffers || d > 25000) return;
+    const b = this.buffers;
+    const at = this.ctx.currentTime + d / SPEED_OF_SOUND;
+    const gain = (ground ? 1 : 0.6) / (1 + (d / 2500) ** 1.25);
+    const cut = 90 + 3000 / (1 + d / 900);
+    if (d < 2500 && ground) {
+      // The crack, and the boom right behind it.
+      this.burst(b.white, at, 0.7 * gain, 0.18, 'lowpass', Math.min(9000, cut * 3), 600);
+      this.burst(b.brown, at + 0.02, 1.1 * gain, 1.4, 'lowpass', 420, 60);
+    }
+    // The rumble: bursts overlapping over several seconds, longer and lower from far off.
+    const span = 2.5 + Math.min(6, d / 2500) + 2 * Math.random();
+    const n = 5 + Math.floor(span * 1.2);
+    for (let i = 0; i < n; i++) {
+      const t = at + (d < 2500 ? 0.15 : 0.4) + span * Math.pow(Math.random(), 1.4);
+      const g = gain * (0.35 + 0.5 * Math.random()) * (1 - 0.5 * (t - at) / span);
+      this.burst(b.brown, t, g, 0.7 + 1.1 * Math.random(), 'lowpass', Math.min(cut, 130 + 160 * Math.random()), 50, 0.08 + 0.4 * Math.random());
+    }
   }
 
   private clunk(d: number, strength: number): void {

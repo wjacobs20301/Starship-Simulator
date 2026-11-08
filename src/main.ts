@@ -12,7 +12,7 @@ import { loadSouthPadre } from './render/southPadre';
 import { createLaunchSite } from './render/launchSite';
 import { PadLights, lampLightAll } from './render/padLights';
 import { Moon } from './render/moon';
-import { type StarbaseWeather, WEATHER_AVAILABLE, onSettingsChange, settings, updateSettings } from './settings';
+import { type StarbaseWeather, WEATHER_AVAILABLE, WEATHER_NAME, onSettingsChange, settings, updateSettings } from './settings';
 import { type PadRig, SUN_AT_DAY0, createWorld } from './render/scene';
 import { PAD, RE, RP } from './sim/constants';
 import { GlobeTiles } from './render/globeTiles';
@@ -23,7 +23,9 @@ import type { Trajectory } from './sim/trajectory';
 import { VehicleMesh } from './render/vehicleMesh';
 import { TargetMarker } from './render/targetMarker';
 import { Weather } from './render/weather';
+import { starbaseDay } from './weather/model';
 import { Rain } from './render/fx/rain';
+import { Lightning } from './render/fx/lightning';
 import { type FxVehicle, LaunchFx, explosionRadius, vehicleNoise } from './render/fx/launchFx';
 import { VentFx } from './render/fx/vent';
 import { LaunchAudio } from './audio/launchAudio';
@@ -146,7 +148,7 @@ loadModels(world.renderer, (f) => (loadingBar.style.transform = `scaleX(${f})`))
     loadingBar.style.transform = 'scaleX(1)';
     loading.classList.add('done');
     setTimeout(() => loading.remove(), 1000);
-    if (import.meta.env.DEV) Object.assign(window, { __debug: { models, padRig, world, meshes, terrain, settings, updateSettings, rig, fx, sound, pr: () => pixelRatio, frame, globeTiles, mapView, flightPanel, hud, plot, ambience, audioEngine, menu, menuAudio, weather, moon, origin, showScene } });
+    if (import.meta.env.DEV) Object.assign(window, { __debug: { models, padRig, world, meshes, terrain, settings, updateSettings, rig, fx, sound, pr: () => pixelRatio, frame, globeTiles, mapView, flightPanel, hud, plot, ambience, audioEngine, lightning, menu, menuAudio, weather, moon, origin, showScene } });
   })
   .catch((err) => {
     loadingText.textContent = import.meta.env.DEV
@@ -215,7 +217,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
   // Hot staging hands the player a fresh stage: full throttle, all engines.
   if (prev && prev.snap.phase === 'hotstaging' && curr.snap.phase === 'shipburn' && pilot.manual) setPilot({ throttle: 1, engines: 0 });
   const shipOrbit = trajectories.get('ship')?.orbit ?? null;
-  hud.update(curr.snap, { camera: rig.map ? 'Map' : CAMERA_LABELS[rig.mode], tracked: trackedName(), warp: warpLabel(), paused, armsPad, orbit: shipOrbit });
+  hud.update(curr.snap, { camera: rig.map ? 'Map' : CAMERA_LABELS[rig.mode], tracked: trackedName(), warp: warpLabel(), paused, armsPad, orbit: shipOrbit, weather: weather.enabled ? WEATHER_NAME[weatherToday] : '' });
 };
 
 // --- Missions -------------------------------------------------------------------------
@@ -809,27 +811,33 @@ weather.onConfig = (cfg, land) => send({ type: 'weather', cfg, land });
 const SEASON = THREE.MathUtils.radToDeg(Math.asin(SUN_AT_DAY0.dot(EARTH_AXIS_WORLD)));
 const rain = new Rain();
 world.scene.add(rain.lines);
+const lightning = new Lightning();
+world.scene.add(lightning.mesh);
+lightning.onStrike = (st) => ambience.thunder(st.distance, st.ground);
 /** A menu scene's own weather over Starbase (else the setting's). */
 let sceneWeather: StarbaseWeather | null = null;
 /**
  * New weather (each flight, each menu scene): a new world of weather systems, with the weather
  * asked for over Starbase, or on 'Random' whatever the day brings. Missions get fair weather.
  */
+/** The weather over Starbase this flight (free roam's 'starbase' rolls one: shown in the HUD). */
+let weatherToday: StarbaseWeather = 'partly';
 const applyWeatherSetting = () => {
   if (!WEATHER_AVAILABLE) {
     weather.enabled = false;
     return;
   }
   // Missions always fly in fair weather with light wind (the setting is free roam's).
-  if (sceneWeather) weather.configure(sceneWeather, SEASON);
-  else if (tracker.mission.id !== 'free') weather.configure('partly', SEASON, true);
-  else weather.configure(settings.weather, SEASON);
+  // (Free roam on 'Starbase': a day as the place's climate deals them out, a new one each time.)
+  const free = settings.freeWeather === 'starbase' ? starbaseDay(SEASON, Math.random()) : settings.freeWeather;
+  weatherToday = sceneWeather ?? (tracker.mission.id !== 'free' ? 'partly' : free);
+  weather.configure(weatherToday, SEASON, !sceneWeather && tracker.mission.id !== 'free');
 };
-let weatherSetting = settings.weather;
+let weatherSetting = settings.freeWeather;
 onSettingsChange((s) => {
   weather.enabled = WEATHER_AVAILABLE && s.clouds;
-  if (s.weather !== weatherSetting) {
-    weatherSetting = s.weather;
+  if (s.freeWeather !== weatherSetting) {
+    weatherSetting = s.freeWeather;
     // (Free roam's: a mission keeps its fair weather.)
     if (tracker.mission.id === 'free') applyWeatherSetting();
   }
@@ -839,6 +847,7 @@ applyWeatherSetting();
 /** Rain keeps falling in real time (any warp), stopping only when paused. */
 let rainClock = 0;
 const camFromCentre = new THREE.Vector3();
+const lightningScreen = new THREE.Vector2();
 const qa = new THREE.Quaternion();
 const qb = new THREE.Quaternion();
 const up = new THREE.Vector3();
@@ -1184,6 +1193,19 @@ function frame(): void {
   weather.apply(world.atmosphere);
   world.sun.intensity *= wx.sun;
   world.setOvercast(Math.min(1, Math.max(0, (1 - wx.sun) / 0.65)));
+  // Lightning in the thunderstorms round the camera: bolts, the clouds flashing, thunder.
+  lightning.update(frameDt, paused || menu.kind === 'pause', weather.enabled ? weather.model : null, simTime, cam, camFromCentre, camAlt, WORLD_TO_ECEF,
+    lightningScreen.set(world.renderer.getContext().drawingBufferWidth, world.renderer.getContext().drawingBufferHeight));
+  {
+    const f = lightning.flash;
+    const u = world.atmosphere.uniforms.uFlash.value as THREE.Vector4;
+    // (In the clouds' march space: the ellipsoid stretched to a sphere along the axis.)
+    const ax = f.pos.dot(EARTH_AXIS_WORLD) * (RE / RP - 1);
+    u.set(f.pos.x + EARTH_AXIS_WORLD.x * ax, f.pos.y + EARTH_AXIS_WORLD.y * ax, f.pos.z + EARTH_AXIS_WORLD.z * ax, rig.map ? 0 : f.level);
+    // (And on the ground and everything near, as far as the flash's light reaches: a few km.)
+    const fd = f.level > 0 ? f.pos.distanceTo(camFromCentre) : Infinity;
+    world.setFlash(rig.map ? 0 : f.level / (1 + (fd / 4000) ** 2));
+  }
   if (!paused) rainClock += frameDt;
   rain.update(rig.map ? 0 : wx.rain, cam, camUp, rainClock, wx.sun * Math.min(1, Math.max(0.05, (world.sunDir.dot(camUp) + 0.1) / 0.35)));
   // Main menu: frame the pad off to the right, clear of the menu (eased in and out).

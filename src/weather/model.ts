@@ -30,7 +30,37 @@ const DEG = Math.PI / 180;
 const DAY = 86400;
 const OMEGA = 7.2921159e-5;
 
-export type SiteWeather = 'natural' | 'clear' | 'partly' | 'overcast' | 'rain' | 'fog';
+export type SiteWeather = 'natural' | 'clear' | 'fair' | 'partly' | 'overcast' | 'rain' | 'storm' | 'fog';
+
+/**
+ * A day's weather at Starbase (Boca Chica, on the Gulf coast of south Texas, 26 N), drawn the way
+ * the place's climate deals it out. Mostly sunny: blue sky with a few small cumulus off the Gulf,
+ * or a fair field of them by afternoon. Now and then a grey day under a stratus deck, a cold
+ * front's rain, sea fog rolling in off the Gulf (winter and spring, when warm moist air crosses
+ * the cooler shelf water), or thunderstorms (summer and early autumn, the sea breeze and tropical
+ * moisture). season: the sun's latitude, deg (+ northern summer); u: uniform 0..1.
+ */
+export function starbaseDay(season: number, u: number): Exclude<SiteWeather, 'natural'> {
+  // (Roughly Brownsville's: ~70 days a year with rain, ~30 with thunder, ~30 with dense fog.)
+  const s = Math.max(-1, Math.min(1, season / 23.44));
+  const sum = (s + 1) / 2; // 0 winter .. 1 summer
+  const odds: [Exclude<SiteWeather, 'natural'>, number][] = [
+    ['fair', 0.3 + 0.06 * sum],
+    ['partly', 0.2 + 0.1 * sum],
+    ['clear', 0.12 - 0.07 * sum],
+    ['overcast', 0.14 - 0.08 * sum],
+    ['rain', 0.09 - 0.02 * sum],
+    ['storm', 0.03 + 0.1 * sum],
+    ['fog', 0.12 - 0.09 * sum],
+  ];
+  let total = 0;
+  for (const [, p] of odds) total += p;
+  let x = u * total;
+  for (const [w, p] of odds) {
+    if ((x -= p) < 0) return w;
+  }
+  return 'fair';
+}
 
 export interface WeatherConfig {
   seed: number;
@@ -60,9 +90,11 @@ export interface Sample {
   precip: number;
   /** Fog at the ground 0..1. */
   fog: number;
+  /** Deep convection (thunderstorms: towers to the tropopause, anvils) 0..1. */
+  conv: number;
 }
 
-export const newSample = (): Sample => ({ cover: 0, base: 1000, top: 2000, broken: 0.5, cell: 0.3, high: 0, precip: 0, fog: 0 });
+export const newSample = (): Sample => ({ cover: 0, base: 1000, top: 2000, broken: 0.5, cell: 0.3, high: 0, precip: 0, fog: 0, conv: 0 });
 
 const smooth = (a: number, b: number, x: number) => {
   const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
@@ -165,7 +197,7 @@ export class Land {
 
 // --- Weather systems --------------------------------------------------------------------------
 
-type Kind = 'low' | 'high' | 'tc' | 'deck' | 'fog' | 'cu';
+type Kind = 'low' | 'high' | 'tc' | 'deck' | 'fog' | 'cu' | 'storm';
 
 interface Sys {
   kind: Kind;
@@ -341,18 +373,38 @@ export class WeatherModel {
       const [lat, lon] = at(dx, dy);
       return { tRef: t0, latRef: lat, lonRef: lon, born: t0 - age * o.life, hemi, peak: 1, u: 0, v: 0, recurve: 0, seed: hashInts(this.cfg.seed, 7, o.kind.length), ax: 1, ay: 1, ...o };
     };
+    // (Each day its own: how strong, where and which way it's going vary with the seed.)
     switch (site) {
       case 'clear':
         return [sys({ kind: 'high', R: 1900e3, life: 7 * DAY, peak: 1, u: 3, v: 0 }, 0.45, -200e3, 450e3)];
+      case 'fair':
+        // Blue sky and sun, a few small cumulus: a high's edge holding most of the cloud back,
+        // a thin scatter of fair-weather cumulus off the Gulf.
+        return [
+          sys({ kind: 'high', R: 1500e3, life: 6 * DAY, peak: 0.7 + 0.25 * r(), u: 3, v: 0 }, 0.45, -300e3 + 200e3 * r(), 500e3),
+          sys({ kind: 'cu', R: 300e3, life: 1.5 * DAY, peak: 0.25 + 0.2 * r(), u: -2, v: 0.5, ax: 1.4, ay: 1 }, 0.4, 40e3, -20e3),
+        ];
       case 'partly':
         // A day of fair-weather cumulus over the coast: a field a few hundred km across, in
         // clusters and streets, drifting inland; the global weather all round it.
-        return [sys({ kind: 'cu', R: 320e3, life: 1.5 * DAY, peak: 1, u: -2, v: 0.5, ax: 1.4, ay: 1 }, 0.4, 40e3, -20e3)];
+        return [sys({ kind: 'cu', R: 320e3, life: 1.5 * DAY, peak: 0.85 + 0.25 * r(), u: -2, v: 0.5, ax: 1.4, ay: 1 }, 0.4, 40e3, -20e3)];
       case 'overcast':
         return [sys({ kind: 'deck', R: 650e3, life: 1.6 * DAY, peak: 1, u: 2.5, v: 0.5, ax: 1.3, ay: 0.75 }, 0.4, -120e3 + 100e3 * r(), 60e3)];
       case 'fog':
         // Sea fog along the coast, offshore: long north-south, a few hundred km.
         return [sys({ kind: 'fog', R: 260e3, life: 1.1 * DAY, peak: 1, u: 1, v: 0.3, ax: 0.75, ay: 1.6 }, 0.35, 60e3, 30e3)];
+      case 'storm': {
+        // Thunderstorms: a cluster of them inland, drifting toward the coast at 20-30 km/h, in
+        // a humid day's towering cumulus: some days already overhead, some still building on
+        // the horizon to the west, an hour or a few away.
+        const ang = (r() - 0.5) * 1.2;
+        const R = 55e3 + 20e3 * r();
+        const d = R * (0.3 + 1.3 * r());
+        return [
+          sys({ kind: 'storm', R, life: 0.4 * DAY, peak: 0.9 + 0.1 * r(), u: 5.5 + 2.5 * r(), v: 0.5 * (r() - 0.5), ax: 1.3, ay: 1 }, 0.3, -d * Math.cos(ang), d * Math.sin(ang)),
+          sys({ kind: 'cu', R: 300e3, life: 1.5 * DAY, peak: 0.6, u: -2, v: 0.5, ax: 1.4, ay: 1 }, 0.4, 40e3, -20e3),
+        ];
+      }
       case 'rain': {
         // A low to the north whose cold front is crossing the site now.
         const R = 1000e3;
@@ -473,7 +525,7 @@ export class WeatherModel {
     return this.sampleWith(this.states(t), lat, lon, t, sun, out);
   }
 
-  private acc = { w: 0, keep: 1, base: 0, top: 0, broken: 0, cell: 0, high: 1, precip: 1, fog: 0, topMax: 0 };
+  private acc = { w: 0, keep: 1, base: 0, top: 0, broken: 0, cell: 0, high: 1, precip: 1, fog: 0, topMax: 0, conv: 0 };
 
   /** Add a cloud layer to the accumulator: cover, base, top, broken, cell, rain, high cloud. */
   private add = (c: number, base: number, top: number, broken: number, cell: number, precip = 0, high = 0): void => {
@@ -494,7 +546,7 @@ export class WeatherModel {
 
   private sampleWith(states: State[], lat: number, lon: number, t: number, sun: readonly number[] | undefined, out: Sample): Sample {
     const A = this.acc;
-    A.w = 0; A.keep = 1; A.base = 0; A.top = 0; A.broken = 0; A.cell = 0; A.high = 1; A.precip = 1; A.fog = 0; A.topMax = 0;
+    A.w = 0; A.keep = 1; A.base = 0; A.top = 0; A.broken = 0; A.cell = 0; A.high = 1; A.precip = 1; A.fog = 0; A.topMax = 0; A.conv = 0;
     const add = this.add;
 
     const n = unit(lat, lon);
@@ -555,6 +607,7 @@ export class WeatherModel {
       // Anvils: the storms' tops spread out far around the cores, thinning away from them.
       const anvil = convPot * smooth(0.02 - 0.25 * convPot, 0.55 - 0.25 * convPot, cv);
       add(deep * 1.3 * keepClim, 700, 9000 + 6500 * smooth(0.1, 0.8, deep) * (1 - 0.25 * smooth(25, 40, al)), 0.35, 0.65, deep * 0.9, anvil * keepClim);
+      A.conv = Math.max(A.conv, smooth(0.05, 0.4, deep * keepClim));
       add(0.3 * convPot * (0.5 + 0.5 * clump) * keepClim, 700, 2200, 0.92, 0.12);
     }
     // Trade cumulus over the subtropical / tropical oceans.
@@ -600,6 +653,7 @@ export class WeatherModel {
     out.high = 1 - A.high;
     out.precip = 1 - A.precip;
     out.fog = A.fog;
+    out.conv = A.conv;
     return out;
   }
 
@@ -738,6 +792,22 @@ export class WeatherModel {
         const patchy = 1 - smooth(0.2, 0.55, rho) * (1 - smooth(0.32, 0.62, streets));
         const c = smooth(1, 0.5, rho) * patchy * a;
         add(c * 0.5, 800, 2300, 0.92, 0.12);
+        break;
+      }
+      case 'storm': {
+        // A cluster of thunderstorms: a few cumulonimbus cores (heavy rain, tops up to the
+        // tropopause), their anvils spread downwind, towering cumulus round them.
+        // (The map holds where the storms are, how high, where it rains; the renderer builds
+        // the towers and the anvil spread over them, at the tropopause, from that.)
+        const rho = Math.hypot(X / st.s.ax, Y / st.s.ay);
+        const cells = 0.5 + 0.5 * nz.fbm(X * 3 + st.ox, Y * 3 + st.oy, 7.7, 2);
+        const area = smooth(1.25, 0.55, rho) * a;
+        const core = smooth(1, 0.35, rho) * smooth(0.38, 0.62, cells) * a;
+        // (Rain: where the cells are, which the renderer and the weather where the camera is work
+        // out from conv; this, the share of the area under them.)
+        add(area, 900, 11500 + 3000 * smooth(0.45, 0.8, cells), 0.4, 0.6, Math.max(core, 0.45 * area), area * 0.35);
+        this.acc.conv = Math.max(this.acc.conv, area);
+        add(smooth(1.6, 0.8, rho) * 0.35 * a, 900, 3200, 0.9, 0.15);
         break;
       }
       case 'fog': {
@@ -925,8 +995,9 @@ export class WeatherModel {
    * south pole, column 0 at 180 W.
    *   a: cover, top (0..16 km), base (0..4 km), broken
    *   b: high cloud, precip, fog, cell size
+   *   c: deep convection (thunderstorms), and three spare
    */
-  bake(t: number, sun: readonly number[] | undefined, W: number, H: number, a: Uint8Array, b: Uint8Array, j0 = 0, j1 = H): void {
+  bake(t: number, sun: readonly number[] | undefined, W: number, H: number, a: Uint8Array, b: Uint8Array, j0 = 0, j1 = H, c?: Uint8Array): void {
     const states = this.states(t);
     const s = newSample();
     for (let j = j0; j < j1; j++) {
@@ -949,6 +1020,7 @@ export class WeatherModel {
         b[o + 1] = Math.round(clamp01(s.precip) * 255);
         b[o + 2] = Math.round(clamp01(s.fog) * 255);
         b[o + 3] = Math.round(clamp01(s.cell) * 255);
+        if (c) c[o] = Math.round(clamp01(s.conv) * 255);
       }
     }
   }

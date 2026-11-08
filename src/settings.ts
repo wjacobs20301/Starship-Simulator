@@ -6,7 +6,15 @@ export const WEATHER_AVAILABLE = true;
 
 /** Weather over Starbase: as the global weather has it, or set. */
 export type { SiteWeather as StarbaseWeather } from './weather/model';
-import type { SiteWeather as StarbaseWeather } from './weather/model';
+import type { SiteWeather } from './weather/model';
+
+/** Free roam's weather: a day as Starbase's climate deals them out ('starbase'), or one picked. */
+export type FreeWeather = 'starbase' | Exclude<SiteWeather, 'natural'>;
+/** What the weather over Starbase is called (the HUD, the menu). */
+export const WEATHER_NAME: Record<SiteWeather, string> = {
+  natural: 'As it comes', clear: 'Clear', fair: 'Sunny', partly: 'Partly cloudy', overcast: 'Overcast', rain: 'Rain', storm: 'Thunderstorms', fog: 'Sea fog',
+};
+export const FREE_WEATHER: readonly FreeWeather[] = ['starbase', 'clear', 'fair', 'partly', 'overcast', 'rain', 'storm', 'fog'];
 
 export interface Settings {
   /** Serial painted on the ship's side, e.g. "SN44". */
@@ -20,17 +28,21 @@ export interface Settings {
   renderScale: 'auto' | number;
   /** Clouds on (planet-wide, volumetric). */
   clouds: boolean;
-  /** Weather over Starbase. */
-  weather: StarbaseWeather;
+  /** Free roam's weather over Starbase. */
+  freeWeather: FreeWeather;
 }
 
-const DEFAULTS: Settings = { shipSerial: 'SN41', muted: false, renderScale: 'auto', clouds: true, weather: 'partly' };
+const DEFAULTS: Settings = { shipSerial: 'SN41', muted: false, renderScale: 'auto', clouds: true, freeWeather: 'starbase' };
 const STORAGE_KEY = 'starship-sim.settings';
 
 function load(): Settings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Settings>) } : { ...DEFAULTS };
+    const s: Settings = raw ? { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Settings>) } : { ...DEFAULTS };
+    // (The old setting, 'weather', is gone: free roam starts on Starbase's own.)
+    delete (s as Partial<Settings> & { weather?: unknown }).weather;
+    if (!FREE_WEATHER.includes(s.freeWeather)) s.freeWeather = 'starbase';
+    return s;
   } catch {
     return { ...DEFAULTS };
   }

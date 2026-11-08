@@ -189,11 +189,15 @@ const CLOUD_GLSL = /* glsl */ `
   // The weather map (weather.ts, baked from weather/model.ts) at n (unit, from the Earth's
   // centre, world axes): a = cover, top (/16 km), base (/4 km), broken; b = high cloud, rain, fog,
   // cell size. Two bakes, blended by time.
+  // (And gConvMap: how much of it is deep convection, thunderstorms, 0..1: only looked up where
+  // the cloud is deep.)
+  float gConvMap = 0.0;
   void weatherMap(vec3 n, out vec4 a, out vec4 b) {
     vec3 e = uWorldToEcef * n;
     vec2 uv = vec2(atan(e.y, e.x) * 0.15915494 + 0.5, asin(clamp(e.z, -1.0, 1.0)) * 0.31830989 + 0.5);
     a = mix(textureLod(tWxA0, uv, 0.0), textureLod(tWxA1, uv, 0.0), uWxBlend);
     b = mix(textureLod(tWxB0, uv, 0.0), textureLod(tWxB1, uv, 0.0), uWxBlend);
+    gConvMap = a.y * 16000.0 - a.z * 4000.0 > 4500.0 ? mix(textureLod(tWxC0, uv, 0.0).r, textureLod(tWxC1, uv, 0.0).r, uWxBlend) : 0.0;
   }
 
   // Mip level for noise of period "scale" (m) seen from distance t: about one texel per pixel.
@@ -208,6 +212,136 @@ const CLOUD_GLSL = /* glsl */ `
     float a = i < 0.5 ? 0.0648 : i < 1.5 ? 0.0633 : i < 2.5 ? 0.0588 : i < 3.5 ? 0.048 : i < 4.5 ? 0.0247 : 0.0077;
     float b = i < 0.5 ? 0.0633 : i < 1.5 ? 0.0588 : i < 2.5 ? 0.048 : i < 3.5 ? 0.0247 : 0.0077;
     return max(mix(a, b, f - i), 0.004);
+  }
+
+  // --- Thunderstorm cells ---------------------------------------------------------------------
+  // Cumulonimbus one by one: the map is far too coarse for them (a storm's tower is a few km
+  // across, its texels ~40 km), so where it has deep convection they're placed here, on a
+  // jittered grid STORM_GRID apart (over a cube's faces, in Earth-fixed axes: the same cells from
+  // anywhere), each its own size, height and stage: towers from the base up toward the
+  // tropopause, leaning with the wind aloft, and the mature ones' anvils spread flat at the top,
+  // downwind. The lightning (weather/storms.ts) puts its strokes in the same cells.
+  const float STORM_GRID = 60000.0;
+  uint stormHash(int f, int i, int j, uint k) {
+    uint x = uint(i) * 0x8da6b343u ^ uint(j) * 0xd8163841u ^ (k + uint(f) * 16u) * 0xcb1ab31fu;
+    x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16;
+    return x;
+  }
+  float stormRand(int f, int i, int j, uint k) { return float(stormHash(f, i, j, k) >> 8u) / 16777216.0; }
+  // A direction's cube face (Earth-fixed) and its place on it (m, gnomonic).
+  int stormFace(vec3 e, out vec2 uv) {
+    vec3 a = abs(e);
+    if (a.x >= a.y && a.x >= a.z) { uv = e.yz / a.x * uRc; return e.x > 0.0 ? 0 : 1; }
+    if (a.y >= a.z) { uv = e.zx / a.y * uRc; return e.y > 0.0 ? 2 : 3; }
+    uv = e.xy / a.z * uRc;
+    return e.z > 0.0 ? 4 : 5;
+  }
+  vec3 stormFaceDir(int f, vec2 uv) {
+    uv /= uRc;
+    vec3 e = f < 2 ? vec3(f == 0 ? 1.0 : -1.0, uv.x, uv.y) : f < 4 ? vec3(uv.y, f == 2 ? 1.0 : -1.0, uv.x) : vec3(uv.x, uv.y, f == 4 ? 1.0 : -1.0);
+    return normalize(e);
+  }
+  // (Up to 3 cells near the last weatherFine point, in a frame there (the ground point, east,
+  // north): A = centre (m east, north), tower radius, top (m); B = anvil radius (0: none yet).)
+  vec4 gCellA[3];
+  vec4 gCellB[3];
+  int gCells = 0;
+  // (And how far from that point, across the ground, the nearest cell's farthest reach is: clear
+  // air the march can leap.)
+  float gCellClear = 0.0;
+  // (Whether the list is good for points within 2 km of gCellO; whether to look them up at all:
+  // not for the shadows or the far layer.)
+  bool gCellsValid = false;
+  bool gWantCells = true;
+  vec3 gCellO;
+  vec3 gCellE;
+  vec3 gCellN;
+  void findStormCells(vec3 n, float base, float top, float conv) {
+    if (gCellsValid && dot(n * uRc - gCellO, n * uRc - gCellO) < 4e6) return;
+    gCells = 0;
+    gCellClear = 0.0;
+    gCellsValid = false;
+    if (conv < 0.02 || top - base < 5000.0) return;
+    gCellsValid = true;
+    vec3 e = uWorldToEcef * n;
+    vec2 g;
+    int f = stormFace(e, g);
+    // (Cells from beyond the 3 x 3 around reach no closer than this: their centres at least
+    // three quarters of the grid off (less on the ground toward a face's edge), their anvils
+    // under ~21 km.)
+    gCellClear = max(0.75 * STORM_GRID / (1.0 + dot(g, g) / (uRc * uRc)) - 21000.0, 0.0);
+    gCellO = n * uRc;
+    gCellE = normalize(cross(uPolar, n));
+    gCellN = cross(n, gCellE);
+    ivec2 gi = ivec2(floor(g / STORM_GRID));
+    float dK[3] = float[3](1e9, 1e9, 1e9);
+    for (int dj = -1; dj <= 1; dj++) {
+      for (int di = -1; di <= 1; di++) {
+        int i = gi.x + di;
+        int j = gi.y + dj;
+        float h0 = stormRand(f, i, j, 0u);
+        float k = smoothstep(h0, h0 + 0.25, conv);
+        if (k <= 0.0) continue;
+        vec2 c = (vec2(float(i), float(j)) + 0.5 + (vec2(stormRand(f, i, j, 1u), stormRand(f, i, j, 2u)) - 0.5) * 0.5) * STORM_GRID;
+        vec3 cw = stormFaceDir(f, c) * uWorldToEcef;
+        vec3 dc = cw * uRc - gCellO;
+        vec2 rel = vec2(dot(dc, gCellE), dot(dc, gCellN));
+        // Its stage: growing (a tower, no anvil yet, still rising) or mature (at the
+        // tropopause, an anvil); its size.
+        float stage = stormRand(f, i, j, 3u);
+        float mature = step(0.35, stage);
+        float rT = (3000.0 + 3500.0 * stormRand(f, i, j, 4u)) * (0.6 + 0.4 * k);
+        float topC = base + (top - base) * (mature > 0.0 ? 0.88 + 0.12 * stormRand(f, i, j, 5u) : 0.35 + 1.4 * stage);
+        float rA = mature * (7000.0 + 6000.0 * stormRand(f, i, j, 6u)) * (0.5 + 0.5 * k);
+        float ext = max(rT * 1.45, rA * 1.5) + 0.1 * (topC - base);
+        gCellClear = min(gCellClear, length(rel) - ext);
+        float d = length(rel) - ext - 2500.0;
+        if (d > 0.0) continue;
+        vec4 A = vec4(rel, rT, topC);
+        vec4 B = vec4(rA, 0.0, 0.0, 0.0);
+        // (Nearest first: the first three.)
+        for (int s = 0; s < 3; s++) {
+          if (d < dK[s]) {
+            float td = dK[s]; vec4 tA = gCellA[s]; vec4 tB = gCellB[s];
+            dK[s] = d; gCellA[s] = A; gCellB[s] = B;
+            d = td; A = tA; B = tB;
+          }
+        }
+      }
+    }
+    gCells = dK[2] < 1e8 ? 3 : dK[1] < 1e8 ? 2 : dK[0] < 1e8 ? 1 : 0;
+  }
+  // How far inside the storm cells p is (> 0 inside: the share of its radius in), at height h
+  // over the weather's base.
+  float stormCellsV(vec3 p, float h, float base) {
+    vec3 q = p * (uRc / length(p)) - gCellO;
+    vec2 xy = vec2(dot(q, gCellE), dot(q, gCellN));
+    // (Their sides bulging in and out as they rise, turret on turret, not straight walls.)
+    float bulge = 1.0 + 0.6 * (textureLod(tNoise, vec3(xy / 5200.0, h / 1700.0) + vec3(0.27, 0.61, 0.13) + uDrift * 20.0, 0.0).r - 0.669);
+    float v = -1.0;
+    for (int i = 0; i < 3; i++) {
+      if (i >= gCells) break;
+      vec4 A = gCellA[i];
+      float rA = gCellB[i].x;
+      float hc = (h - base) / max(A.w - base, 500.0);
+      if (hc <= 0.0 || hc >= 1.0) continue;
+      // The tower: leaning downwind as it rises, a little wider up high; a growing one's top
+      // domed, a mature one's flat under the tropopause.
+      vec2 cT = A.xy + vec2(0.1 * (h - base), 0.0);
+      float dome = rA > 0.0 ? 1.0 : sqrt(max(1.0 - pow(max(hc - 0.6, 0.0) / 0.4, 2.0), 0.0));
+      float vt = 1.0 - length(xy - cT) / max(A.z * (0.8 + 0.35 * hc) * dome * bulge, 1.0);
+      v = max(v, min(vt, (1.0 - hc) * 25.0));
+      // The anvil: flaring out from the tower's top, spread downwind, thinner toward its edge
+      // (only its top there), its underside flat-ish.
+      if (rA > 0.0) {
+        float a = smoothstep(0.72, 0.9, hc);
+        vec2 cA = A.xy + vec2(0.1 * (A.w - base) + 0.45 * rA * a, 0.0);
+        float dA = length(xy - cA) / max(rA * a * mix(1.0, bulge, 0.5), 1.0);
+        float va = min(min(1.0 - dA, (hc - 0.8 - 0.13 * dA * dA) * 8.0), (1.0 - hc) * 25.0);
+        v = max(v, va);
+      }
+    }
+    return v;
   }
 
   // The clouds over n from the map's weather (a, b) with the fine detail the map is too coarse
@@ -227,9 +361,14 @@ const CLOUD_GLSL = /* glsl */ `
   float gMargin = -1.0;
   // (How broken weatherFine's weather is, 0 a deck .. 1 scattered cumulus.)
   float gBroken = 0.0;
+  // (And how much of it is thunderstorms, from the map: see cloudDensity.)
+  float gConv = 0.0;
+  // (The storm cells alone, not the cumulus round them: stormFar.)
+  bool gCellsOnly = false;
   vec4 weatherFine(vec3 n, vec4 a, vec4 b, float t) {
     gRelief = 0.0;
     gBroken = a.w;
+    gConv = gConvMap;
     if (a.x < 0.015) return vec4(0.0, 0.0, 0.0, b.w);
     vec3 q = n + uDrift;
     float fine = 1.0 - smoothstep(-2.0, 0.0, log2(max(t, 1.0) * uPixAng * ${NOISE_SIZE}.0 * 120.0 / uRc));
@@ -297,7 +436,15 @@ const CLOUD_GLSL = /* glsl */ `
     float conv = smoothstep(3000.0, 7000.0, top - base) * smoothstep(0.15, 0.5, a.w);
     if (conv > 0.0) {
       float tw = clamp((textureLod(tNoise, q * 330.0 + vec3(0.3, 0.7, 0.1), noiseLod(t, uRc / 330.0)).r - 0.58) / 0.17, 0.0, 1.0);
-      top = mix(top, base + (top - base) * (0.25 + 0.75 * tw), conv);
+      // (Not a thunderstorm's: its anvil spreads flat at the tropopause over all its towers.)
+      top = mix(top, base + (top - base) * (0.25 + 0.75 * tw), conv * (1.0 - gConv));
+    }
+    // (Thunderstorms: the cells, here; the cloud between them the map's, unbroken, low.)
+    cov = mix(cov, a.x, gConv);
+    if (gWantCells) findStormCells(n, base, top, gConv);
+    else {
+      gCells = 0;
+      gCellsValid = false;
     }
     return vec4(cov, base, top, b.w);
   }
@@ -317,6 +464,10 @@ const CLOUD_GLSL = /* glsl */ `
     // seen from the side those were cliffs, from below curtains hanging from the base.)
     float cuK = smoothstep(0.3, 0.8, gBroken);
     grad = mix(grad, smoothstep(0.0, 0.03, hn) * (1.0 - smoothstep(0.15, 1.0, hn)), cuK);
+    // Thunderstorms: towers from a flat base all the way up to the tropopause, each a column a few
+    // km across, and the anvil spread flat over them at the top, flaring out from the towers.
+    float cb = gConv * smoothstep(5000.0, 8000.0, w.z - w.y);
+    grad = mix(grad, smoothstep(0.0, 0.012, hn) * (1.0 - smoothstep(0.95, 1.0, hn)), cb);
     float base = w.x * grad;
     if (base < 0.01) return 0.0;
     // Cells at two scales (different periods: no visible repeat); the light samples take one.
@@ -413,6 +564,19 @@ const CLOUD_GLSL = /* glsl */ `
       fill *= mix(1.0, clamp(1.0 + 5.0 * (clump - 0.669), 0.3, 1.5), cumulus);
     }
     gMargin = u - (1.0 - fill * base);
+    if (cb > 0.0) {
+      // Thunderstorms: the cells (towers and anvils), and towering cumulus between them, the
+      // map's cloud capped at a few km. (The cells' outlines roughened as a cumulus's are: by
+      // the same detail, and the cells' noise.)
+      float hnCu = (h - w.y) / 2800.0;
+      float gCu = smoothstep(0.0, 0.03, hnCu) * (1.0 - smoothstep(0.15, 1.0, hnCu));
+      float mCu = gCellsOnly ? -1.0 : u - (1.0 - 0.25 * w.x * gCu);
+      float vC = gCells > 0 ? stormCellsV(p, h, w.y) : -1.0;
+      // (The cell as the cover the cumulus's own shapes fill: solid inside, ragged toward its
+      // edge, the same billows and knots as any cumulus, not a smooth cylinder.)
+      float mCell = u - (1.0 - 1.1 * smoothstep(-0.4, 0.3, vC));
+      gMargin = mix(gMargin, max(mCu, mCell), cb);
+    }
     // (A cloud as dense inside in light cover as in heavy: the cover is how many there are, not
     // how thin. (Thinned, small cumulus were half see-through, soft-edged puffs.))
     float dens = smoothstep(0.0, 1.0, gMargin / max(soft, 0.012)) * (0.75 + 0.25 * w.x);
@@ -517,7 +681,9 @@ const CLOUD_GLSL = /* glsl */ `
       weatherMap(n, a, b);
     }
     float cosv = max(abs(dot(rd, n)), 0.06);
+    gWantCells = false;
     vec4 w = weatherFine(n, a, b, t / cosv);
+    gWantCells = true;
     if (w.x < 0.005) return vec4(0.0, 0.0, 0.0, 1.0);
     // The share of the pixel covered, each cloud as opaque as its depth through it (longer seen
     // obliquely; seen edge-on, clouds hide the gaps between them).
@@ -571,11 +737,21 @@ const CLOUD_GLSL = /* glsl */ `
       vec4 qa;
       vec4 qb;
       weatherMap(up, qa, qb);
+      gWantCells = false;
       vec4 w = weatherFine(up, qa, qb, t);
+      gWantCells = true;
       od += cloudDensity(q, w, false, t) * dh / mus;
     }
     // (Some light still gets through even a thick cloud's shadow: scattered down through it.)
     return max(exp(-SIGMA * 2.5 * od), 0.2 * exp(-SIGMA * 0.3 * od));
+  }
+
+  // In a thunderstorm's weather, above the cumulus between the cells: how far the march can leap
+  // and stay clear of every cell (0: not here).
+  float stormSkip(vec3 p, vec4 w) {
+    if (gConv < 0.3 || w.z - w.y < 6000.0 || length(p) - uRc < w.y + 4000.0) return 0.0;
+    vec3 q = p * (uRc / length(p)) - gCellO;
+    return max(gCellClear - length(q) - 400.0, 0.0);
   }
 
   // The march's density sample at distance t along a ray; w: the weather there. skip: how far
@@ -587,7 +763,11 @@ const CLOUD_GLSL = /* glsl */ `
     vec3 p = ro + rd * t;
     skip = 0.0;
     gMargin = -1.0;
-    if (dot(p - pw, p - pw) < 1e6) return w.x < 0.02 ? 0.0 : cloudDensity(p, w, true, t);
+    if (dot(p - pw, p - pw) < 1e6) {
+      float d = w.x < 0.02 ? 0.0 : cloudDensity(p, w, true, t);
+      if (d <= 0.0) skip = stormSkip(p, w);
+      return d;
+    }
     pw = p;
     vec3 up = normalize(p);
     vec4 wa;
@@ -609,7 +789,9 @@ const CLOUD_GLSL = /* glsl */ `
       return 0.0;
     }
     w = weatherFine(up, wa, wb, t / max(abs(muv), 0.15));
-    return cloudDensity(p, w, true, t);
+    float d = cloudDensity(p, w, true, t);
+    if (d <= 0.0) skip = stormSkip(p, w);
+    return d;
   }
 
   // The march's step through clear air at distance t along a ray (mu: its slope, up = 1):
@@ -661,6 +843,13 @@ const CLOUD_GLSL = /* glsl */ `
       // (Showers in broken weather, apart; a steady rain from a deck, nearly everywhere.)
       float thr = mix(0.58, 0.7, smoothstep(0.4, 0.8, wa.w));
       float shaft = smoothstep(thr, thr + 0.06, textureLod(tNoise, q, 1.0).r);
+      // (Thunderstorms: under their towers, a downpour; none between them.)
+      if (gConvMap > 0.05) {
+        vec4 wf = weatherFine(n, wa, wb, t);
+        float v = gCells > 0 ? stormCellsV(n * (uRc + wf.y + 200.0), wf.y + 200.0, wf.y) : -1.0;
+        shaft = mix(shaft, smoothstep(-0.25, 0.3, v + 0.25 * (textureLod(tNoise, q * 3.0, 1.0).r - 0.669) / 0.065), gConvMap);
+        pr = mix(pr, 1.0, gConvMap);
+      }
       float dens = pr * shaft * (1.0 - smoothstep(base - 150.0, base + 50.0, h)) * smoothstep(1500.0, 5000.0, t);
       if (dens <= 0.0) continue;
       float a = 1.0 - exp(-8e-4 * dens * dt);
@@ -672,6 +861,81 @@ const CLOUD_GLSL = /* glsl */ `
       T *= 1.0 - a;
     }
     if (sw > 0.0) tR = tw / sw;
+    return vec4(C, T);
+  }
+
+  // Thunderstorms beyond the march (it runs out of steps tens of km out, threading through the
+  // cumulus near), out to the end of the clouds' slab: their towers and anvils standing up over the
+  // horizon. The cells alone, marched on their own: long steps through the clear air between
+  // them, shorter through them, lit simply. Returns (light, transmittance); tHit: its distance.
+  vec4 stormFar(vec3 ro, vec3 rd, float t0, float t1, float jit, float mu, out float tHit) {
+    tHit = 1e30;
+    float T = 1.0;
+    vec3 C = vec3(0.0);
+    float tw = 0.0;
+    float sw = 0.0;
+    vec3 pw = vec3(1e30);
+    vec4 w = vec4(0.0);
+    float phase = 0.55 + 1.6 * mix(cloudPhase(mu, 0.55), cloudPhase(mu, -0.25), 0.3);
+    float t = t0 + jit * 600.0;
+    for (int i = 0; i < 64; i++) {
+      if (t > t1 || T < 0.04) break;
+      vec3 p = ro + rd * t;
+      float rp = length(p);
+      float h = rp - uRc;
+      float dt = max(500.0, 0.012 * t);
+      // (The weather, and the cells near, every 3 km along the ray.)
+      if (dot(p - pw, p - pw) > 9e6) {
+        pw = p;
+        vec3 up = p / rp;
+        vec4 wa;
+        vec4 wb;
+        weatherMap(up, wa, wb);
+        if (gConvMap < 0.05) {
+          gCells = 0;
+          gCellsValid = false;
+          gCellClear = 3000.0;
+          gCellO = up * uRc;
+        } else w = weatherFine(up, wa, wb, t);
+      }
+      vec3 q = p * (uRc / rp) - gCellO;
+      float clear = gCellClear - length(q) - 300.0;
+      if (gCells == 0 || h > w.z + 50.0) {
+        t += max(dt, clear);
+        continue;
+      }
+      float v = stormCellsV(p, h, w.y);
+      float dens = 0.0;
+      if (v > -0.45) {
+        // (Shaped as the march shapes them, the cumulus's own billows, at the detail a step this
+        // long shows.)
+        gCellsOnly = true;
+        gDetT = dt / uPixAng;
+        dens = cloudDensity(p, w, true, t);
+        gCellsOnly = false;
+      }
+      if (dens > 0.002) {
+        float a = 1.0 - exp(-SIGMA * 2.5 * dens * dt);
+        // Lit: through the cell toward the sun (how far in that is), its lower part in the shade
+        // of all that's above, and the sky's light.
+        vec3 ps = p + uSun * 1800.0;
+        vec3 ps2 = p + uSun * 4500.0;
+        float vs = max(stormCellsV(ps, length(ps) - uRc, w.y), stormCellsV(ps2, length(ps2) - uRc, w.y));
+        float hc = clamp((h - w.y) / max(w.z - w.y, 500.0), 0.0, 1.0);
+        float lit = exp(-3.0 * clamp(vs + 0.25, 0.0, 1.2)) * (0.5 + 0.5 * smoothstep(0.0, 0.7, hc)) + 0.12;
+        float sunUp = dot(p, uSun) / rp;
+        float day = smoothstep(-0.15, 0.1, sunUp);
+        vec3 sky = vec3(0.22, 0.28, 0.38) * day * (0.45 + 0.55 * hc) * (1.0 + 1.5 * (1.0 - smoothstep(0.05, 0.3, sunUp)));
+        vec3 S = uCloudSun * (sunAt(p) * phase * lit + sky);
+        if (uFlash.w > 0.0) S += vec3(0.75, 0.8, 1.0) * uFlash.w * 1.2 * exp(-length(p - uFlash.xyz) / 5000.0);
+        C += T * a * S;
+        tw += t * T * a;
+        sw += T * a;
+        T *= 1.0 - a;
+        t += dt;
+      } else t += v > -0.45 ? dt : max(dt, min(clear, -v * 2000.0));
+    }
+    if (sw > 0.0) tHit = tw / sw;
     return vec4(C, T);
   }
 
@@ -693,8 +957,11 @@ const CLOUD_GLSL = /* glsl */ `
       // (Bounds for the march: the weather where the ray enters, leaves and halfway between.)
       vec4 aA, bA, aB, bB, aM, bM;
       weatherMap(normalize(ro + rd * tA0), aA, bA);
+      float convAny = gConvMap;
       weatherMap(normalize(ro + rd * tB0), aB, bB);
+      convAny = max(convAny, gConvMap);
       weatherMap(normalize(ro + rd * (0.5 * (tA0 + tB0))), aM, bM);
+      convAny = max(convAny, gConvMap);
       float covMax = max(max(aA.x, aB.x), aM.x);
       float lo = min(min(aA.z, aB.z), aM.z) * 4000.0;
       float hi = max(max(aA.y, aB.y), aM.y) * 16000.0;
@@ -789,6 +1056,14 @@ const CLOUD_GLSL = /* glsl */ `
               // (Not where the ray toward the sun is out of the cloud by 400 m: near its sunlit
               // surface, most of the samples.)
               if (d400 > 0.05) od += cloudDensity(p + uSun * 1150.0, w, false, t) * 900.0;
+              // (A thunderstorm's tower is km of cloud toward the sun from most of it: its base and
+              // shaded side dark, as a cumulonimbus's are. The cells, from here on out.)
+              if (gCells > 0 && gConv > 0.2) {
+                vec3 p2 = p + uSun * 2600.0;
+                vec3 p3 = p + uSun * 5500.0;
+                od += (smoothstep(-0.1, 0.2, stormCellsV(p2, length(p2) - uRc, w.y)) * 2000.0
+                     + smoothstep(-0.1, 0.2, stormCellsV(p3, length(p3) - uRc, w.y)) * 3500.0) * gConv;
+              }
               odSun = od;
               // (Light scattered on through the cloud: the shadowed side greys gradually, not
               // black. Scattered many times, it has lost its direction: only the light straight
@@ -825,6 +1100,12 @@ const CLOUD_GLSL = /* glsl */ `
                      * (1.0 + 1.5 * (1.0 - smoothstep(0.05, 0.3, sunUp)));
             float powder = 1.0 - exp(-dens * 5.0);
             vec3 S = uCloudSun * (sunCol * phase * (0.55 + 0.45 * powder) + sky);
+            // (Lightning: the cloud lit from inside round the stroke, the light diffusing out
+            // through it a few km.)
+            if (uFlash.w > 0.0) {
+              float fd = length(p - uFlash.xyz);
+              S += vec3(0.75, 0.8, 1.0) * uFlash.w * (2.2 * exp(-fd / 1800.0) + 0.35 * exp(-fd / 6000.0));
+            }
             // (Cloud is optically thick: a few hundred metres of it hides what's behind, so its
             // edges are sharp, not a fade.)
             // (Thinned to a mist near the camera: flying through a cloud, the ship stays in view.)
@@ -859,9 +1140,19 @@ const CLOUD_GLSL = /* glsl */ `
         // Beyond the march (low over the horizon, tens of km out): the lit layer, behind it.
         // (Only so far out: a march that ran out of steps near, threading through many clouds,
         // has gaps that show what's under them, not a flat layer's haze.)
+        // (Thunderstorms there: marched on their own, the cells; the layer only where there
+        // are none, not a flat slab for their towers and anvils.)
+        if (convAny > 0.05) {
+          float tS2;
+          vec4 st = stormFar(ro, rd, tMarch, tB, jit, mu, tS2);
+          if (st.a < 0.999) {
+            low = vec4(low.rgb + low.a * st.rgb, low.a * st.a);
+            if (tLow > 1e29) tLow = tS2;
+          }
+        }
         float tL;
         vec4 lay = cloudLayer(ro, rd, tEnd, mu, tL);
-        float k = smoothstep(0.85, 1.15, tL / tMarch) * smoothstep(15000.0, 30000.0, tMarch);
+        float k = smoothstep(0.85, 1.15, tL / tMarch) * smoothstep(15000.0, 30000.0, tMarch) * (1.0 - gConvMap);
         if (k > 0.0 && lay.a < 0.999) {
           lay = mix(vec4(0.0, 0.0, 0.0, 1.0), lay, k);
           low = vec4(low.rgb + low.a * lay.rgb, low.a * lay.a);
@@ -913,11 +1204,14 @@ const ATMO_COMMON = /* glsl */ `
   uniform sampler2D tWxB0;
   uniform sampler2D tWxA1;
   uniform sampler2D tWxB1;
+  uniform sampler2D tWxC0;     // and deep convection (thunderstorms)
+  uniform sampler2D tWxC1;
   uniform float uWxBlend;      // between the two bakes
   uniform mat3 uWorldToEcef;   // world -> Earth-fixed directions (the map's axes)
   uniform vec3 uDrift;         // the fine detail's slow drift (noise-space offset)
   uniform float uCloudSun;     // brightness of sunlit cloud
   uniform float uRainAny;      // rain anywhere within ~150 km (else no rain curtains to look for)
+  uniform vec4 uFlash;         // lightning in the clouds: where (from the Earth's centre, the march's space), how bright
   uniform float uFog;          // ground fog where the camera is, 0..1
   uniform float uRainMist;     // and rain, 0..1
   uniform float uPixAng;       // angle one cloud-pass pixel spans, rad
@@ -1040,8 +1334,25 @@ const fragment = /* glsl */ `
     float fN = clamp((nearDist - s0) / max(seg, 1.0), 0.0, 1.0);
     z.odRN += hr * fN;
     z.odMN += hm * fN;
-    // In the Earth's shadow: no sunlight to scatter.
-    if (earthShadow(p, uRg)) return;
+    // In the Earth's shadow: no sunlight to scatter, only the sky's own light scattered again
+    // (multiple scattering, roughly): the air over it, above the shadow's edge, still sunlit, and
+    // the bright sky toward the sun light it from above and the side. At twilight that is what
+    // lights the sky overhead, its deep blue (the sunlight there has crossed the ozone the long
+    // way), not black.
+    if (earthShadow(p, uRg)) {
+      float rq = length(p);
+      float mq = dot(p, uSun) / rq;
+      // (How high the shadow's edge is over p: the sun's ray through it just grazes the ground.)
+      float rs = uRg / sqrt(max(1.0 - mq * mq, 1e-4));
+      float top = rs - uRg + 2000.0;
+      vec2 lt = sunDepth(min(top, 99000.0), mq);
+      vec3 ms = exp(-((BR + BO) * (z.odR + lt.x) + BM * 1.1 * (z.odM + lt.y))) * exp(-max(rs - rq, 0.0) / 9000.0)
+              * (1.0 - smoothstep(40000.0, 90000.0, top)) * 0.35;
+      float behindS = mix(clT, 1.0, front);
+      z.sumR += ms * hr * behindS;
+      z.sumRN += ms * hr * behindS * fN;
+      return;
+    }
     float rp = length(p);
     vec2 l = sunDepth(rp - uRg, dot(p, uSun) / rp);
     // (Under an overcast, the air in front of the clouds is in their shade as the ground is: lit
@@ -1392,11 +1703,14 @@ export class SceneAtmospherePass extends Pass {
     tWxB0: { value: null as THREE.Texture | null },
     tWxA1: { value: null as THREE.Texture | null },
     tWxB1: { value: null as THREE.Texture | null },
+    tWxC0: { value: null as THREE.Texture | null },
+    tWxC1: { value: null as THREE.Texture | null },
     uWxBlend: { value: 0 },
     uWorldToEcef: { value: new THREE.Matrix3() },
     uDrift: { value: new THREE.Vector3() },
     uCloudSun: { value: 1.4 },
     uRainAny: { value: 0 },
+    uFlash: { value: new THREE.Vector4() },
     uPixAng: { value: 0.001 },
     uRc: { value: RE },
     uPolar: { value: new THREE.Vector3(0, 1, 0) },
