@@ -205,11 +205,16 @@ export class Weather {
     u.uDrift.value.copy(this.drift);
     u.uFog.value = on ? this.fogHere : 0;
     u.uRainMist.value = on ? this.rainHere : 0;
+    u.uRainAny.value = on && this.rainNear ? 1 : 0;
     u.uLocalSun.value = on ? this.sunHere : 1;
   }
 
   private fogHere = 0;
   private rainHere = 0;
+  /** Whether it's raining anywhere within ~150 km of the camera (rain curtains to draw). */
+  private rainNear = false;
+  private rainNearAt = { t: -Infinity, at: new THREE.Vector3() };
+  private rainProbe = newSample();
   private sunHere = 1;
 
   /**
@@ -221,6 +226,7 @@ export class Weather {
     if (!this.enabled || !this.model || height > 16000) {
       this.fogHere = 0;
       this.rainHere = 0;
+      this.rainNear = false;
       this.sunHere = 1;
       return { rain: 0, sun: 1, fog: 0 };
     }
@@ -234,6 +240,26 @@ export class Weather {
       l.at.copy(camFromCentre);
     }
     const s: Sample = l.sample;
+    // (Around the camera, now and then: any rain out to ~150 km.)
+    const rn = this.rainNearAt;
+    if (Math.abs(this.t - rn.t) > 60 || rn.at.distanceToSquared(camFromCentre) > 10000 ** 2) {
+      rn.t = this.t;
+      rn.at.copy(camFromCentre);
+      this.v.copy(camFromCentre).applyMatrix3(this.worldToEcef).normalize();
+      const lat0 = Math.asin(Math.max(-1, Math.min(1, this.v.z)));
+      const lon0 = Math.atan2(this.v.y, this.v.x);
+      let any = s.precip > 0.1;
+      for (const d of [30e3, 75e3, 150e3]) {
+        for (let k = 0; k < 8 && !any; k++) {
+          const az = (k / 8) * 2 * Math.PI;
+          const dLat = (d / 6.371e6) * Math.cos(az);
+          const dLon = (d / 6.371e6) * Math.sin(az) / Math.max(0.2, Math.cos(lat0));
+          this.model.sample(((lat0 + dLat) * 180) / Math.PI, ((lon0 + dLon) * 180) / Math.PI, this.t, this.sunEcef, this.rainProbe);
+          any = this.rainProbe.precip > 0.1;
+        }
+      }
+      this.rainNear = any;
+    }
     const under = 1 - smooth(s.base, s.top, height);
     const rain = smooth(0.12, 0.5, s.precip) * smooth(s.top, s.base, height) * smooth(0.5, 0.8, s.cover);
     const dim = 0.7 * smooth(0.45, 0.95, s.cover) * (1 - 0.6 * s.broken) * under + 0.15 * s.high * (1 - smooth(8000, 11000, height));

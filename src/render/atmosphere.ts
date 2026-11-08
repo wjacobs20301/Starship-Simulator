@@ -316,7 +316,7 @@ const CLOUD_GLSL = /* glsl */ `
     // (Cumulus taper from low down, domes and towers, not straight-sided columns with a lid:
     // seen from the side those were cliffs, from below curtains hanging from the base.)
     float cuK = smoothstep(0.3, 0.8, gBroken);
-    grad = mix(grad, smoothstep(0.0, 0.07, hn) * (1.0 - smoothstep(0.15, 1.0, hn)), cuK);
+    grad = mix(grad, smoothstep(0.0, 0.03, hn) * (1.0 - smoothstep(0.15, 1.0, hn)), cuK);
     float base = w.x * grad;
     if (base < 0.01) return 0.0;
     // Cells at two scales (different periods: no visible repeat); the light samples take one.
@@ -368,9 +368,10 @@ const CLOUD_GLSL = /* glsl */ `
     float soft = mix(clamp(2.0 * t * uPixAng / 1250.0, 0.008, 0.05), 0.35, smoothstep(2.0, 4.0, l1));
     // (The light samples see the cloud soft-edged: crisp, a step's shadow is all or nothing, and
     // the shading breaks into facets.)
-    if (!detailed || gDetBias > 0.0) soft = max(soft, 0.12);
-    // (Close up, the cells' surfaces roughened by finer noise, billows on billows, a cumulus's
-    // cauliflower; a deck's top lumpier still, its cells.)
+    if (!detailed || gDetBias > 0.0) soft = max(soft, gDetBias < 0.1 ? 0.05 : 0.12);
+    // (Close up, a cloud thins out over its last few tens of metres, a fringe the light comes
+    // through, not a cut-out edge drawn round it.)
+    else soft = max(soft, 0.045 * (1.0 - smoothstep(2500.0, 7000.0, t)));
     // (Close up, the cells' surfaces roughened by finer noise, billows on billows, a cumulus's
     // cauliflower; a deck's top lumpier still, its cells.)
     float u0 = u;
@@ -389,6 +390,13 @@ const CLOUD_GLSL = /* glsl */ `
       if (dl2 < 3.5) {
         float det2 = textureLod(tNoise, pr0 / 610.0 + vec3(0.37, 0.11, 0.83) + uDrift * 60.0, dl2).g;
         u += 0.075 * dAmp * (det2 - 0.478) / 0.12 * (1.0 - smoothstep(1.5, 3.5, dl2));
+        // (And the finest, from a few hundred metres: knots and curls ~10-40 m, a real cloud's
+        // texture rather than an airbrushed surface.)
+        float dl3 = noiseLod(max(t, gDetT), 170.0) + gDetBias;
+        if (dl3 < 2.3) {
+          float det3 = textureLod(tNoise, pr0.zxy / 170.0 + vec3(0.59, 0.23, 0.41) + uDrift * 90.0, dl3).r;
+          u += 0.04 * dAmp * (det3 - 0.669) / 0.065 * (1.0 - smoothstep(1.3, 2.3, dl3));
+        }
       }
     }
     // (The detail roughens a cloud's surface, eating into it as far as it likes, but builds out
@@ -408,6 +416,10 @@ const CLOUD_GLSL = /* glsl */ `
     // (A cloud as dense inside in light cover as in heavy: the cover is how many there are, not
     // how thin. (Thinned, small cumulus were half see-through, soft-edged puffs.))
     float dens = smoothstep(0.0, 1.0, gMargin / max(soft, 0.012)) * (0.75 + 0.25 * w.x);
+    // (Thinner toward its edges, densest in its cores, as a cloud's water is: light gets in at
+    // the edges (bright rims), and from below each core shows as a darker patch, the base
+    // mottled, not one flat grey.)
+    dens *= mix(0.4, 1.0, smoothstep(0.0, 0.3, gMargin));
     // (So far off the cells are a few pixels across or less: their average, an even density, as
     // thick as lets through what the gaps between them would, the same cloud on average. (A
     // broken field averaged as thick as its clouds would be one white sheet.))
@@ -438,10 +450,10 @@ const CLOUD_GLSL = /* glsl */ `
 
   // Sunlight reaching p: through the air (reddened, none in the Earth's shadow).
   vec3 sunAt(vec3 p) {
-    if (hitSphere(p, uSun, uRc).x > 0.0) return vec3(0.0);
+    if (earthShadow(p, uRc)) return vec3(0.0);
     float rp = length(p);
     vec2 l = sunDepth(rp - uRc, dot(p, uSun) / rp);
-    return exp(-(BR * l.x + BM * 1.1 * l.y));
+    return exp(-((BR + BO) * l.x + BM * 1.1 * l.y));
   }
 
   // Thin cirrus where the ray crosses CIRRUS_ALT: (light, opacity) and its distance.
@@ -611,6 +623,58 @@ const CLOUD_GLSL = /* glsl */ `
     return clamp(0.045 * t, 50.0, lim);
   }
 
+  // Rain falling from the clouds, seen from a way off: grey curtains from a raining cloud's base
+  // down to the ground, in patches a few km across. (Near the camera the rain is the mist,
+  // fogDepth, and the streaks.) Returns (light, transmittance); tR: its distance.
+  vec4 rainShafts(vec3 ro, vec3 rd, float tEnd, float jit, out float tR) {
+    tR = 1e30;
+    vec4 none = vec4(0.0, 0.0, 0.0, 1.0);
+    if (uRainAny < 0.5) return none;
+    float tA;
+    float tB;
+    if (!slab(ro, rd, uRc - 500.0, uRc + 4000.0, min(tEnd, 80000.0), tA, tB)) return none;
+    tA = max(tA, 1500.0);
+    if (tB <= tA) return none;
+    float len = tB - tA;
+    float T = 1.0;
+    vec3 C = vec3(0.0);
+    float tw = 0.0;
+    float sw = 0.0;
+    for (int i = 0; i < 16; i++) {
+      // (Spaced quadratically: closer together near, where a curtain spans more of the view.)
+      float a0 = (float(i) + jit) / 16.0;
+      float a1 = (float(i) + 1.0) / 16.0;
+      float t = tA + len * a0 * a0;
+      float dt = len * (a1 * a1 - (float(i) / 16.0) * (float(i) / 16.0));
+      vec3 p = ro + rd * t;
+      vec3 n = normalize(p);
+      vec4 wa;
+      vec4 wb;
+      weatherMap(n, wa, wb);
+      float pr = smoothstep(0.12, 0.6, wb.y);
+      if (pr <= 0.0) continue;
+      float h = length(p) - uRc;
+      float base = wa.z * 4000.0;
+      if (h > base + 50.0) continue;
+      // (Falling in shafts under the cells raining hardest, leaning a little with the wind.)
+      vec3 q = (p - n * (h * 0.85)) / 9000.0 + vec3(0.5, 0.2, 0.8) + uDrift * 20.0;
+      // (Showers in broken weather, apart; a steady rain from a deck, nearly everywhere.)
+      float thr = mix(0.58, 0.7, smoothstep(0.4, 0.8, wa.w));
+      float shaft = smoothstep(thr, thr + 0.06, textureLod(tNoise, q, 1.0).r);
+      float dens = pr * shaft * (1.0 - smoothstep(base - 150.0, base + 50.0, h)) * smoothstep(1500.0, 5000.0, t);
+      if (dens <= 0.0) continue;
+      float a = 1.0 - exp(-8e-4 * dens * dt);
+      // (Lit by the dim grey light under the cloud: darker than the sky behind.)
+      vec3 S = uCloudSun * vec3(0.30, 0.32, 0.36) * 0.35 * smoothstep(-0.15, 0.1, dot(n, uSun));
+      C += T * a * S;
+      tw += t * T * a;
+      sw += T * a;
+      T *= 1.0 - a;
+    }
+    if (sw > 0.0) tR = tw / sw;
+    return vec4(C, T);
+  }
+
   // Returns (light, transmittance); tFirst: the clouds' distance along the ray. jit: 0..1, this
   // pixel's offset into the first step.
   vec4 clouds(vec3 ro, vec3 rd, float tEnd, float jit, out float tFirst) {
@@ -668,7 +732,8 @@ const CLOUD_GLSL = /* glsl */ `
           float muv = dot(rd, p) / rp;
           // (Through cloud: a quarter of the clear step, never under 30 m, nor under half a
           // pixel's breadth there: from orbit, finer steps only cost.)
-          float dIn = max(max(0.25 * clearStep(t, muv), 30.0), 0.5 * t * uPixAng);
+          // (Down to 10 m within a km or two: the finest detail there is a few metres across.)
+          float dIn = max(max(0.25 * clearStep(t, muv), mix(10.0, 30.0, smoothstep(500.0, 2500.0, t))), 0.5 * t * uPixAng);
           gDetT = dIn / uPixAng;
           float skip;
           float dens = marchDensity(ro, rd, t, w, pw, skip);
@@ -699,9 +764,24 @@ const CLOUD_GLSL = /* glsl */ `
               // Through the cloud toward the sun (two samples: one close, with the fine detail,
               // so each billow shades the next, the cauliflower; one farther, of the cloud seen
               // softer-edged), with a floor for the light scattered around inside it.
+              // (Close up, first a sample just off the surface, with the finest detail: each knot
+              // of the cauliflower lit on its sunward side and shading the next, crisply.)
+              // (These at about the detail a pixel shows (a mip coarser: any finer, and from tens
+              // of km it shimmered in a stipple), not the march step's, several times coarser
+              // from a few km: there a cloud's sides went flat, one even tone, a cut-out.)
+              float gdMarch = gDetT;
+              gDetT = min(2.0 * t, gdMarch);
+              float od = 0.0;
+              float o1 = max(30.0, 3.0 * t * uPixAng);
+              float o2 = max(110.0, 3.5 * o1);
+              if (t < 15000.0) {
+                gDetBias = 0.01;
+                od += cloudDensity(p + uSun * o1, w, true, t) * 2.3 * o1;
+              }
               gDetBias = 0.5;
-              float od = cloudDensity(p + uSun * 60.0, w, true, t) * 150.0;
+              od += cloudDensity(p + uSun * o2, w, true, t) * (t < 15000.0 ? 1.1 : 1.4) * o2;
               gDetBias = 0.0;
+              gDetT = gdMarch;
               float d400 = cloudDensity(p + uSun * 400.0, w, false, t);
               od += d400 * 500.0;
               // (And the cloud's bulk beyond, coarsely: a base or a deep interior lies under a
@@ -719,7 +799,12 @@ const CLOUD_GLSL = /* glsl */ `
               // mid grey, the sky's light under it, not near black.)
               float tau = SIGMA * od;
               float phaseMs = mix(phase, 0.8, 0.6);
-              float diffuse = max(1.0 / (1.0 + 0.11 * tau) - exp(-tau), 0.0);
+              // (With the sun low, the way out toward it runs sideways through the whole layer,
+              // far beyond these samples: deep in, little of its light diffuses through. Else at
+              // sunset every cloud was the sun's orange all through, a muddy brown.)
+              float lowSun = 1.0 - smoothstep(0.05, 0.4, dot(p, uSun) / rp);
+              float tauD = tau * (1.0 + 3.0 * lowSun * smoothstep(5.0, 15.0, tau));
+              float diffuse = max(1.0 / (1.0 + 0.11 * tauD) - exp(-tauD), 0.0);
               // (As much as a slab's in a deck; less in a cumulus, out of whose sides the light
               // escapes: its shaded side stays shaded.)
               float kDiff = mix(0.8, 0.3, smoothstep(0.3, 0.8, gBroken));
@@ -731,8 +816,13 @@ const CLOUD_GLSL = /* glsl */ `
             // Ambient light: the blue sky's from above (less of it down in the cloud, where the
             // light toward the sun is cut off too), and the sunlit ground and sea's, grey, from
             // below (lighting the flat bases).
-            vec3 sky = mix(vec3(0.2, 0.21, 0.23) * (0.3 + 0.7 * max(sunUp, 0.0)), vec3(0.22, 0.3, 0.42), hn)
-                     * day * (0.45 + 0.55 * exp(-SIGMA * 0.15 * odSun)) * 0.65;
+            // (A cloud's base sees the sky round it too, not only the ground: at sunset, with the
+            // ground dark, that sky is most of its light, a blue-grey under the gold-lit edges.)
+            vec3 sky = mix(vec3(0.2, 0.21, 0.23) * (0.3 + 0.7 * max(sunUp, 0.0)), vec3(0.22, 0.3, 0.42), 0.25 + 0.75 * hn)
+                     * day * (0.45 + 0.55 * exp(-SIGMA * 0.15 * odSun)) * 0.65
+                     // (Round sunset the sky's light is a bigger share of what lights a cloud's
+                     // shaded side than at noon: its bright western half.)
+                     * (1.0 + 1.5 * (1.0 - smoothstep(0.05, 0.3, sunUp)));
             float powder = 1.0 - exp(-dens * 5.0);
             vec3 S = uCloudSun * (sunCol * phase * (0.55 + 0.45 * powder) + sky);
             // (Cloud is optically thick: a few hundred metres of it hides what's behind, so its
@@ -779,6 +869,14 @@ const CLOUD_GLSL = /* glsl */ `
         }
       }
     }
+    // The rain under them: in front of the clouds it falls from (seen from below), or behind.
+    float tR;
+    vec4 rn = rainShafts(ro, rd, tEnd, jit, tR);
+    if (rn.a < 0.999) {
+      if (tR < tLow) low = vec4(rn.rgb + rn.a * low.rgb, rn.a * low.a);
+      else low = vec4(low.rgb + low.a * rn.rgb, low.a * rn.a);
+      tLow = min(tLow, tR);
+    }
     // Put the cirrus in front of or behind the lower clouds (it's above them).
     vec4 outc;
     if (ci.a > 0.0 && tc < tLow) outc = vec4(ci.rgb + (1.0 - ci.a) * low.rgb, (1.0 - ci.a) * low.a);
@@ -819,6 +917,7 @@ const ATMO_COMMON = /* glsl */ `
   uniform mat3 uWorldToEcef;   // world -> Earth-fixed directions (the map's axes)
   uniform vec3 uDrift;         // the fine detail's slow drift (noise-space offset)
   uniform float uCloudSun;     // brightness of sunlit cloud
+  uniform float uRainAny;      // rain anywhere within ~150 km (else no rain curtains to look for)
   uniform float uFog;          // ground fog where the camera is, 0..1
   uniform float uRainMist;     // and rain, 0..1
   uniform float uPixAng;       // angle one cloud-pass pixel spans, rad
@@ -827,6 +926,10 @@ const ATMO_COMMON = /* glsl */ `
   uniform vec2 uProjOff;       // projection off-centre terms (elements 8, 9)
 
   const vec3 BR = vec3(5.8e-6, 13.5e-6, 33.1e-6); // Rayleigh scattering at sea level, 1/m
+  // Ozone's absorption, per metre of the air's (Rayleigh) depth: its layer is high up, so it
+  // barely tints the noon sun, but the long low paths at sunset lose their green and red to it:
+  // the twilight sky blue overhead, not a yellow-grey. (Its column against the air's, roughly.)
+  const vec3 BO = vec3(1.24e-6, 3.57e-6, 0.16e-6);
   const float BM = 7e-6;                          // Mie scattering at sea level, 1/m (a clear Gulf day)
   const float HR = 8000.0;                        // Rayleigh scale height, m
   const float HM = 1200.0;                        // Mie scale height, m
@@ -849,6 +952,15 @@ const ATMO_COMMON = /* glsl */ `
     if (h < 0.0) return vec2(1e30, -1e30);
     h = sqrt(h);
     return vec2(-b - h, -b + h);
+  }
+
+  // Whether p (from the Earth's centre) is in the Earth's shadow: the way to the sun runs into
+  // the ground (radius r). (Not when the line misses the Earth altogether: with the sun low, from
+  // high up it does, and that's sunlight. Counted as shadow, the sky went dark with the sun
+  // still a few degrees up, and every cloud with it.)
+  bool earthShadow(vec3 p, float r) {
+    vec2 t = hitSphere(p, uSun, r);
+    return t.x > 0.0 && t.x < 1e29;
   }
 
 
@@ -929,12 +1041,12 @@ const fragment = /* glsl */ `
     z.odRN += hr * fN;
     z.odMN += hm * fN;
     // In the Earth's shadow: no sunlight to scatter.
-    if (hitSphere(p, uSun, uRg).x > 0.0) return;
+    if (earthShadow(p, uRg)) return;
     float rp = length(p);
     vec2 l = sunDepth(rp - uRg, dot(p, uSun) / rp);
     // (Under an overcast, the air in front of the clouds is in their shade as the ground is: lit
     // by what gets through. Sunlit haze there washed the ground out pale under a dark sky.)
-    vec3 att = exp(-(BR * (z.odR + l.x) + BM * 1.1 * (z.odM + l.y))) * mix(1.0, uLocalSun, front);
+    vec3 att = exp(-((BR + BO) * (z.odR + l.x) + BM * 1.1 * (z.odM + l.y))) * mix(1.0, uLocalSun, front);
     // Air behind the clouds only shows through what they let through.
     float behind = mix(clT, 1.0, front);
     z.sumR += att * hr * behind;
@@ -1284,6 +1396,7 @@ export class SceneAtmospherePass extends Pass {
     uWorldToEcef: { value: new THREE.Matrix3() },
     uDrift: { value: new THREE.Vector3() },
     uCloudSun: { value: 1.4 },
+    uRainAny: { value: 0 },
     uPixAng: { value: 0.001 },
     uRc: { value: RE },
     uPolar: { value: new THREE.Vector3(0, 1, 0) },
