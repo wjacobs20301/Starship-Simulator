@@ -90,6 +90,74 @@ export { SHIP_CATCH_PIN };
 export const SHIP_ENTRY_MODEL: EntryModel = { dragArea: 339, liftToDrag: (speed) => (speed > 1000 ? 0.53 : speed > 700 ? 0.3 : 0.12) };
 
 /**
+ * The ship's lift-to-drag ratio and drag against angle of attack, each relative to 60 deg (its
+ * entry attitude), as its aerodynamics give them (measured in the sim: a long body nearly
+ * broadside, so roughly cot(alpha)): pitching up sheds energy much as banking does, without
+ * turning the ship.
+ */
+const ALPHA_AERO: readonly (readonly [number, number, number])[] = [
+  [55, 1.2, 0.89],
+  [60, 1, 1],
+  [65, 0.81, 1.09],
+  [70, 0.64, 1.17],
+  [75, 0.47, 1.22],
+  [80, 0.32, 1.25],
+  [85, 0.19, 1.24],
+  [90, 0.06, 1.24],
+];
+function alphaAero(alpha: number): { ld: number; drag: number } {
+  const a = clamp(alpha / DEG, 55, 90);
+  for (let i = 1; i < ALPHA_AERO.length; i++) {
+    const [a1, l1, d1] = ALPHA_AERO[i];
+    const [a0, l0, d0] = ALPHA_AERO[i - 1];
+    if (a <= a1) {
+      const f = (a - a0) / (a1 - a0);
+      return { ld: l0 + (l1 - l0) * f, drag: d0 + (d1 - d0) * f };
+    }
+  }
+  return { ld: 0.06, drag: 1.24 };
+}
+
+/** Bank the entry guidance prefers to stay within, rad: past it, it pitches up first. */
+const ENTRY_SOFT_BANK = 40 * DEG;
+/** How far it pitches up from the entry attitude to shed energy, rad. */
+const ENTRY_MAX_PITCH_UP = 20 * DEG;
+
+/** The entry's angle of attack: the schedule for this Mach number, pitched up by alphaUp (rad) while that's higher. */
+export function entryAlphaFlown(mach: number, alphaUp: number): number {
+  return Math.max(entryAlpha(mach), entryAlpha(30) + alphaUp);
+}
+
+/**
+ * The glide as flown with this bank and pitch-up (for the guidance's predictions and the map):
+ * the lift's vertical part, and the drag, scaled from the entry attitude's.
+ */
+export function entryModel(bank: number, alphaUp: number): EntryModel {
+  const base = SHIP_ENTRY_MODEL.liftToDrag!;
+  const up = alphaAero(entryAlpha(30) + alphaUp);
+  return {
+    dragArea: SHIP_ENTRY_MODEL.dragArea * up.drag,
+    liftToDrag: (sp) => {
+      const mach = sp / 300;
+      const sched = entryAlpha(mach);
+      const flown = Math.max(sched, entryAlpha(30) + alphaUp);
+      return base(sp) * (alphaAero(flown).ld / alphaAero(sched).ld) * Math.cos(bank);
+    },
+  };
+}
+
+/**
+ * The entry's one range control, 0..3, as bank and pitch-up: banking up to ENTRY_SOFT_BANK first
+ * (0..1), then pitching up at that bank (1..2), and only then banking further (2..3). The less
+ * bank, the less of the lift turns the ship sideways: gentler S-turns.
+ */
+function entryControl(x: number): { bank: number; alphaUp: number } {
+  if (x <= 1) return { bank: ENTRY_SOFT_BANK * x, alphaUp: 0 };
+  if (x <= 2) return { bank: ENTRY_SOFT_BANK, alphaUp: ENTRY_MAX_PITCH_UP * (x - 1) };
+  return { bank: ENTRY_SOFT_BANK + (85 * DEG - ENTRY_SOFT_BANK) * Math.min(1, x - 2), alphaUp: ENTRY_MAX_PITCH_UP };
+}
+
+/**
  * Planning glides with the lift banked 45 deg (its vertical part: cos 45): the entry guidance can
  * then stretch (less bank) or shorten (more) from there.
  */
@@ -816,6 +884,12 @@ export class ShipReturn {
   /** When the bank last reversed (sim time). */
   private reversedAt = -Infinity;
   /** The bank the entry guidance is flying (rad, + = left), for the map's predicted path. */
+  /** Pitched up from the entry attitude (rad), to shed energy (entryControl). */
+  private alphaUp = 0;
+  /** The bank and pitch-up the entry guidance is flying (rad), for the map's predicted path. */
+  get entryShape(): { bank: number; alphaUp: number } | null {
+    return this.phase === 'entry' ? { bank: this.bank * this.bankSign, alphaUp: this.alphaUp } : null;
+  }
   get entryBank(): number | null {
     return this.phase === 'entry' ? this.bank * this.bankSign : null;
   }
@@ -1121,7 +1195,7 @@ export class ShipReturn {
           this.nextGuide = t + 1;
           this.guideEntry(ship, aux);
         }
-        const att = entryAttitude(vHat, up, heading, entryAlpha(aux.mach), this.bank * this.bankSign);
+        const att = entryAttitude(vHat, up, heading, entryAlphaFlown(aux.mach, this.alphaUp), this.bank * this.bankSign);
         applyControl(ship, aux, att.nose, dt, undefined, att.bodyZ);
         if (aux.mach < 1 && aux.geo.h < 30e3) {
           this.phase = 'bellyflop';
@@ -1265,9 +1339,9 @@ export class ShipReturn {
   private guideEntry(ship: Vehicle, aux: Aux): void {
     const goal = targetLatLon(this.target);
     const goalEcef = geodeticToEcef(goal.lat * DEG, goal.lon * DEG, 0);
-    const predict = (bank: number) => {
-      const model: EntryModel = { dragArea: SHIP_ENTRY_MODEL.dragArea, liftToDrag: (sp) => SHIP_ENTRY_MODEL.liftToDrag!(sp) * Math.cos(bank) };
-      const p = predictTrajectory('guide', ship.r, ship.v, this.sim.t, model, aux.mp.mass);
+    const predict = (x: number) => {
+      const c = entryControl(x);
+      const p = predictTrajectory('guide', ship.r, ship.v, this.sim.t, entryModel(c.bank, c.alphaUp), aux.mp.mass);
       if (!p.impact || p.points.length < 3) return null;
       const P = p.impact.ecef;
       const prev = p.points[Math.max(0, p.points.length - 6)];
@@ -1276,24 +1350,26 @@ export class ShipReturn {
       fwd = normalize(sub(fwd, scale(upP, dot(fwd, upP))));
       return { down: dot(sub(goalEcef, P), fwd), lat: p.impact.lat, lon: p.impact.lon };
     };
-    // Range: bisection on the bank's size (more bank, less lift up, shorter).
+    // Range: bisection on the range control (more bank, then more pitch-up, shorter).
     const full = predict(0);
     let at = full;
     if (full && full.down > 0) {
       // Even full lift up falls short: fly lift up (the most range there is).
       this.bank = 0;
+      this.alphaUp = 0;
     } else {
       let lo = 0;
-      let hi = 85 * DEG;
-      for (let i = 0; i < 7; i++) {
+      let hi = 3;
+      for (let i = 0; i < 9; i++) {
         const mid = (lo + hi) / 2;
         const f = predict(mid);
         if (!f) break;
         if (f.down > 0) hi = mid;
         else lo = mid;
       }
-      this.bank = (lo + hi) / 2;
-      at = predict(this.bank);
+      const x = (lo + hi) / 2;
+      ({ bank: this.bank, alphaUp: this.alphaUp } = entryControl(x));
+      at = predict(x);
     }
     if (!at) return;
     // Crossrange: the target's distance from the flight plane (Earth-relative), + = to the left.
@@ -1324,7 +1400,7 @@ export class ShipReturn {
     }
     const miss = greatCircleKm(at, goal);
     this.predicted = { lat: at.lat, lon: at.lon, missKm: Math.hypot(miss, crossKm) };
-    this.status = `entry: bank ${((this.bank * this.bankSign) / DEG).toFixed(0)} deg, ${(at.down / 1000).toFixed(0)} km downrange / ${crossKm.toFixed(0)} km crossrange to go`;
+    this.status = `entry: bank ${((this.bank * this.bankSign) / DEG).toFixed(0)} deg${this.alphaUp > 0.5 * DEG ? `, pitched up ${(this.alphaUp / DEG).toFixed(0)} deg` : ''}, ${(at.down / 1000).toFixed(0)} km downrange / ${crossKm.toFixed(0)} km crossrange to go`;
   }
 
   /**

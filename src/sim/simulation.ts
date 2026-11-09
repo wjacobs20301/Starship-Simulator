@@ -20,7 +20,7 @@ import { ARMS, TowerArms } from './tower';
 import { SHIP_ENTRY, heatFlux } from './shipReentry';
 import { airRelativeVelocity } from './frames';
 import { Mission, type Phase } from './sequencer';
-import { type ReturnTarget, SHIP_CATCH_PIN, ShipReturn, targetLatLon } from './shipReturn';
+import { type ReturnTarget, SHIP_CATCH_PIN, ShipReturn, entryModel, targetLatLon } from './shipReturn';
 import { LIMITS, type VehicleHealth, checkLimits, newHealth } from './limits';
 import { type EntryModel, type Trajectory, orbitalFrame, predictTrajectory, propagate } from './trajectory';
 
@@ -1416,12 +1416,9 @@ export class Simulation {
       const ids = v.stages.map((s) => s.def.id);
       let model: EntryModel =
         ids.length > 1 ? { dragArea: 30 } : ids[0] === 'booster' ? { dragArea: 80 } : SHIP_ENTRY;
-      // A ship on entry guidance: its path as banked now (the lift up that's left after the bank).
-      const bank = v.id === 'ship' ? this.mission.shipReturn?.entryBank : null;
-      if (bank != null && model.liftToDrag) {
-        const ld = model.liftToDrag;
-        model = { ...model, liftToDrag: (sp) => ld(sp) * Math.cos(bank) };
-      }
+      // A ship on entry guidance: its path as flown now (banked, pitched up).
+      const shape = v.id === 'ship' ? this.mission.shipReturn?.entryShape : null;
+      if (shape) model = entryModel(Math.abs(shape.bank), shape.alphaUp);
       out.push(predictTrajectory(v.id, v.r, v.v, this.t, model, aux.mp.mass));
       const rem = this.maneuverRemaining();
       if (this.node && rem && this.node.node.vehicle === v.id) {
