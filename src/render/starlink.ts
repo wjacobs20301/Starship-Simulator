@@ -52,6 +52,12 @@ const DRAW_RANGE = 60e3;
  */
 const RESTACK = 8;
 const RESTACK_AFTER = (STARSHIP_V3.radius + STARLINK_V3.width / 2 + 0.3) / STARLINK_V3.pushSpeed + 1;
+/**
+ * Satellites still in the bay are drawn darkened: the sun's light doesn't stop at the hull (no
+ * shadow reaches in), and inside it's dim, lit by the bay's lamps. Out of the slot, full daylight.
+ */
+const IN_BAY = new THREE.Color(0.22, 0.22, 0.24);
+const IN_SUN = new THREE.Color(1, 1, 1);
 /** Ship body axes -> its mesh's (+Y up the ship, +X body y, -Z body z). */
 const BODY_TO_MESH = new THREE.Matrix4().set(0, 1, 0, 0, 1, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1);
 
@@ -103,6 +109,9 @@ export class StarlinkFleet {
         mesh.count = 0;
         mesh.frustumCulled = false;
         mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        // (Per-instance colour from the start, so the shader is built with it: in the bay or out.)
+        mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(count * 3).fill(1), 3);
+        mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
         this.group.add(mesh);
         out.push({ mesh, local: new THREE.Matrix4().multiplyMatrices(inv, o.matrixWorld) });
       });
@@ -133,12 +142,15 @@ export class StarlinkFleet {
         // (Mesh axes: up the ship +Y, the door on -X.)
         this.m.makeTranslation(0, BOOSTER_LENGTH + x, 0);
         this.sat.multiplyMatrices(ship.matrixWorld, this.m).multiply(BODY_TO_MESH).multiply(StarlinkFleet.MODEL_TO_BODY);
-        for (const p of this.bus) p.mesh.setMatrixAt(n, this.part.multiplyMatrices(this.sat, FLAT).multiply(p.local));
-        n++;
-        for (const side of [1, -1]) {
-          np = this.wing(side, 0, Math.PI / 2, np);
-          ny = this.yokeAt(side, 0, ny);
+        for (const p of this.bus) {
+          p.mesh.setMatrixAt(n, this.part.multiplyMatrices(this.sat, FLAT).multiply(p.local));
+          p.mesh.setColorAt(n, IN_BAY);
         }
+        n++;
+        // (Its wings folded flat on its back; the yokes, folded down with them, aren't drawn.)
+        const p0 = np;
+        for (const side of [1, -1]) np = this.wing(side, 0, Math.PI / 2, np);
+        for (let i = p0; i < np; i++) for (const p of this.panel) p.mesh.setColorAt(i, IN_BAY);
       }
     }
     for (const s of sats) {
@@ -149,8 +161,13 @@ export class StarlinkFleet {
       // The satellite's frame in the world (camera-relative).
       this.rot.copy(StarlinkFleet.ENU_TO_WORLD).multiply(m3(s.rot, this.m)).multiply(StarlinkFleet.MODEL_TO_BODY);
       this.sat.copy(this.rot).setPosition(dx, dy, dz);
-      for (const p of this.bus) p.mesh.setMatrixAt(n, this.part.multiplyMatrices(this.sat, FLAT).multiply(p.local));
+      for (const p of this.bus) {
+        p.mesh.setMatrixAt(n, this.part.multiplyMatrices(this.sat, FLAT).multiply(p.local));
+        p.mesh.setColorAt(n, IN_SUN);
+      }
       n++;
+      const p0 = np;
+      const y0 = ny;
       // Its wings, as far out as they've got (the -side one first: its stack rides on top).
       const t0 = wingStart(s.n);
       for (const side of [1, -1]) {
@@ -160,18 +177,15 @@ export class StarlinkFleet {
         np = this.wing(side, a, g, np);
         ny = this.yokeAt(side, a, ny);
       }
+      for (let i = p0; i < np; i++) for (const p of this.panel) p.mesh.setColorAt(i, IN_SUN);
+      for (let i = y0; i < ny; i++) for (const p of this.yoke) p.mesh.setColorAt(i, IN_SUN);
     }
-    for (const p of this.bus) {
-      p.mesh.count = n;
-      p.mesh.instanceMatrix.needsUpdate = true;
-    }
-    for (const p of this.panel) {
-      p.mesh.count = np;
-      p.mesh.instanceMatrix.needsUpdate = true;
-    }
-    for (const p of this.yoke) {
-      p.mesh.count = ny;
-      p.mesh.instanceMatrix.needsUpdate = true;
+    for (const [parts, count] of [[this.bus, n], [this.panel, np], [this.yoke, ny]] as const) {
+      for (const p of parts) {
+        p.mesh.count = count;
+        p.mesh.instanceMatrix.needsUpdate = true;
+        if (p.mesh.instanceColor) p.mesh.instanceColor.needsUpdate = true;
+      }
     }
     this.group.visible = n > 0;
   }

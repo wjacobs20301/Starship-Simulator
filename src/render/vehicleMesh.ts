@@ -151,9 +151,10 @@ export class VehicleMesh {
     const b = THREE.MathUtils.clamp((open - 0.35) / 0.65, 0, 1);
     // (Model axes: +X toward the axis from the door, +Y up the ship.)
     d.node.position.copy(d.closed).add(new THREE.Vector3(0.3 * a + 0.15 * b, 1.3 * b * b * (3 - 2 * b), 0));
-    // The dark strip over the slot is for looking at it from outside; from the bay camera it would
-    // block the view out.
-    d.bay.visible = open > 0.002 && !inside;
+    // (The slot is cut through the hull while the door is open (cutSlot), onto the bay inside:
+    // from outside, the bay and the satellites in it show through it. The old dark strip that
+    // stood in for the opening stays hidden.)
+    d.bay.visible = false;
     // (And the door, slid up inside the bay, would fill the bay camera's view: it isn't drawn there.)
     d.node.visible = !inside;
     // (The bay's lamps: on while the door is open. Never removed, only dimmed: taking a light out
@@ -169,7 +170,7 @@ export class VehicleMesh {
 
   /** Call once the root is placed for this frame (camera-relative, so its distance is the camera's). */
   afterPlace(): void {
-    if (this.slotModel && this.slot.uSlotOpen.value > 0) {
+    if (this.slotModel) {
       this.slotModel.updateMatrixWorld(true);
       this.slot.uSlotFromWorld.value.copy(this.slotModel.matrixWorld).invert();
     }
@@ -282,13 +283,14 @@ function payloadDoor(model: THREE.Object3D): { node: THREE.Object3D; closed: THR
 }
 
 /** The payload slot in the ship model's axes: its height range (m), half-angle round the hull from -X, and the skin's radius range. */
-const SLOT = { y0: 34.66, y1: 35.51, half: Math.asin(3.76 / 4.5), r0: 4.15, r1: 4.85 };
+const SLOT = { y0: 34.66, y1: 35.51, half: Math.asin(3.76 / 4.5), r0: 4.15, r1: 4.85, bayY0: 34.66, bayY1: 44.85 };
 
 /**
  * Cut the payload slot through the ship's hull while the door is open (the model's skin has no
  * hole under the door): the hull's pixels in the slot are discarded, so from the bay the slot
  * opens onto space. Only a thin shell at the hull's radius is cut, so nothing else in the model
- * (the door itself, the flaps) is touched.
+ * (the door itself, the flaps) is touched. The model's own fittings inside the bay are cut away
+ * too (always: they're only ever seen from in there), leaving room for the built bay.
  */
 function cutSlot(model: THREE.Object3D, u: { uSlotFromWorld: { value: THREE.Matrix4 }; uSlotOpen: { value: number } }): void {
   const done = new Set<THREE.Material>();
@@ -310,14 +312,20 @@ function cutSlot(model: THREE.Object3D, u: { uSlotFromWorld: { value: THREE.Matr
           .replace(
             '#include <clipping_planes_fragment>',
             `#include <clipping_planes_fragment>
-if (uSlotOpen > 0.5) {
+{
   vec3 sp = (uSlotFromWorld * vec4(vSlotWorld, 1.0)).xyz;
   float sr = length(sp.xz);
-  if (sp.y > ${SLOT.y0.toFixed(3)} && sp.y < ${SLOT.y1.toFixed(3)} && sr > ${SLOT.r0.toFixed(3)} && sr < ${SLOT.r1.toFixed(3)} && abs(atan(sp.z, -sp.x)) < ${SLOT.half.toFixed(4)}) discard;
+  // The slot, while the door's open.
+  if (uSlotOpen > 0.5 && sp.y > ${SLOT.y0.toFixed(3)} && sp.y < ${SLOT.y1.toFixed(3)} && sr > ${SLOT.r0.toFixed(3)} && sr < ${SLOT.r1.toFixed(3)} && abs(atan(sp.z, -sp.x)) < ${SLOT.half.toFixed(4)}) discard;
+  // And the model's own fittings inside the payload bay (the bay is built separately, with the
+  // satellites in it): anything more than a hand's width in from the skin, slot to ceiling.
+  float st = clamp((sp.y - 38.0) / 14.1, 0.0, 1.0);
+  float hr = 4.5 * pow(max(0.0, 1.0 - st * st), 0.62);
+  if (sp.y > ${SLOT.bayY0.toFixed(2)} && sp.y < ${SLOT.bayY1.toFixed(2)} && sr < hr - 0.25) discard;
 }`,
           );
       };
-      m.customProgramCacheKey = () => `${prevKey}|pez-slot-v1`;
+      m.customProgramCacheKey = () => `${prevKey}|pez-slot-v2`;
       m.needsUpdate = true;
     }
   });
@@ -335,10 +343,11 @@ const BAY_LAMP = 25;
 function payloadBay(model: THREE.Object3D, slot: THREE.Box3, half: number): THREE.PointLight {
   const group = new THREE.Group();
   group.name = 'PayloadBayInside';
-  // From just below the slot (the model's tank dome is the floor there) to just over the stack's
-  // top, up in the nose: the wall just inside the skin, following the nose's taper.
-  const bottom = slot.min.y - 0.6;
-  const top = STARLINK_V3.doorX + STARLINK_V3.count * STARLINK_V3.pitch + 0.5;
+  // From the slot's lower edge (a floor just over the model's tank dome, which would otherwise
+  // catch the sun in here) up to its ceiling in the nose (~45 m), over the stack: the wall just
+  // inside the skin, following the nose's taper.
+  const bottom = slot.min.y - 0.02;
+  const top = 44.9;
   const radius = (y: number) => Math.min(4.32, hullRadiusAt(y) - 0.12);
   // (Unlit: the sun's light doesn't stop at the hull (no shadow reaches in here), so a lit wall
   // would glare. A dim grey, lighter near the slot where the daylight spills in.)
@@ -384,16 +393,48 @@ function payloadBay(model: THREE.Object3D, slot: THREE.Box3, half: number): THRE
     cg.setAttribute('color', shadeOf(Array.from(cg.attributes.position.array)));
     group.add(new THREE.Mesh(cg, wall));
   }
-  // The dispenser's rails, at either end of the stack (on the ship's axis, across the slot).
+  // The barrel's stringers, as the webcasts show it: ribs up the wall all round (around the slot,
+  // not across it), and a few ring frames.
+  const rib = new THREE.MeshBasicMaterial({ color: 0x2c2e32 });
+  const ribs = 64;
+  const segs: [number, number, number][] = [];
+  for (let k = 0; k < ribs; k++) {
+    const a = -Math.PI + (2 * Math.PI * (k + 0.5)) / ribs;
+    for (let r = 0; r < rows.length - 1; r++) {
+      if (r === 1 && Math.abs(a) < half + 0.02) continue;
+      segs.push([a, rows[r], rows[r + 1]]);
+    }
+  }
+  const ribMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.07, 1, 0.07), rib, segs.length);
+  const mtx = new THREE.Matrix4();
+  segs.forEach(([a, y0, y1], i) => {
+    const r = radius((y0 + y1) / 2) - 0.05;
+    mtx.makeScale(1, y1 - y0, 1).setPosition(-r * Math.cos(a), (y0 + y1) / 2, r * Math.sin(a));
+    ribMesh.setMatrixAt(i, mtx);
+  });
+  ribMesh.frustumCulled = false;
+  group.add(ribMesh);
+  for (let y = 37; y < top - 0.5; y += 2) {
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(radius(y) - 0.06, 0.05, 4, 96), rib);
+    ring.rotation.x = Math.PI / 2;
+    ring.position.y = y;
+    group.add(ring);
+  }
+  // The dispenser: its column of rails up the back of the stack, and guides at either end of it.
   const rail = new THREE.MeshStandardMaterial({ color: 0x8a8d92, roughness: 0.45, metalness: 0.8 });
-  const len = top - slot.min.y;
-  for (const z of [-1, 1]) {
-    const r = new THREE.Mesh(new THREE.BoxGeometry(0.3, len, 0.14), rail);
-    r.position.set(0, slot.min.y + len / 2, z * (STARLINK_V3.length / 2 + 0.12));
+  const column = (x: number, z: number, w: number, d: number, to: number) => {
+    const len = to - slot.min.y;
+    const r = new THREE.Mesh(new THREE.BoxGeometry(w, len, d), rail);
+    r.position.set(x, slot.min.y + len / 2, z);
     group.add(r);
+  };
+  for (const z of [-1, 1]) {
+    column(STARLINK_V3.width / 2 + 0.2, z * 2.4, 0.14, 0.14, top - 0.3);
+    // (The end guides, 3.8 m out, stop where the nose narrows to that, just over the stack.)
+    column(0, z * (STARLINK_V3.length / 2 + 0.12), 0.3, 0.14, 42.8);
   }
   const lamp = new THREE.PointLight(0xfff2e0, 0, 30, 2);
-  lamp.position.set(2.9, slot.max.y + 1.5, 0);
+  lamp.position.set(-2.6, slot.max.y + 3.0, 0.8);
   group.add(lamp);
   model.add(group);
   return lamp;

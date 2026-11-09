@@ -23,8 +23,8 @@ const MAP_MAX = 1.2e9;
 /** Closest the camera may come to the ground or sea, m. */
 const GROUND_CLEARANCE = 2;
 
-export type CameraMode = 'orbit' | 'chase' | 'pad' | 'tower' | 'spectator' | 'inspect' | 'bay' | 'satellite';
-export const CAMERA_MODES: CameraMode[] = ['orbit', 'chase', 'pad', 'tower', 'spectator', 'inspect', 'bay', 'satellite'];
+export type CameraMode = 'orbit' | 'chase' | 'pad' | 'tower' | 'spectator' | 'inspect' | 'bay' | 'baytop' | 'hull' | 'satellite';
+export const CAMERA_MODES: CameraMode[] = ['orbit', 'chase', 'pad', 'tower', 'spectator', 'inspect', 'bay', 'baytop', 'hull', 'satellite'];
 export const CAMERA_LABELS: Record<CameraMode, string> = {
   orbit: 'Orbit (drag / scroll)',
   chase: 'Chase',
@@ -32,11 +32,13 @@ export const CAMERA_LABELS: Record<CameraMode, string> = {
   tower: 'Tower camera',
   spectator: 'South Padre Island (~9 km)',
   inspect: 'Heat shield inspection (Starlink camera)',
-  bay: 'Payload bay camera',
+  bay: 'Payload bay camera (dispenser)',
+  baytop: 'Payload bay camera (top)',
+  hull: 'Hull camera (payload door)',
   satellite: 'Starlink camera',
 };
 /** Camera modes that need something to look from: the payload door (a Starlink ship), a satellite out. */
-const NEEDS: Partial<Record<CameraMode, 'door' | 'sat'>> = { bay: 'door', satellite: 'sat' };
+const NEEDS: Partial<Record<CameraMode, 'door' | 'sat'>> = { bay: 'door', baytop: 'door', hull: 'door', satellite: 'sat' };
 
 // Fixed viewpoints in pad ENU (m).
 /** The tower cameras: on a boom above each tower's top, out over its arms (looking down at a catch). */
@@ -233,9 +235,10 @@ export class CameraRig {
         return pos;
       }
       case 'bay': {
-        // Inside the payload bay, as on the webcasts: up in a corner between the dispenser's stack
-        // and the door, looking down along the slot as each satellite slides out of it, the Earth
-        // beyond. (The bay's floor, the tank dome, is just below the slot.)
+        // Inside the payload bay, as on the webcasts: on the dispenser behind the stack, level with
+        // the slot, looking across the stacked satellites (edge on) to the curved hull and the slot
+        // as each one is pushed out. (Kept well clear of the bay wall, the hull and the stack:
+        // closer than the camera's near plane, it would see through them.)
         if (!target.door) {
           pos = [c[0] + this.up.x * target.size, c[1] + this.up.y * target.size, c[2] + this.up.z * target.size];
           break;
@@ -244,9 +247,40 @@ export class CameraRig {
         const out = new THREE.Vector3(...target.door.out);
         const side = new THREE.Vector3(...target.door.side);
         const slot = new THREE.Vector3(...target.door.at);
-        const at = slot.clone().addScaledVector(out, -1.7).addScaledVector(axis, 1.5).addScaledVector(side, 3.0);
-        const look = slot.clone().addScaledVector(out, 1.5).addScaledVector(axis, -0.4).addScaledVector(side, -1.2);
-        return this.aim(camera, [at.x, at.y, at.z], look, axis, 76);
+        const at = slot.clone().addScaledVector(out, -7.35).addScaledVector(axis, 0.5).addScaledVector(side, -0.4);
+        const look = slot.clone().addScaledVector(axis, 0.1).addScaledVector(side, 1.4);
+        return this.aim(camera, [at.x, at.y, at.z], look, axis, 100);
+      }
+      case 'baytop': {
+        // Inside the payload bay at its top, up in the nose, looking straight down the bay: the
+        // ribbed barrel wall, the dispenser's rails and the top of the stack below.
+        if (!target.door) {
+          pos = [c[0] + this.up.x * target.size, c[1] + this.up.y * target.size, c[2] + this.up.z * target.size];
+          break;
+        }
+        const axis = new THREE.Vector3(...target.axis);
+        const out = new THREE.Vector3(...target.door.out);
+        const slot = new THREE.Vector3(...target.door.at);
+        const at = slot.clone().addScaledVector(out, -5.5).addScaledVector(axis, 9.35);
+        const look = slot.clone().addScaledVector(out, -3.5);
+        return this.aim(camera, [at.x, at.y, at.z], look, out, 96);
+      }
+      case 'hull': {
+        // Outside, as on the webcasts: on the hull up toward the nose, on the door's side, looking
+        // back along the ship at the open slot, each satellite coming out and drifting off.
+        if (!target.door) {
+          pos = [c[0] + this.up.x * target.size, c[1] + this.up.y * target.size, c[2] + this.up.z * target.size];
+          break;
+        }
+        const axis = new THREE.Vector3(...target.axis);
+        const out = new THREE.Vector3(...target.door.out);
+        const slot = new THREE.Vector3(...target.door.at);
+        // (Nine metres up from the slot, where the nose has narrowed to ~4.1 m: a metre off the skin.)
+        const at = slot.clone().addScaledVector(axis, 9).addScaledVector(out, 0.6);
+        // (Looking a little off the skin, so the hull runs down the middle of the picture to the
+        // door with the satellites coming out of it, and space or the Earth beyond.)
+        const look = slot.clone().addScaledVector(axis, -10).addScaledVector(out, 2.2);
+        return this.aim(camera, [at.x, at.y, at.z], look, out, 64);
       }
       case 'satellite': {
         // On a satellite, a few metres beyond and above it, looking back at the ship (a long lens that keeps

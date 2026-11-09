@@ -1163,7 +1163,7 @@ function frame(): void {
     mesh.root.quaternion.copy(qb);
     mesh.update(v, simTime);
     if (v.stages.includes('ship')) {
-      mesh.setPayloadDoor(snap.payload?.door ?? 0, rig.mode === 'bay' && !rig.map && v.id === trackedId);
+      mesh.setPayloadDoor(snap.payload?.door ?? 0, (rig.mode === 'bay' || rig.mode === 'baytop') && !rig.map && v.id === trackedId);
       mesh.setShield(snap.shield);
     }
     const w = enuToWorld(pos);
@@ -1209,7 +1209,7 @@ function frame(): void {
   const satAt = focusSat !== undefined ? snap.payload?.sats.find((x) => x.n === focusSat) : undefined;
   const focus0 = satAt ? enuToWorld(satAt.pos) : import.meta.env.DEV ? (window as unknown as { __focus?: V3 }).__focus : undefined;
   // (A satellite picked with V: the cameras that follow something follow it.)
-  const picked = satFocus !== null && !['bay', 'satellite', 'inspect'].includes(rig.mode) ? satWorld(satFocus) : null;
+  const picked = satFocus !== null && !['bay', 'baytop', 'hull', 'satellite', 'inspect'].includes(rig.mode) ? satWorld(satFocus) : null;
   const aim = picked ? { center: picked, axis: [0, 1, 0] as V3, size: 24 } : focus0 ? { center: focus0, axis: [0, 1, 0] as V3, size: 60 } : (target ?? (watching ? { center: watching.at, axis: [0, 1, 0] as V3, size: watching.radius } : null));
   // Back off far enough to take in the whole fireball.
   if (watching && rig.mode === 'orbit' && !rig.map) rig.distance += (Math.max(rig.distance, watching.radius * 3.2) - rig.distance) * Math.min(1, frameDt * 1.5);
