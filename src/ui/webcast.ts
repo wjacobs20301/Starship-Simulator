@@ -190,6 +190,8 @@ export class VehicleBlock {
     const s = v.stageState[this.stage];
     if (s) {
       s.throttles.forEach((th, i) => this.dots[i]?.classList.toggle('on', th > 0.02));
+      // (An engine out: marked red for the rest of the flight, as on SpaceX's webcast.)
+      s.failed.forEach((f, i) => this.dots[i]?.classList.toggle('out', f));
       this.prop.style.transform = `scaleX(${s.propFrac.toFixed(3)})`;
     }
     // Pitch from the body axis (body -> local ENU, row-major: column 0 is the nose).

@@ -110,6 +110,7 @@ export class Mission {
             this.liftoffT = sim.t;
             this.phase = 'ascent';
             sim.log(`Liftoff (T/W ${fmt(twr, 2)})`);
+            sim.shield.shake('liftoff');
           } else if (tm > 3) {
             setThrottle(stack, 'booster', 0);
             this.phase = 'aborted';
@@ -127,7 +128,10 @@ export class Mission {
         // Max-Q detection and throttle bucket.
         if (aux.q > this.maxQ.q) this.maxQ = { q: aux.q, t: tm! };
         this.once('maxq', this.maxQ.q > 5e3 && aux.q < this.maxQ.q * 0.97, () =>
-          sim.log(`Max-Q ${fmt(this.maxQ.q / 1000, 1)} kPa at T+${fmt(this.maxQ.t)} s`),
+          {
+            sim.log(`Max-Q ${fmt(this.maxQ.q / 1000, 1)} kPa at T+${fmt(this.maxQ.t)} s`);
+            sim.shield.shake('maxq');
+          },
         );
         this.once('mach1', aux.mach >= 1, () => sim.log('Supersonic'));
         const bi = stack.stageIndex('booster');
@@ -159,6 +163,7 @@ export class Mission {
           if (dtm >= MISSION.separationDelay) {
             sim.separate();
             sim.log('Stage separation');
+            sim.shield.shake('staging');
             this.boosterReturn = new BoosterReturn(sim, (text) => sim.log(text), sim.towers[sim.launchPad], sim.launchPad, sim.boosterOcean);
           }
           break;
@@ -194,14 +199,21 @@ export class Mission {
           break;
         }
         // Throttle to the acceleration limit (down to the minimum for a precise cutoff at the end).
-        const full = ship.engines.reduce((a, e) => a + engineThrust(e.place.type, 1, aux.pAmb), 0);
+        // (The engines that work: one out, the rest burn longer.)
+        const full = ship.engines.reduce((a, e) => a + (e.failed ? 0 : engineThrust(e.place.type, 1, aux.pAmb)), 0);
         setThrottle(ship, 'ship', this.splashTrim ? 0.4 : clamp((MISSION.shipMaxAccelG * G0 * aux.mp.mass) / full, 0.4, 1));
         applyControl(ship, aux, this.ship.target(ship, aux, sim.t), dt);
         const aps = orbitApsides(ship.r, ship.v);
         const low = ship.stages[0].prop <= ship.stages[0].def.reserve;
         // Aim the splashdown: cut off once the predicted impact reaches the target zone.
         let onTarget = false;
-        if (aps.perigee > MISSION.splashCheckPerigee && sim.t >= this.nextSplashCheck) {
+        // To a parking orbit (Flight 15): cut off with the apoapsis there, to circularise at it.
+        const park = sim.parkingAlt;
+        // (And the perigee near the edge of space: cut off with it far below, as a slower burn on
+        // fewer engines reaches the apoapsis, the circularisation would cost too much; too high an
+        // apoapsis is no good either.)
+        if (park !== null) onTarget = (aps.apogee >= park && aps.perigee >= -40e3) || aps.apogee >= park + 60e3;
+        else if (aps.perigee > MISSION.splashCheckPerigee && sim.t >= this.nextSplashCheck) {
           const p = predictTrajectory('seco', ship.r, ship.v, sim.t, SHIP_ENTRY, aux.mp.mass);
           if (p.impact) {
             const short = (downrangeAngle(MISSION.splashTarget) - downrangeAngle(p.impact)) * 6371;
@@ -210,7 +222,7 @@ export class Mission {
             this.nextSplashCheck = sim.t + (short < 300 ? 0 : short < 1500 ? 0.05 : 0.2);
           } else this.nextSplashCheck = sim.t + 0.2;
         }
-        if (onTarget || aps.perigee >= MISSION.targetPerigeeAlt || low) {
+        if (onTarget || (park === null && aps.perigee >= MISSION.targetPerigeeAlt) || low) {
           setThrottle(ship, 'ship', 0);
           this.phase = 'coast';
           this.shipReentry = new ShipReentry(sim, (text) => sim.log(text));
@@ -220,8 +232,11 @@ export class Mission {
           );
           // The entry guidance steers onto the splashdown target (range and crossrange) if it's in
           // reach without a burn; otherwise the plain entry profile.
-          const aim = new ShipReturn(sim, ship, { kind: 'ocean', ...MISSION.splashTarget }, (text) => sim.log(text), false);
-          if (aim.phase !== 'lost' && aim.plan.burns.length === 0) this.shipReturn = aim;
+          // (Not from a parking orbit: that's going round, not coming down.)
+          if (park === null) {
+            const aim = new ShipReturn(sim, ship, { kind: 'ocean', ...MISSION.splashTarget }, (text) => sim.log(text), false);
+            if (aim.phase !== 'lost' && aim.plan.burns.length === 0) this.shipReturn = aim;
+          }
         }
         break;
       }

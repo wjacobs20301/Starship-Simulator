@@ -109,6 +109,8 @@ export class Vehicle {
   /** Flaps / grid fins (hinges in the body frame) and their current angles, rad. */
   surfaces: SurfaceInstance[];
   surfaceAngles: number[];
+  /** How well each surface works (1 = as built; a flap cooked by a burn-through at its hinge, less). */
+  surfaceEff: number[] = [];
 
   constructor(
     public id: string,

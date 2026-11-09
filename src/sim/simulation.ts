@@ -21,7 +21,7 @@ import { SHIP_ENTRY, heatFlux } from './shipReentry';
 import { airRelativeVelocity } from './frames';
 import { Mission, type Phase } from './sequencer';
 import { type ReturnTarget, SHIP_CATCH_PIN, ShipReturn, targetLatLon } from './shipReturn';
-import { type VehicleHealth, checkLimits, newHealth } from './limits';
+import { LIMITS, type VehicleHealth, checkLimits, newHealth } from './limits';
 import { type EntryModel, type Trajectory, orbitalFrame, predictTrajectory, propagate } from './trajectory';
 
 /** Where the menu's orbit backdrop has the ship (deg), and its heading (deg from north). */
@@ -32,6 +32,22 @@ export const ORBIT_SCENE = { lat: 26.0, lon: -97.2, alt: 250e3, heading: 70 };
  * just after stage separation, the booster falling back toward its landing burn, or the ship at
  * the edge of the atmosphere on its way down.
  */
+/** A flight's options (a mission's setup, the player's choices): see Simulation.configure. */
+export interface FlightOptions {
+  /** Starlink satellites to deploy in orbit (else the payload simulators). */
+  payload?: 'starlink' | null;
+  /** The ship's parking orbit (SECO with the apoapsis there, circularised), m. */
+  parkingAlt?: number | null;
+  /** Engine failures: off, random, or scripted. */
+  faults?: FaultSetting;
+  /** (Also seeds the random tile loss.) */
+  faultSeed?: number;
+  /** Heat shield tiles lost: none, at random on the way up, or set ones (a test). */
+  tiles?: TileSetting;
+  /** After its splashdown the ship tips over and breaks up (as on Flight 14 and earlier flights). */
+  splashFireball?: boolean;
+}
+
 export type MissionStart = 'pad' | 'separation' | 'boosterLanding' | 'entry';
 
 /** Main-menu backdrops (Simulation.scene). */
@@ -79,6 +95,8 @@ const RAILS_BURN_LEAD = 90;
 
 import { type StageId, Vehicle, massProps, stageDry } from './vehicle';
 import { PayloadBay } from './payload';
+import { EngineFaults, type FaultSetting } from './engineFaults';
+import { HeatShield, type ShieldSnapshot, type TileSetting } from './heatShield';
 
 export const DT = 0.01;
 
@@ -146,6 +164,8 @@ export interface VehicleSnapshot {
     gimbal: [number, number];
     /** Which engines can gimbal. */
     gimbals: boolean[];
+    /** Which engines are out (failed for the rest of the flight). */
+    failed: boolean[];
   }>>;
 }
 
@@ -203,6 +223,8 @@ export interface Snapshot {
   } | null;
   /** Why the last return command was refused (and when, sim time), for the return panel. */
   returnNotice: { text: string; t: number } | null;
+  /** The ship's heat shield: missing tiles, how the gaps are charring, and the inspection's verdict. */
+  shield: ShieldSnapshot;
 }
 
 const padLat = PAD.latDeg * DEG;
@@ -240,9 +262,33 @@ export class Simulation {
   payloadKind: 'starlink' | null = null;
   /** Its payload bay (Starlink flights). */
   bay: PayloadBay | null = null;
+  /** Engine failures this flight: none, random (at roughly real rates) or scripted (a replay). */
+  engineFaults: FaultSetting = 'off';
+  /** Seed for the random ones (the same seed flies the same failures). */
+  faultSeed = 1;
+  faults!: EngineFaults;
+  /** The ship tips over after its splashdown and breaks up in a fireball; and when it does (sim time). */
+  splashFireball = false;
+  private fireballAt: number | null = null;
+  /** Heat shield tiles: none lost, some shaken loose at random on the way up, or set ones missing (a test). */
+  tileLoss: TileSetting = 'off';
+  /** The ship's heat shield (its tiles' gaps and what the entry does to them). */
+  shield!: HeatShield;
+  /** The ship's orbit: SECO with the apoapsis here and a circularisation burn there (m), or null (the test flights' path). */
+  parkingAlt: number | null = null;
 
   constructor(public env: Env = DEFAULT_ENV) {
     this.reset();
+  }
+
+  /** Set the next flight's options (they take effect at the reset); left out = the default. */
+  configure(o: FlightOptions): void {
+    this.payloadKind = o.payload ?? null;
+    this.parkingAlt = o.parkingAlt ?? null;
+    this.engineFaults = o.faults ?? 'off';
+    this.faultSeed = o.faultSeed ?? 1;
+    this.tileLoss = o.tiles ?? 'off';
+    this.splashFireball = o.splashFireball ?? false;
   }
 
   reset(): void {
@@ -254,6 +300,8 @@ export class Simulation {
       { def: STARSHIP_V3, prop: STARSHIP_V3.propMass * MISSION.shipPropLoad },
     ]);
     this.bay = this.payloadKind === 'starlink' ? new PayloadBay() : null;
+    this.faults = new EngineFaults(this.engineFaults, this.faultSeed, (text) => this.log(text));
+    this.shield = new HeatShield(this.tileLoss, this.faultSeed + 7, (text) => this.log(text));
     if (this.bay) stack.stages[1].payload = PayloadBay.massFor(this.bay.aboard);
     this.vehicles = [stack];
     this.health.clear();
@@ -261,6 +309,8 @@ export class Simulation {
     this.node = null;
     this.waitUntil = null;
     this.returnNotice = null;
+    this.inOrbitSince = null;
+    this.fireballAt = null;
     stack.caughtPad = this.launchPad;
     placeOnPad(stack, this.t, PAD.mountHeight, this.launchPad);
     // A stacked vehicle on the launch pad: its arms are parked high up the tower, clear of the launch.
@@ -282,6 +332,7 @@ export class Simulation {
    */
   scene(kind: MenuScene): void {
     this.launchPad = 0;
+    this.configure({});
     this.reset();
     const pad1 = this.towers[0];
     const setArms = (arms: TowerArms, offset: number, angle: number) => {
@@ -486,6 +537,9 @@ export class Simulation {
     this.mission.update(dt);
     this.trackBurn(dt);
     this.bay?.update(this.t, dt, this.mission.missionTime, this.find('ship'), (text) => this.log(text));
+    this.watchShield();
+    this.watchSplash();
+    this.faults.update(this.vehicles, (v) => this.aux.get(v.id)?.geo.h ?? 0, this.t, this.mission.missionTime, dt);
 
     // (Standing vehicles first: one hanging above looks at where they are at the step's end.)
     const order = [...this.vehicles].sort((a, b) => Number(a.status === 'caught') - Number(b.status === 'caught'));
@@ -534,7 +588,12 @@ export class Simulation {
         this.holdInGrip(v, tEnd);
         const hit = deepestContact(this.hull(v, aux, tEnd), this.towerStates());
         if (hit && this.collide(v, hit, health, tEnd)) continue;
-        const broke = sinceLiftoff > 5 ? checkLimits(v, aux, health, dt) : null;
+        let broke = sinceLiftoff > 5 ? checkLimits(v, aux, health, dt) : null;
+        // The ship's heat shield: gaps where tiles are missing heat in the entry.
+        if (!broke && v.id === 'ship' && health.flux > LIMITS.steelFlux) {
+          broke = this.shield.heat(health.flux, health.shielded, dt);
+          v.surfaceEff = v.surfaces.map((_, i) => (this.shield.flapsHit.has(i) ? 0.35 : 1));
+        }
         if (broke) {
           this.destroy(v, `${v.name} lost: ${broke}`);
           continue;
@@ -644,6 +703,55 @@ export class Simulation {
     }
   }
 
+  /**
+   * Fail an engine now (the player's engine-out key, or a test): of the vehicle's active stage, a
+   * running one if any (else any that works), at random unless the ring / number are given.
+   */
+  failEngine(id: string, ring?: number, n?: number): boolean {
+    const v = this.find(id);
+    if (!v || (v.status !== 'flight' && v.status !== 'held')) return false;
+    // (The stage burning now; on the stack, before liftoff or between burns, the booster.)
+    const stageIdx = v.engines.find((e) => e.throttle > 0.05 && !e.failed)?.stage ?? 0;
+    const pick = v.engines
+      .map((e, i) => ({ e, i, n: v.engines.filter((x, j) => j < i && x.stage === e.stage && x.place.ring === e.place.ring).length }))
+      .filter(({ e, n: k }) => e.stage === stageIdx && !e.failed && (ring === undefined || e.place.ring === ring) && (n === undefined || k === n));
+    const running = pick.filter(({ e }) => e.throttle > 0.05);
+    const from = running.length ? running : pick;
+    if (!from.length) return false;
+    const c = from[Math.floor(Math.random() * from.length)];
+    this.faults.fail(v, c.e, v.stages[stageIdx].def.id, c.n, c.e.throttle > 0.05 ? 'out' : 'norelight');
+    return true;
+  }
+
+  /** A ship that tips over after its splashdown: a few seconds on the water, then the fireball. */
+  private watchSplash(): void {
+    if (!this.splashFireball) return;
+    const ship = this.find('ship');
+    if (!ship || ship.status !== 'landed' || downrange(ship.r, this.t) < 20e3) return;
+    this.fireballAt ??= this.t + 7;
+    if (this.t >= this.fireballAt) this.destroy(ship, 'Starship tipped over after its splashdown and broke apart in a fireball');
+  }
+
+  /** When the ship first reached a stable orbit (sim time), for the heat shield inspection. */
+  private inOrbitSince: number | null = null;
+
+  /**
+   * The heat shield inspection, once in orbit (on a Starlink flight once the satellites are out:
+   * their cameras look back at the ship; otherwise ten minutes in): GO for the catch, or NO-GO,
+   * and a ship on its way to a tower comes down in the ocean instead.
+   */
+  private watchShield(): void {
+    const ship = this.find('ship');
+    if (!ship || ship.status !== 'flight' || this.shield.verdict || this.mission.phase !== 'coast') return;
+    if (orbitApsides(ship.r, ship.v).perigee < 120e3) return;
+    this.inOrbitSince ??= this.t;
+    if (this.bay ? this.bay.state !== 'done' : this.t - this.inOrbitSince < 600) return;
+    const ret = this.mission.shipReturn;
+    const { verdict, text } = this.shield.inspect(!ret || ret.target.kind === 'tower');
+    this.log(text);
+    if (verdict === 'nogo' && ret && ret.target.kind === 'tower' && ret.phase === 'burn') this.commandReturn({ kind: 'ocean', ...MISSION.splashTarget });
+  }
+
   /** Whether time warp may go on rails: everything in flight coasting above the atmosphere. */
   railsAllowed(): boolean {
     if (this.mission.phase === 'countdown' || this.mission.phase === 'ascent' || this.mission.phase === 'hotstaging') return false;
@@ -712,6 +820,7 @@ export class Simulation {
       this.t += h;
       // (The deployment starts on time on rails too: then time runs at physics speed to watch it.)
       this.bay?.update(this.t, h, this.mission.missionTime, this.find('ship'), (text) => this.log(text));
+      this.watchShield();
       done += h;
       this.refreshAux();
       if (!this.railsAllowed()) break;
@@ -1250,6 +1359,7 @@ export class Simulation {
           gimbalDeg: g / DEG,
           gimbal: steer ? [steer.gy, steer.gz] : [0, 0],
           gimbals: engines.map((e) => e.place.type.gimbalMax > 0),
+          failed: engines.map((e) => e.failed),
         };
       });
       return {
@@ -1311,6 +1421,7 @@ export class Simulation {
       shipReturn: this.returnSnapshot(),
       waitUntil: this.waitUntil,
       returnNotice: this.returnNotice,
+      shield: this.shield.snapshot(),
       payload: this.bay
         ? {
             state: this.bay.state,

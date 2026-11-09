@@ -11,6 +11,8 @@ import { Plasma, plasmaIntensity } from './fx/plasma';
 import { type HeatUniforms, Sparks, heatMaterial, heatUniforms } from './fx/reentryHeat';
 import { Plume } from './fx/plume';
 import type { VehicleSnapshot } from '../sim/simulation';
+import type { ShieldSnapshot } from '../sim/heatShield';
+import { TileGaps } from './tileGaps';
 import { DETAIL_LEVELS, type ModelLibrary, Pivot } from './models';
 
 // --- Vehicle assembly ------------------------------------------------------------
@@ -58,6 +60,8 @@ export class VehicleMesh {
   private qInv = new THREE.Quaternion();
   /** The payload bay's PEZ door (the ship model's "Cargo Door"), where it sits closed, and the dark bay behind it. */
   private door: { node: THREE.Object3D; closed: THREE.Vector3; bay: THREE.Mesh } | null = null;
+  /** Gaps in the heat shield where tiles are missing (ship only). */
+  private gaps: TileGaps | null = null;
   /** Meshes with simpler versions for when the camera is far off (models.ts). */
   private detailed: { mesh: THREE.Mesh; full: THREE.BufferGeometry; levels: { distance: number; geometry: THREE.BufferGeometry }[] }[] = [];
 
@@ -83,6 +87,10 @@ export class VehicleMesh {
       this.engines.set(id, collectEngines(model));
       this.surfaces.push(...(id === 'ship' ? flaps(model) : gridFins(model)));
       if (id === 'ship') this.door = payloadDoor(model);
+      if (id === 'ship') {
+        this.gaps = new TileGaps();
+        this.root.add(this.gaps.group);
+      }
       this.frostStages.set(id, this.frost.addStage(model, def));
       this.heatUp(model);
       // The cluster plume starts at the stage's nozzle exit plane (booster base / RVac exits).
@@ -137,6 +145,11 @@ export class VehicleMesh {
     // (Model axes: +X toward the axis from the door, +Y up the ship.)
     d.node.position.copy(d.closed).add(new THREE.Vector3(0.3 * a + 0.15 * b, 1.3 * b * b * (3 - 2 * b), 0));
     d.bay.visible = open > 0.002;
+  }
+
+  /** The heat shield's gaps (missing tiles) and how hot / charred they are. */
+  setShield(s: ShieldSnapshot): void {
+    this.gaps?.update(s);
   }
 
   /** Call once the root is placed for this frame (camera-relative, so its distance is the camera's). */
@@ -205,6 +218,7 @@ export class VehicleMesh {
   }
 
   dispose(): void {
+    this.gaps?.dispose();
     for (const list of this.engines.values()) for (const e of list) e.glow.dispose();
     for (const m of this.owned) m.dispose();
     this.frost.dispose();

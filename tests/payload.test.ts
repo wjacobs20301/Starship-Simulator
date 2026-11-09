@@ -9,7 +9,7 @@ import { massProps, payloadOf } from '../src/sim/vehicle';
 function flight15() {
   const sim = new Simulation();
   sim.launchPad = 1;
-  sim.payloadKind = 'starlink';
+  sim.configure({ payload: 'starlink', parkingAlt: 275e3 });
   sim.reset();
   sim.launch();
   while (sim.mission.phase !== 'coast') sim.step();

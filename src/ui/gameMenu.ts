@@ -2,7 +2,7 @@
 // controls, credits) over a slowly turning view of the pad, and the pause menu (Esc) over the
 // frozen flight. One overlay: a column of big text items on the left, the chosen page beside it.
 
-import { MISSIONS, type MissionId } from '../game/missions';
+import { MISSIONS, type MissionDef, type MissionId } from '../game/missions';
 import { FREE_WEATHER, type FreeWeather, WEATHER_AVAILABLE, WEATHER_NAME, onSettingsChange, settings, updateSettings } from '../settings';
 import { loadBest } from './missionUi';
 
@@ -137,6 +137,11 @@ export class GameMenu {
         return;
       }
       const act = button?.dataset.act;
+      if (act === 'faults' || act === 'tiles') {
+        updateSettings(act === 'faults' ? { engineFailures: !settings.engineFailures } : { tileLoss: !settings.tileLoss });
+        this.render();
+        return;
+      }
       if (act === 'launch') handlers.launch(this.mission, this.pad);
       else if (act === 'free') handlers.freeRoam(this.pad);
       else if (act === 'sound') updateSettings({ muted: !settings.muted });
@@ -224,6 +229,23 @@ export class GameMenu {
     return `<div class="mn-pads"><div class="mn-label">Launch pad</div><div class="mn-seg">${b(0)}${b(1)}</div></div>`;
   }
 
+  /**
+   * What can go wrong: Raptors failing (an engine out, one that won't relight) and heat shield
+   * tiles shaking loose. A replay has its own engine failures, as they happened.
+   */
+  private realism(m?: MissionDef): string {
+    const row = (act: string, label: string, on: boolean, hint: string) =>
+      `<div class="mn-row"><span>${label}<small>${hint}</small></span><button class="mn-toggle${on ? ' on' : ''}" data-act="${act}"><i></i></button></div>`;
+    return (
+      `<div class="mn-real"><div class="mn-label">What can go wrong</div>` +
+      (m?.setup.faults
+        ? `<div class="mn-hint">Engine failures as on the real flight</div>`
+        : row('faults', 'Engine failures', settings.engineFailures, 'An engine out on the way up, one that won\'t relight')) +
+      row('tiles', 'Heat shield tile loss', settings.tileLoss, 'Tiles shaken loose; the gaps run hot in the entry') +
+      `</div>`
+    );
+  }
+
   /** Free roam's weather over Starbase (as the climate deals it out, or one picked). */
   private weatherPicker(): string {
     if (!WEATHER_AVAILABLE || !settings.clouds) return '';
@@ -262,6 +284,7 @@ export class GameMenu {
               `<button class="mn-go" data-act="launch">Start mission <b>›</b></button>` +
               `<div class="mn-hint">Starts ${START_LABEL[m.setup.start!]}${m.group === 'manual' ? ', you at the controls' : ''}.</div></div></div>`
             : (m.setup.pad !== undefined ? `<div class="mn-pads"><div class="mn-label">Launch pad</div><div class="mn-hint">Pad ${m.setup.pad + 1}, as the real flight</div></div>` : this.padPicker()) +
+              this.realism(m) +
               `<button class="mn-go" data-act="launch">Go to the pad <b>›</b></button>` +
               `<div class="mn-hint">Then press <kbd>Space</kbd> to start the countdown.</div></div></div>`)
         );
@@ -274,6 +297,7 @@ export class GameMenu {
           `the booster flies itself home to the tower unless you take it over (<kbd>V</kbd> to switch to it, <kbd>L</kbd> for the controls).</p>` +
           this.padPicker() +
           this.weatherPicker() +
+          this.realism() +
           `<button class="mn-go" data-act="free">Go to the pad <b>›</b></button></div>`
         );
       case 'settings':

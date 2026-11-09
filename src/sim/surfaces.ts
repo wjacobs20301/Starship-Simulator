@@ -126,14 +126,15 @@ function smoothstep(a: number, b: number, x: number): number {
 }
 
 /** All surfaces' force and torque at the given angles. */
-export function surfaceLoads(list: SurfaceInstance[], angles: number[], flow: Flow, xcg: number): { f: V3; t: V3 } {
+export function surfaceLoads(list: SurfaceInstance[], angles: number[], flow: Flow, xcg: number, eff?: number[]): { f: V3; t: V3 } {
   const f: V3 = [0, 0, 0];
   const t: V3 = [0, 0, 0];
   list.forEach((s, i) => {
     const l = surfaceLoad(s, angles[i], flow, xcg);
+    const k0 = eff?.[i] ?? 1;
     for (let k = 0; k < 3; k++) {
-      f[k] += l.f[k];
-      t[k] += l.t[k];
+      f[k] += l.f[k] * k0;
+      t[k] += l.t[k] * k0;
     }
   });
   return { f, t };

@@ -156,7 +156,7 @@ export function evaluate(veh: Vehicle, y: Float64Array, t: number, env: Env): { 
     force[2] += fa[2];
     // Flaps and grid fins: each its own force at its own place.
     flow = { vHat: [vb[0] / speed, vb[1] / speed, vb[2] / speed], q: qDyn, mach };
-    const sl = surfaceLoads(veh.surfaces, veh.surfaceAngles, flow, mp.xcg);
+    const sl = surfaceLoads(veh.surfaces, veh.surfaceAngles, flow, mp.xcg, veh.surfaceEff);
     surfaceTorque = sl.t;
     force[0] += sl.f[0];
     force[1] += sl.f[1];

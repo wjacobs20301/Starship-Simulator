@@ -30,9 +30,13 @@ export interface Settings {
   clouds: boolean;
   /** Free roam's weather over Starbase. */
   freeWeather: FreeWeather;
+  /** Raptors can fail (at roughly real rates): an engine out on the way up, one that won't relight. */
+  engineFailures: boolean;
+  /** Heat shield tiles can shake loose on the way up (the gaps run hot at entry). */
+  tileLoss: boolean;
 }
 
-const DEFAULTS: Settings = { shipSerial: 'SN41', muted: false, renderScale: 'auto', clouds: true, freeWeather: 'starbase' };
+const DEFAULTS: Settings = { shipSerial: 'SN41', muted: false, renderScale: 'auto', clouds: true, freeWeather: 'starbase', engineFailures: false, tileLoss: false };
 const STORAGE_KEY = 'starship-sim.settings';
 
 function load(): Settings {

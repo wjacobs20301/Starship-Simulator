@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import type { V3 } from '../sim/math';
 import { enuToWorld } from './floatingOrigin';
 import { ecefToWorld, worldToGeodetic } from './geo';
+import { MOUNTS, TOWERS } from '../sim/padCollision';
 
 const EARTH_CENTER = ecefToWorld([0, 0, 0]);
 const Y = new THREE.Vector3(0, 1, 0);
@@ -22,16 +23,26 @@ const MAP_MAX = 1.2e9;
 /** Closest the camera may come to the ground or sea, m. */
 const GROUND_CLEARANCE = 2;
 
-export type CameraMode = 'orbit' | 'chase' | 'pad' | 'spectator';
-export const CAMERA_MODES: CameraMode[] = ['orbit', 'chase', 'pad', 'spectator'];
+export type CameraMode = 'orbit' | 'chase' | 'pad' | 'tower' | 'spectator' | 'inspect';
+export const CAMERA_MODES: CameraMode[] = ['orbit', 'chase', 'pad', 'tower', 'spectator', 'inspect'];
 export const CAMERA_LABELS: Record<CameraMode, string> = {
   orbit: 'Orbit (drag / scroll)',
   chase: 'Chase',
   pad: 'Pad camera',
+  tower: 'Tower camera',
   spectator: 'South Padre Island (~9 km)',
+  inspect: 'Heat shield inspection (Starlink camera)',
 };
 
 // Fixed viewpoints in pad ENU (m).
+/** The tower cameras: on a boom above each tower's top, out over its arms (looking down at a catch). */
+const TOWER_CAMS: V3[] = TOWERS.map(([e, n], i) => {
+  const [me, mn] = MOUNTS[i];
+  const d = Math.hypot(me - e, mn - n);
+  // (Out past the top's framework toward the mount, and a little to one side.)
+  const [ue, un] = [(me - e) / d, (mn - n) / d];
+  return enuToWorld([e + ue * 11 - un * 4, n + un * 11 + ue * 4, 162]);
+});
 const PAD_CAM: V3 = enuToWorld([-300, -330, 2]);
 /** Isla Blanca Park, South Padre Island: the classic public viewing spot, ~8 km north. */
 const SPECTATOR_CAM: V3 = enuToWorld([150, 8150, 3]);
@@ -43,6 +54,8 @@ export interface CameraTarget {
   axis: V3;
   /** Rough vehicle length, m. */
   size: number;
+  /** The ship's belly (heat shield side, body +y), world (unit): for the inspection camera. */
+  belly?: V3;
 }
 
 export class CameraRig {
@@ -175,6 +188,34 @@ export class CameraRig {
         pos = [c[0] + off.x, c[1] + off.y, c[2] + off.z];
         fov = 55;
         break;
+      }
+      case 'tower': {
+        // The tower nearer the vehicle (the one catching it).
+        const near = (p: V3) => Math.hypot(c[0] - p[0], c[2] - p[2]);
+        pos = TOWER_CAMS.reduce((a, b) => (near(b) < near(a) ? b : a));
+        const d = Math.hypot(c[0] - pos[0], c[1] - pos[1], c[2] - pos[2]);
+        fov = THREE.MathUtils.clamp(2 * Math.atan((target.size * 1.2) / d) * THREE.MathUtils.RAD2DEG, 1, 80);
+        break;
+      }
+      case 'inspect': {
+        // From a satellite drifting off the ship's belly side, ~45 m out, looking back along
+        // the heat shield as it slowly pans from the flaps to the nose.
+        const belly = new THREE.Vector3(...(target.belly ?? [this.up.x, this.up.y, this.up.z]));
+        const axis = new THREE.Vector3(...target.axis);
+        const side = new THREE.Vector3().crossVectors(axis, belly).normalize();
+        const pan = Math.sin(performance.now() / 9000) * target.size * 0.3;
+        const look = new THREE.Vector3(...c).addScaledVector(axis, pan);
+        const off = belly.clone().multiplyScalar(target.size * 1.15).addScaledVector(side, target.size * 0.3).addScaledVector(axis, pan * 0.4);
+        pos = [look.x + off.x, look.y + off.y, look.z + off.z];
+        fov = 45;
+        if (Math.abs(camera.fov - fov) > 1e-3) {
+          camera.fov = fov;
+          camera.updateProjectionMatrix();
+        }
+        camera.position.set(0, 0, 0);
+        camera.up.copy(axis);
+        camera.lookAt(look.x - pos[0], look.y - pos[1], look.z - pos[2]);
+        return pos;
       }
       case 'pad':
       case 'spectator': {

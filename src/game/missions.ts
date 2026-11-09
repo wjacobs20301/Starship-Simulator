@@ -4,15 +4,18 @@
 
 import { PAD } from '../sim/constants';
 import { MISSION } from '../sim/config/starshipV3';
+import type { ScriptedFault } from '../sim/engineFaults';
 import type { MissionStart } from '../sim/simulation';
 import type { Snapshot, VehicleSnapshot } from '../sim/simulation';
 
-export type MissionId = 'free' | 'ift' | 'flight15' | 'shipcatch' | 'boosterreturn' | 'boostersplash' | 'ascent' | 'orbit' | 'boosterocean' | 'catch' | 'landing';
+export type MissionId = 'free' | 'ift' | 'flight15' | 'flight14' | 'shipcatch' | 'boosterreturn' | 'boostersplash' | 'ascent' | 'orbit' | 'boosterocean' | 'catch' | 'landing';
 export type ObjectiveState = 'pending' | 'done' | 'failed';
 
 /** Where the ship aims in the Indian Ocean (the autopilot's nominal splashdown), degrees. */
 export const SPLASH_TARGET = MISSION.splashTarget;
 export const SPLASH_ZONE_KM = 50;
+/** Flight 14's splashdown, its flight cut short: the Pacific north of Hawaii, deg (the zone as reported; the point is ours). */
+export const PACIFIC_TARGET = { lat: 24, lon: -160 };
 /** Where Super Heavy comes down in the Gulf when it isn't going back to the tower: 32 km east of Pad 1. */
 export const BOOSTER_OCEAN_ENU: [number, number] = [32000, -4000];
 export const BOOSTER_OCEAN_TARGET = {
@@ -53,6 +56,10 @@ export interface FlightRecord {
   shipDeltaV: number;
   /** Ship below 20 km on the way down, still in one piece (made it through entry). */
   entrySurvived: boolean;
+  /** The ship has been in a stable orbit (perigee above 150 km) at some point. */
+  orbited: boolean;
+  /** Raptors relit in space (a burn in orbit lit at least one). */
+  relit: boolean;
   /** Starlink satellites deployed (of how many), and whether the payload door has closed again. */
   deployed: number;
   payloadTotal: number;
@@ -84,6 +91,12 @@ export interface MissionSetup {
   pad?: number;
   /** The ship carries Starlink V3 satellites and deploys them in orbit. */
   payload?: 'starlink';
+  /** The ship goes to this parking orbit (circular, m) instead of the test flights' path. */
+  parkingAlt?: number;
+  /** Engine failures as they happened on the real flight (a replay); else the player's setting. */
+  faults?: ScriptedFault[];
+  /** The ship tips over after its splashdown and breaks up (a replay of a flight where it did). */
+  splashFireball?: boolean;
 }
 
 /** A target shown in the world, on the map and in the flight readout. */
@@ -123,7 +136,11 @@ const catchBooster: Objective = {
 };
 const orbitReached: Objective = {
   label: 'Ship in orbit (perigee above 150 km)',
-  check: (r) => (r.shipOrbit && r.shipOrbit.perigee > 150e3 ? 'done' : r.stackLost || r.shipLost || r.entrySurvived ? 'failed' : 'pending'),
+  check: (r) => (r.orbited ? 'done' : r.stackLost || r.shipLost || r.entrySurvived ? 'failed' : 'pending'),
+};
+const relight: Objective = {
+  label: 'Relight Raptors in space',
+  check: (r) => (r.relit ? 'done' : r.stackLost || r.shipLost || r.entrySurvived ? 'failed' : 'pending'),
 };
 const allDeployed: Objective = {
   label: 'Deploy all 26 Starlink V3 satellites',
@@ -277,16 +294,51 @@ export const MISSIONS: MissionDef[] = [
     brief:
       "Starship's fifteenth flight, as SpaceX plans it (November 2026): Super Heavy lifts off from Pad 2 and flies home to its tower; " +
       'the ship goes on to orbit, opens its payload door half an hour after liftoff and deploys 26 Starlink V3 satellites, one about every 70 seconds. ' +
-      'Then about 14 orbits, nearly a day, before it deorbits, comes in over Mexico and is caught by the Pad 1 tower: the first catch of both stages. ' +
-      'Warp (1–8, or , .) through the orbits; time drops back to normal for the deployment, the flip and the catch.',
-    setup: { shipReturn: 'tower', pad: 1, payload: 'starlink' },
-    objectives: [liftoff, separation, catchBooster, orbitReached, allDeployed, doorClosed, catchShip],
+      'Cameras on the satellites look back at the heat shield: GO or NO-GO for the catch. ' +
+      'Then about 14 orbits, nearly a day, before the Raptors relight to deorbit; it comes in over the Pacific and Mexico and is caught by the Pad 1 tower: the first catch of both stages. ' +
+      'Warp (1–8, or , .) through the orbits; time drops back to normal for the deployment, the flip and the catch. C cycles the cameras (the tower camera, the heat shield inspection).',
+    setup: { shipReturn: 'tower', pad: 1, payload: 'starlink', parkingAlt: 275e3 },
+    objectives: [liftoff, separation, catchBooster, orbitReached, allDeployed, doorClosed, relight, catchShip],
     score(r) {
       // (Out of 1000: the objectives 850, the catches' precision 150.)
-      const points: [Objective, number][] = [[liftoff, 75], [separation, 75], [catchBooster, 150], [orbitReached, 100], [allDeployed, 175], [doorClosed, 75], [catchShip, 200]];
+      const points: [Objective, number][] = [[liftoff, 50], [separation, 50], [catchBooster, 150], [orbitReached, 100], [allDeployed, 175], [doorClosed, 50], [relight, 75], [catchShip, 200]];
       const lines = points.map(([o, p]) => done(o, r, p));
       if (r.caught) lines.push(precision(`Booster catch precision (${r.caught.off.toFixed(2)} m off)`, 75, r.caught.off, 2.5));
       if (r.shipCaught) lines.push(precision(`Ship catch precision (${r.shipCaught.off.toFixed(2)} m off)`, 75, r.shipCaught.off, 2.5));
+      return lines;
+    },
+  },
+  {
+    id: 'flight14',
+    title: 'Flight 14 (replay)',
+    group: 'auto',
+    brief:
+      'Starship\'s fourteenth flight as it flew on 28 September 2026, the first to reach orbit: from Pad 2, Super Heavy comes down on the Gulf ' +
+      '(the tower catch was skipped while SpaceX tested changes to make engine relights more reliable, and two engines don\'t relight for its burns home). ' +
+      'One of the ship\'s sea-level Raptors shuts down early on the way up; the others burn longer and it makes orbit anyway. ' +
+      'It deploys 26 Starlink V3 satellites, then, with the flight cut from ten hours to about three, deorbits for a splashdown north of Hawaii, ' +
+      'where it tips over and breaks up in a fireball.',
+    setup: {
+      pad: 1,
+      boosterOcean: true,
+      shipReturn: 'ocean',
+      payload: 'starlink',
+      parkingAlt: 250e3,
+      splashFireball: true,
+      faults: [
+        // (Which engines, and exactly when, SpaceX hasn't said: these follow the reports.)
+        { vehicle: 'ship', stage: 'ship', ring: 0, n: 1, at: 200 },
+        { vehicle: 'booster', stage: 'booster', ring: 1, n: 3, noRelightAfter: 300 },
+        { vehicle: 'booster', stage: 'booster', ring: 1, n: 8, noRelightAfter: 300 },
+      ],
+    },
+    target: { ...PACIFIC_TARGET, label: 'Ship splashdown zone (north of Hawaii)', vehicle: 'ship' },
+    objectives: [liftoff, separation, boosterSplashInZone, orbitReached, allDeployed, doorClosed, relight, splashInZone],
+    score(r) {
+      const points: [Objective, number][] = [[liftoff, 75], [separation, 75], [boosterSplashInZone, 125], [orbitReached, 125], [allDeployed, 175], [doorClosed, 50], [relight, 75], [splashInZone, 150]];
+      const lines = points.map(([o, p]) => done(o, r, p));
+      if (r.boosterSplash) lines.push(precision(`Booster on target (${r.boosterSplash.km.toFixed(2)} km)`, 75, r.boosterSplash.km, BOOSTER_ZONE_KM));
+      if (r.splash) lines.push(precision(`Ship on target (${r.splash.km.toFixed(1)} km)`, 75, r.splash.km, SPLASH_ZONE_KM));
       return lines;
     },
   },
@@ -391,6 +443,8 @@ export function emptyRecord(): FlightRecord {
     shipOrbit: null,
     shipDeltaV: 0,
     entrySurvived: false,
+    orbited: false,
+    relit: false,
     deployed: 0,
     payloadTotal: 0,
     doorClosed: false,
@@ -452,6 +506,7 @@ export class MissionTracker {
       const door = /^Payload door opening: (\d+)/.exec(e.text);
       if (door) r.payloadTotal = Number(door[1]);
       if (/^Payload door closed/.test(e.text)) r.doorClosed = true;
+      if (/^In-space Raptor relight: [1-9]/.test(e.text)) r.relit = true;
       const splash = /^Starship splashdown.*?([\d.]+) m\/s/.exec(e.text);
       if (splash) this.splashSpeed = Number(splash[1]);
       const boosterSplash = /^Super Heavy (?:splashdown|touchdown).*?([\d.]+) m\/s/.exec(e.text);
@@ -489,10 +544,12 @@ export class MissionTracker {
     r.shipHeat = Math.max(r.shipHeat, ship.health.heat);
     r.shipDeltaV = t.deltaV.ship ?? 0;
     if (ship.status === 'flight') r.shipOrbit = { perigee: t.perigee, apogee: t.apogee };
+    if (ship.status === 'flight' && t.perigee > 150e3) r.orbited = true;
     if (ship.status === 'flight' && t.altitude < 20e3 && t.verticalSpeed < 0 && r.maxAlt > 100e3) r.entrySurvived = true;
     if (ship.status === 'landed' && !r.splash) {
       // Touchdown speed from the log (the sim writes it), else the last telemetry.
-      r.splash = { speed: this.splashSpeed ?? Math.abs(t.verticalSpeed), km: distanceKm(t, SPLASH_TARGET) };
+      const aim = this.mission.target?.vehicle === 'ship' ? this.mission.target : SPLASH_TARGET;
+      r.splash = { speed: this.splashSpeed ?? Math.abs(t.verticalSpeed), km: distanceKm(t, aim) };
       r.entrySurvived = true;
     }
   }

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { BOOSTER_LENGTH, SHIP_LENGTH, STARSHIP_V3, SUPER_HEAVY_V3 } from './sim/config/starshipV3';
 import type { V3 } from './sim/math';
-import type { MenuScene, Snapshot, VehicleSnapshot } from './sim/simulation';
+import type { FlightOptions, MenuScene, Snapshot, VehicleSnapshot } from './sim/simulation';
 import { CAMERA_LABELS, CameraRig } from './render/cameras';
 import { FloatingOrigin, enuToWorld, vehicleQuaternion } from './render/floatingOrigin';
 import { type ModelLibrary, loadModels } from './render/models';
@@ -38,7 +38,9 @@ import { SoundField, plumePower } from './audio/soundField';
 import { Hud, formatClock } from './ui/hud';
 import { WARP_LEVELS, bindKeys, flightAxes } from './ui/input';
 import { ManeuverPanel } from './ui/maneuverPanel';
-import { BOOSTER_OCEAN_ENU, type MissionTarget, MissionTracker, SPLASH_TARGET, missionById } from './game/missions';
+import { overflight } from './game/places';
+import { ShieldPanel } from './ui/shieldPanel';
+import { BOOSTER_OCEAN_ENU, type MissionSetup, type MissionTarget, MissionTracker, SPLASH_TARGET, missionById } from './game/missions';
 import { MissionUi } from './ui/missionUi';
 import { GameMenu, toggleFullscreen } from './ui/gameMenu';
 import { ReturnPanel } from './ui/returnPanel';
@@ -53,6 +55,7 @@ const origin = new FloatingOrigin();
 const world = createWorld(canvas, origin);
 const rig = new CameraRig(canvas);
 const hud = new Hud();
+const shieldPanel = new ShieldPanel(document.body);
 const plot = new TelemetryPlot(document.querySelector<HTMLCanvasElement>('#plot')!);
 
 const globeTiles = new GlobeTiles(world.renderer, origin);
@@ -228,6 +231,13 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
   if (prev && prev.snap.phase === 'hotstaging' && curr.snap.phase === 'shipburn' && pilot.manual) setPilot({ throttle: 1, engines: 0 });
   const shipOrbit = trajectories.get('ship')?.orbit ?? null;
   hud.update(curr.snap, { camera: rig.map ? 'Map' : CAMERA_LABELS[rig.mode], tracked: trackedName(), warp: warpLabel(), paused, armsPad, orbit: shipOrbit, weather: weather.enabled ? WEATHER_NAME[weatherToday] : '', payload: payloadLine(curr.snap) });
+  {
+    // The heat shield map: in the inspection camera view, and through the entry when there are gaps.
+    const sh = curr.snap.shield;
+    const ship = curr.snap.vehicles.find((v) => v.stages.length === 1 && v.stages[0] === 'ship' && v.status === 'flight');
+    const entry = !!ship && sh.lost > 0 && ship.telemetry.altitude < 130e3 && ship.telemetry.verticalSpeed < 0;
+    shieldPanel.update(sh, !rig.map && menu.kind !== 'main' && (rig.mode === 'inspect' || entry));
+  }
 };
 
 // --- Missions -------------------------------------------------------------------------
@@ -419,7 +429,7 @@ function resetFlight(): void {
   const start = setup.start ?? 'pad';
   if (setup.pad !== undefined && launchPad !== setup.pad) setLaunchPad(setup.pad);
   startDay(missionDaylight());
-  send({ type: 'reset', pad: launchPad, start, boosterOcean: setup.boosterOcean ? BOOSTER_OCEAN_ENU : null, payload: setup.payload ?? null });
+  send({ type: 'reset', pad: launchPad, start, boosterOcean: setup.boosterOcean ? BOOSTER_OCEAN_ENU : null, options: flightOptions(setup) });
   scenesSent++;
   send({ type: 'warp', value: 1 });
   send({ type: 'node', node: null });
@@ -530,7 +540,8 @@ function followMission(snap: Snapshot): void {
     // warps; it drops back to normal for the flip and catch so they can be watched.
     if (setup.shipReturn && /^SECO/.test(e.text)) {
       trackedId = 'ship';
-      const target = setup.shipReturn === 'tower' ? ({ kind: 'tower', pad: -1 } as const) : ({ kind: 'ocean', ...SPLASH_TARGET } as const);
+      const aim = tracker.mission.target?.vehicle === 'ship' ? tracker.mission.target : SPLASH_TARGET;
+      const target = setup.shipReturn === 'tower' ? ({ kind: 'tower', pad: -1 } as const) : ({ kind: 'ocean', lat: aim.lat, lon: aim.lon } as const);
       send({ type: 'return', target });
     }
     if (setup.shipReturn && /^Return: flip and landing burn/.test(e.text)) send({ type: 'warp', value: 1 });
@@ -722,13 +733,53 @@ function syncMeshes(vehicles: VehicleSnapshot[], simTime: number): void {
   }
 }
 
-/** The payload in the status corner: how many Starlinks are out, and the door. */
+/** A flight's options: the mission's setup, and the player's realism settings where it leaves them open. */
+function flightOptions(setup: MissionSetup): FlightOptions {
+  return {
+    payload: setup.payload ?? null,
+    parkingAlt: setup.parkingAlt ?? null,
+    faults: setup.faults ?? (settings.engineFailures ? 'random' : 'off'),
+    faultSeed: Math.floor(Math.random() * 2 ** 31),
+    tiles: settings.tileLoss ? 'random' : 'off',
+    splashFireball: setup.splashFireball ?? false,
+    // (Dev-only: __flightOptions overrides these for the next flight, e.g. set tiles missing.)
+    ...(import.meta.env.DEV ? (window as unknown as { __flightOptions?: FlightOptions }).__flightOptions : undefined),
+  };
+}
+
+/**
+ * The flight's own lines in the status corner: how many Starlinks are out (and the door), the
+ * heat shield's state, engines out, and where a ship coming home is.
+ */
 function payloadLine(s: Snapshot): string {
+  const lines: string[] = [];
   const p = s.payload;
-  if (!p) return '';
-  const out = p.total - p.aboard;
-  const door = p.state === 'opening' ? ', door opening' : p.state === 'closing' ? ', door closing' : p.door > 0.5 ? ', door open' : '';
-  return `Starlink V3: ${out} of ${p.total} deployed${door}`;
+  if (p) {
+    const out = p.total - p.aboard;
+    const door = p.state === 'opening' ? ', door opening' : p.state === 'closing' ? ', door closing' : p.door > 0.5 ? ', door open' : '';
+    lines.push(`Starlink V3: ${out} of ${p.total} deployed${door}`);
+  }
+  const ship = s.vehicles.find((v) => v.stages.length === 1 && v.stages[0] === 'ship' && v.status === 'flight');
+  const sh = s.shield;
+  if (sh.lost > 0 || sh.verdict) {
+    const burned = sh.char.filter((c) => c >= 1).length;
+    lines.push(
+      `Heat shield: ${sh.lost ? `${sh.lost} tile${sh.lost > 1 ? 's' : ''} missing` : 'intact'}` +
+        (burned ? ` · <span class="bad">${burned} burn-through${burned > 1 ? 's' : ''}</span>` : '') +
+        (sh.verdict ? ` · ${sh.verdict === 'go' ? 'inspection GO' : '<span class="bad">inspection NO-GO</span>'}` : ''),
+    );
+  }
+  const outs = s.vehicles
+    .filter((v) => v.status !== 'destroyed')
+    .flatMap((v) => Object.entries(v.stageState).map(([id, st]) => [id, st?.failed.filter(Boolean).length ?? 0] as const))
+    .filter(([, n]) => n > 0);
+  if (outs.length) lines.push(`Engines out: ${outs.map(([id, n]) => `${id === 'ship' ? 'ship' : 'booster'} ${n}`).join(', ')}`);
+  // Coming home: what it's over (the corridor in from the Pacific, across Mexico).
+  if (ship && ship.telemetry.altitude < 140e3 && ship.telemetry.verticalSpeed < 0) {
+    const over = overflight(ship.telemetry.lat, ship.telemetry.lon);
+    if (over) lines.push(`Ship ${over}`);
+  }
+  return lines.join('<br>');
 }
 
 /** Mid-body of a vehicle along its axis, from the booster-base origin, m. */
@@ -1052,7 +1103,7 @@ function frame(): void {
   }
 
   const placements: FxVehicle[] = [];
-  let target: { center: V3; axis: V3; size: number } | null = null;
+  let target: { center: V3; axis: V3; size: number; belly?: V3 } | null = null;
   for (const v of snap.vehicles) {
     const mesh = meshes.get(v.id);
     if (!mesh) continue;
@@ -1064,7 +1115,10 @@ function frame(): void {
     if (p) qb.copy(vehicleQuaternion(p.rot, qa).slerp(qb, alpha));
     mesh.root.quaternion.copy(qb);
     mesh.update(v, simTime);
-    if (v.stages.includes('ship')) mesh.setPayloadDoor(snap.payload?.door ?? 0);
+    if (v.stages.includes('ship')) {
+      mesh.setPayloadDoor(snap.payload?.door ?? 0);
+      mesh.setShield(snap.shield);
+    }
     const w = enuToWorld(pos);
     placements.push({ snap: v, mesh, world: w });
     {
@@ -1087,6 +1141,7 @@ function frame(): void {
         center: [w[0] + up.x * mid, w[1] + up.y * mid, w[2] + up.z * mid],
         axis: [up.x, up.y, up.z],
         size: v.stages.length === 2 ? BOOSTER_LENGTH + SHIP_LENGTH : v.stages[0] === 'ship' ? SHIP_LENGTH : BOOSTER_LENGTH,
+        belly: ((b) => [b.x, b.y, b.z] as V3)(new THREE.Vector3(1, 0, 0).applyQuaternion(qb)),
       };
     }
   }

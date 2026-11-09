@@ -18,6 +18,8 @@ Everything runs in the browser: a 6-degree-of-freedom flight simulator in a Web 
 
 - **Free Roam:** the stack on the pad with nothing to score. Look around, work the tower arms, destack and restack, and launch whenever you like.
 - **Autopilot:** the flight software flies the profile while you watch from any camera, the map or the webcast-style overlay. Press `L` at any moment to take over.
+  - *Flight 15*: SpaceX's planned flight. From Pad 2, the booster is caught, the ship reaches a ~275 km orbit and deploys 26 Starlink V3 satellites through its PEZ door. Cameras on the satellites inspect the heat shield (GO or NO-GO for the catch). About 14 orbits later the Raptors relight to deorbit, and the ship comes in over the Pacific and Mexico to be caught by the Pad 1 tower.
+  - *Flight 14 (replay)*: the first orbital flight as it happened. The booster comes down on the Gulf, one of the ship's sea-level Raptors shuts down early, 26 Starlinks go out, and the flight is cut short to a splashdown north of Hawaii.
   - *Flight Test*: the full profile. Launch, hot staging, the booster back to the tower, and the ship through space and down in the Indian Ocean.
   - *Booster Return to the Tower*, *Booster Splashdown* (like the early flights) and *Ship Catch*.
 - **Missions:** hand-flown challenges, each scored out of 1000:
@@ -25,6 +27,8 @@ Everything runs in the browser: a 6-degree-of-freedom flight simulator in a Web 
   - *Reach Orbit*: plan your own circularisation burn with a maneuver node.
   - *Booster Ocean Splashdown* and *Catch the Booster*: flip, boostback, fall engines-first, light the landing burn at the right moment and hover into the arms.
   - *Ship Reentry & Splashdown*: hold the heat shield into the plasma, belly-flop, then flip and land on the water.
+
+On the mission pages, *What can go wrong* turns on engine failures (an engine out on the way up, one that won't relight; the autopilots fly on with the rest) and heat shield tile loss (tiles shaken loose on the way up; the gaps run hot in the entry, char, and can burn through).
 
 The flight is shown the way the SpaceX webcasts show it: each vehicle's engine map, speed and altitude, and a mission timeline with its milestones.
 
@@ -40,6 +44,8 @@ The simulation (`src/sim/`) is plain TypeScript with no DOM or Three.js, so the 
 - **Aerodynamics:** slender-body theory plus viscous crossflow, so the forces stay sensible from nose-first flight all the way to broadside and tumbling.
 - **Control surfaces:** the ship's four flaps and the booster's three grid fins are physical parts. Each has a hinge, an actuator with a limited speed, and makes its own force from its area, its angle to the airflow and whether the hull shelters it. The control system only chooses angles; the physics sees the forces those angles make.
 - **Limits:** fly badly and things break. Side loads bend the long, thin tanks, and the stack peaks near 0.7 kPa of side load at max-Q in a nominal flight. Reentry heating uses the Sutton–Graves formula: the tiled belly can take it, but bare stainless steel turned into the flow heats up toward burn-through.
+- **Engine failures:** an engine can shut down while running or fail to light, at roughly real rates when the option is on, or as scripted for a replay. The autopilots fly on with the engines that work. Burns run longer, and the booster shuts down the engine opposite one that's out to keep its thrust centred. If the centre engines fail, inner-ring engines stand in for the catch. If the ship loses an RVac in space, its sea-level engines join the burn to steer it.
+- **Heat shield:** the ship's windward half is a grid of tile patches. Gaps where tiles are missing heat with the local flux, hottest down the centreline and up the nose. They char the backup layer, can burn through (at a flap hinge, that flap weakens), and a big enough one burns into the tank. An inspection in orbit judges the gaps: GO for the catch, or NO-GO and an ocean splashdown instead.
 - **Tower:** the chopsticks are part of the simulation, with a carriage on the tower and two arms that swing at limited rates. Collisions with the arms and the tower are real.
 
 Every vehicle number lives in [`src/sim/config/starshipV3.ts`](src/sim/config/starshipV3.ts), with the public sources it comes from. They are approximations: that file is the one place to tune against real flight data.
@@ -52,7 +58,7 @@ The autopilot flies the vehicles the same way a player would, by commanding atti
 - **Ship return:** from wherever the ship is, the autopilot plans a way home, either to an ocean target or to a tower catch. It searches the next day's orbits for a pass over the target, adds a circularisation or phasing burn when needed, picks the cheapest option and refuses if the propellant can't do it. Reentry is flown belly-first at about 60° angle of attack and steered by banking the lift. A predictor-corrector re-plans the landing point every second with bank reversals, like the Space Shuttle's entry guidance. Then come the belly-flop, the flip about 1 km up and the landing burn.
 
 ### Flying it yourself
-The controls are fly-by-wire, in the style of Kerbal Space Program. Pitch, yaw and roll inputs command rotation rates, and the control system turns them into engine gimbal, flap, grid-fin and RCS commands. SAS can hold attitude or point prograde, retrograde, radial, normal, or (on the ship) at the entry attitude. There's a navball, a map view (`Tab`) with predicted trajectories, apoapsis and periapsis, entry interface and impact point, and maneuver nodes (`N`) for planning burns. Time warp goes up to "on rails" for coasts.
+The controls are fly-by-wire, in the style of Kerbal Space Program. Pitch, yaw and roll inputs command rotation rates, and the control system turns them into engine gimbal, flap, grid-fin and RCS commands. SAS can hold attitude or point prograde, retrograde, radial, normal, or (on the ship) at the entry attitude. Cameras (`C`) include a pad camera, a camera on each tower's top for the catches, South Padre Island, and a heat shield inspection view. There's a navball, a map view (`Tab`) with predicted trajectories, apoapsis and periapsis, entry interface and impact point, and maneuver nodes (`N`) for planning burns. Time warp goes up to "on rails" for coasts.
 
 ### The world
 - **Terrain:** the ground streams in like a map app, as a quadtree of curved-Earth height tiles loaded around the camera.

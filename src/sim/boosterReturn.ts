@@ -35,6 +35,40 @@ import { MOUNTS, catchGap } from './padCollision';
 import type { Simulation } from './simulation';
 import type { TowerArms } from './tower';
 import { type Vehicle, setThrottle } from './vehicle';
+import { workingEngines } from './engineFaults';
+import type { EngineState } from './vehicle';
+
+/**
+ * The engines that work, less the one opposite each that's out in a ring (as the flight software
+ * does): thrust that stays centred, so the landing burn doesn't push the booster sideways.
+ */
+function balanced(engines: EngineState[]): EngineState[] {
+  const out = engines.filter((e) => e.failed && e.place.ring > 0);
+  const skip = new Set<EngineState>();
+  for (const f of out) {
+    const [fy, fz] = [f.place.pos[1], f.place.pos[2]];
+    let best: EngineState | null = null;
+    let most = Infinity;
+    for (const e of engines) {
+      if (e.failed || skip.has(e) || e.place.ring !== f.place.ring) continue;
+      const d = e.place.pos[1] * fy + e.place.pos[2] * fz;
+      if (d < most) [most, best] = [d, e];
+    }
+    if (best) skip.add(best);
+  }
+  return engines.filter((e) => !e.failed && !skip.has(e));
+}
+
+/**
+ * The engines the booster hovers and is caught on: its three center Raptors, or those of them
+ * that work (two can carry it); with two out, inner-ring engines make up three.
+ */
+function catchEngines(booster: Vehicle): EngineState[] {
+  const center = booster.engines.filter((e) => e.place.ring === 0 && !e.failed);
+  if (center.length >= 2) return center;
+  const inner = booster.engines.filter((e) => e.place.ring === 1 && !e.failed);
+  return [...center, ...inner.slice(0, 3 - center.length)];
+}
 
 /**
  * Catch geometry: the bottom of the booster's catch fittings (the two catch grid fins) above
@@ -515,7 +549,7 @@ export class BoosterReturn {
           // the engines' minimum thrust, bend it away from a straight line).
           const vh = Math.hypot(velPad[0], velPad[1]);
           if (!this.landEnd || t >= this.landEnd.t + 0.2) {
-            const run = { throttle: booster.engines[0].throttle, few: this.threeEngines };
+            const run = { throttle: Math.max(0, ...booster.engines.filter((e) => e.place.ring <= 1).map((e) => e.throttle)), few: this.threeEngines };
             const burn = landingBurn({ z: baseHeight, vh, vz: velPad[2], mass }, this.hoverHeight, this.landingEngines(booster), run);
             this.landEnd = { range: burn.range, time: burn.time, t };
           }
@@ -574,7 +608,11 @@ export class BoosterReturn {
           const clear = baseHeight - (this.arms.top + ARMS_CLEARANCE);
           // (The arms capture within CAPTURE_RADIUS: lined up well inside that is enough. Waiting for
           // better in gusty air only burns the hover's propellant.)
-          const go = inCorridor && (aboveArms > 25 || (off < 1.8 && drift < 0.9));
+          // How well lined up: tighter while there's propellant to wait for it (the hover burns
+          // ~1 t/s, and the last 25 m down to the arms takes ~10 t), down to "inside the capture
+          // radius" when there's little to spare.
+          const spare = clamp((this.propLeft(booster) - 15e3) / 10e3, 0, 1);
+          const go = inCorridor && (aboveArms > 25 || (off < 1.8 - 1.0 * spare && drift < 0.9 - 0.45 * spare));
           // (Quicker while well above them: hovering burns ~1 t/s, more than a windy day leaves.)
           const vzCmd = go ? -Math.min(6, clamp(0.1 * aboveArms + 1.5, 1.5, 4) + 0.06 * Math.max(0, aboveArms - 30)) : !inCorridor && clear < 0 ? clamp(-0.5 * clear, 0.5, 3) : 0;
           // Position loop well inside the attitude loop's bandwidth.
@@ -631,14 +669,16 @@ export class BoosterReturn {
         const perEngine = engineThrust(booster.engines[0].place.type, 1, aux.pAmb);
         // Down to the 3 center engines once they can carry the rest of the landing with margin
         // (and it's slow: early on, drag does much of the braking and fades as it slows).
-        if (!this.threeEngines && force < 0.75 * 3 * perEngine && norm(velPad) < 120) {
+        // (Only the engines that work: with a center engine out, two carry the catch; with two
+        // out, inner-ring engines stand in.)
+        const few = catchEngines(booster);
+        if (!this.threeEngines && few.length >= 2 && force < 0.75 * few.length * perEngine && norm(velPad) < 120) {
           this.threeEngines = true;
-          setThrottle(booster, 'booster', 0, (ring) => ring === 1);
-          this.log('Inner ring shutdown: 3 engines for the catch');
+          this.log(`Inner ring shutdown: ${few.length} engines for the catch`);
         }
-        const n = this.threeEngines ? 3 : 13;
-        const throttle = throttleForThrust(booster.engines[0].place.type, force / n, aux.pAmb);
-        setThrottle(booster, 'booster', clamp(throttle, 0.4, 1), (ring) => (this.threeEngines ? ring === 0 : ring <= 1));
+        const lit = this.threeEngines ? few : balanced(booster.engines.filter((e) => e.place.ring <= 1));
+        const throttle = throttleForThrust(booster.engines[0].place.type, force / Math.max(1, lit.length), aux.pAmb);
+        for (const e of booster.engines) e.throttleCmd = lit.includes(e) ? clamp(throttle, 0.4, 1) : 0;
         const gains = this.threeEngines ? { wn: HOVER_TUNING.wn, zeta: HOVER_TUNING.zeta, rollDamp: 0.5 } : LANDING_GAINS;
         applyControl(booster, aux, padDirToEci(thrustDir, t), dt, gains, this.rollRef());
 
@@ -680,15 +720,17 @@ export class BoosterReturn {
     const aligned = dot(axisPad, dirPad) > Math.cos(10 * DEG);
     const type = booster.engines[0].place.type;
     const aWant = clamp(need / 2, TRIM_ACCEL[0], TRIM_ACCEL[1]);
-    const n = (3 * engineThrust(type, 1, aux.pAmb)) / mass >= aWant ? 3 : 13;
-    const throttle = clamp(throttleForThrust(type, (aWant * mass) / n, aux.pAmb), type.minThrottle, 1);
+    const few = (3 * engineThrust(type, 1, aux.pAmb)) / mass >= aWant && workingEngines(booster, 0, (ring) => ring === 0) >= 2;
+    const n = few ? 3 : 13;
+    const lit = Math.max(1, workingEngines(booster, 0, (ring) => ring <= (n === 3 ? 0 : 1)));
+    const throttle = clamp(throttleForThrust(type, (aWant * mass) / lit, aux.pAmb), type.minThrottle, 1);
     setThrottle(booster, 'booster', 0, (ring) => ring > (n === 3 ? 0 : 1));
     setThrottle(booster, 'booster', aligned ? throttle : 0, (ring) => ring <= (n === 3 ? 0 : 1));
     if (this.jac && this.jac.t === t) this.trimDvBest = Infinity; // (re-measured: start over)
     if (aligned) this.trimDvBest = Math.min(this.trimDvBest, need);
     applyControl(booster, aux, normalize(padDirToEci(dirPad, t)), dt, undefined, this.rollRef());
     // Done when what's left is less than a moment's thrust (or it has started growing again).
-    const aSet = (n * engineThrust(type, throttle, aux.pAmb)) / mass;
+    const aSet = (lit * engineThrust(type, throttle, aux.pAmb)) / mass;
     return need < Math.max(0.05, 1.5 * aSet * dt) || (!aligned && need < 0.3) || (aligned && need > this.trimDvBest + 0.5);
   }
 
@@ -845,7 +887,9 @@ export class BoosterReturn {
 
   /** The booster for landing planning: the 13 gimballing engines, finishing on the 3 center ones. */
   private landingEngines(booster: Vehicle): Lander {
-    return { type: booster.engines[0].place.type, many: 13, few: 3, liftPerRad: this.liftPerRad(booster) };
+    // (The engines that work: one out, and the burn plans on the rest.)
+    const many = balanced(booster.engines.filter((e) => e.place.ring <= 1)).length;
+    return { type: booster.engines[0].place.type, many: Math.max(1, many), few: Math.max(1, catchEngines(booster).length), liftPerRad: this.liftPerRad(booster) };
   }
 
   /** Light the landing burn: the plan says now is the last moment it works with margin. */

@@ -39,6 +39,10 @@ import type { Simulation } from './simulation';
 import { ARMS, type TowerArms } from './tower';
 import { type EntryModel, orbitalFrame, predictTrajectory, propagate } from './trajectory';
 import { type Vehicle, setThrottle, stageDry } from './vehicle';
+import { workingEngines } from './engineFaults';
+
+/** The ship's sea-level Raptors that still work (the landing's engines; three unless one is out). */
+const rslWorking = (ship: Vehicle) => Math.max(1, workingEngines(ship, 0, (ring) => ring === 0));
 
 export type ReturnTarget =
   | { kind: 'tower'; pad: number }
@@ -108,6 +112,8 @@ const INSERT_LEAD = 90;
 const PHASING_REACH_KM = 2500;
 /** Largest phasing burn, m/s. */
 const PHASING_MAX = 300;
+/** ... holding a mission's parking orbit: about 35 km up or down on the far side, m/s. */
+const PARK_PHASING_MAX = 10;
 /** How far ahead to look for a pass to phase onto, s. */
 const PHASING_WINDOW = 36 * 3600;
 /** An orbit this eccentric (apoapsis - periapsis, m) is brought down to one this much above its periapsis first. */
@@ -196,6 +202,8 @@ export function planReturn(
   target: ReturnTarget,
   options = true,
   keepPass?: number,
+  /** Largest phasing burn, m/s (a mission holding its parking orbit allows only a trim). */
+  phaseMax = PHASING_MAX,
 ): ReturnPlan {
   // Planned for the ship as it will be: propellant it won't need is vented before the first burn
   // (a full ship falls much harder). A first guess, then again for what the plan needs.
@@ -206,12 +214,12 @@ export function planReturn(
   const base = stageDry(st) + reserve;
   const lightFor = (dv: number) => Math.min(mass, base * Math.exp((1.15 * dv + 30) / isp));
   let m = lightFor(2500);
-  let p = planReturnAt(ship, t, m, target, options, keepPass);
+  let p = planReturnAt(ship, t, m, target, options, keepPass, phaseMax);
   if (p.ok) {
     const m2 = lightFor(p.dvNeeded);
     if (Math.abs(m2 - m) > 0.05 * m) {
       m = m2;
-      const p2 = planReturnAt(ship, t, m, target, options, keepPass);
+      const p2 = planReturnAt(ship, t, m, target, options, keepPass, phaseMax);
       if (p2.ok) p = p2;
     }
   }
@@ -230,6 +238,7 @@ function planReturnAt(
    * within the entry's reach (a little over the planning limit is fine: better than a day more).
    */
   keepPass?: number,
+  phaseMax = PHASING_MAX,
 ): ReturnPlan {
   const goal = targetLatLon(target);
   const dvAvailable = maneuverDeltaV(ship);
@@ -374,7 +383,7 @@ function planReturnAt(
         for (let k = 0; k < 3; k++) {
           if (Math.abs(yb - ya) < 1e-3) break;
           const x = xb - (yb * (xb - xa)) / (yb - ya);
-          if (!Number.isFinite(x) || Math.abs(x) > PHASING_MAX) break;
+          if (!Number.isFinite(x) || Math.abs(x) > phaseMax) break;
           const vx = orbitWith(x);
           if (!vx || norm(firstBurn(x)) + 50 > dvAvailable) break;
           const tAt = p0.t + tPer * x;
@@ -805,6 +814,8 @@ export class ShipReturn {
   private nextGuide = 0;
   private heading: V3 | null = null;
   private oneEngine = false;
+  /** A burn paused, swung off its direction (it resumes once back on it). */
+  private offLine = false;
   /** Sea-level engines lit in the landing burn / hover. */
   private lit = 3;
   /** Belly-flop glide heading (ECI, horizontal), turned gradually. */
@@ -841,7 +852,8 @@ export class ShipReturn {
     phasing = true,
   ) {
     const mass = sim.aux.get(ship.id)?.mp.mass ?? 2e5;
-    this.plan = planReturn(ship, sim.t, mass, target, phasing);
+    // (A mission flying a set parking orbit, like Flight 15's, keeps to it: only a small phasing trim.)
+    this.plan = planReturn(ship, sim.t, mass, target, phasing, undefined, sim.parkingAlt !== null ? PARK_PHASING_MAX : PHASING_MAX);
     if (!this.plan.ok) {
       this.phase = 'lost';
       this.status = `Can't return: ${this.plan.reason}`;
@@ -1048,7 +1060,16 @@ export class ShipReturn {
         if (this.burning) {
           // Taper near the end so the cutoff lands on the plan.
           const thr = snap.remaining < 5 ? 0.4 : 1;
-          setThrottle(ship, 'ship', thr, (ring) => ring === 1);
+          // On the vacuum engines. They don't gimbal: with one out, the other two push off-centre,
+          // so the sea-level engines light too and steer it. Swung well off the burn direction,
+          // it holds off until it's back.
+          const vacOut = workingEngines(ship, 0, (ring) => ring === 1) < 3;
+          const off = Math.acos(clamp(dot(axis, dir), -1, 1));
+          if (off > 15 * DEG) this.offLine = true;
+          else if (off < 4 * DEG) this.offLine = false;
+          const onLine = !this.offLine;
+          setThrottle(ship, 'ship', 0);
+          setThrottle(ship, 'ship', onLine ? thr : 0, (ring) => ring === 1 || vacOut);
           this.status = `${burnName(this.plan.burns[this.burnIndex].label)}: ${snap.remaining.toFixed(1)} m/s to go`;
         } else {
           setThrottle(ship, 'ship', 0);
@@ -1303,7 +1324,7 @@ export class ShipReturn {
   /** Height above the surface to start the flip and landing burn at, at this speed. */
   private flipHeight(ship: Vehicle, aux: Aux, down: number, speed: number): number {
     const perEngine = engineThrust(ship.engines[0].place.type, 1, aux.pAmb);
-    const aNet = 0.35 * ((3 * perEngine) / aux.mp.mass);
+    const aNet = 0.35 * ((rslWorking(ship) * perEngine) / aux.mp.mass);
     return this.stopHeight() + (speed * speed) / (2 * aNet) + down * 5;
   }
 
@@ -1447,7 +1468,7 @@ export class ShipReturn {
       // beside it: divert.
       if (tower) {
         const perEngine = engineThrust(ship.engines[0].place.type, 1, aux.pAmb);
-        const aMax = Math.max(1, 0.8 * ((3 * perEngine) / aux.mp.mass) - 9.8);
+        const aMax = Math.max(1, 0.8 * ((rslWorking(ship) * perEngine) / aux.mp.mass) - 9.8);
         const baseStop = base - (vel[2] < 0 ? (vel[2] * vel[2]) / (2 * aMax) : 0);
         if (vel[2] < -10 && baseStop < TRANSIT_BASE && arriveOff > 40) {
           this.divert(pos, vel);
@@ -1512,13 +1533,15 @@ export class ShipReturn {
     // Engines lit: as many as the thrust needs, but no more than can throttle down to it (three
     // Raptors at their minimum out-push a nearly empty ship: it would climb away).
     // With hysteresis: switching engines jolts the thrust (and, off-centre, the attitude).
-    let lit = this.lit;
+    // (Only the sea-level engines that work: one out, and two do the job of three.)
+    const rsl = ship.engines.filter((e) => e.place.ring === 0 && !e.failed);
+    let lit = Math.min(this.lit, rsl.length);
     if (this.phase !== 'flip') {
       const minT = type.minThrottle * perEngine;
       if (lit === 3 && force < 3 * minT * 0.95) lit = 2;
-      else if (lit === 2 && force > 2 * perEngine * 1.02) lit = 3;
+      else if (lit === 2 && force > 2 * perEngine * 1.02 && rsl.length >= 3) lit = 3;
       else if (lit === 2 && force < 2 * minT * 0.8) lit = 1;
-      else if (lit === 1 && force > perEngine * 0.95) lit = 2;
+      else if (lit === 1 && force > perEngine * 0.95 && rsl.length >= 2) lit = 2;
       if (lit !== this.lit) {
         this.lit = lit;
         if (!this.oneEngine && lit < 3) {
@@ -1533,8 +1556,7 @@ export class ShipReturn {
     const thr =
       this.phase === 'flip' && upright < Math.cos(50 * DEG)
         ? type.minThrottle
-        : clamp(throttleForThrust(type, force / lit, aux.pAmb), type.minThrottle, 1);
-    const rsl = ship.engines.filter((e) => e.place.ring === 0);
+        : clamp(throttleForThrust(type, force / Math.max(1, lit), aux.pAmb), type.minThrottle, 1);
     rsl.forEach((e, i) => (e.throttleCmd = i < lit ? thr : 0));
     for (const e of ship.engines) if (e.place.ring !== 0) e.throttleCmd = 0;
     const gains = this.phase === 'terminal' ? { wn: 1.6, zeta: 1.0, rollDamp: 0.5 } : { wn: 1.2, zeta: 1.0, rollDamp: 0.5 };
@@ -1570,7 +1592,9 @@ export class ShipReturn {
     }
     if (pinAbove <= 0.05) {
       const tilt = Math.acos(clamp(axisPad[2], -1, 1));
-      if (arms.contact && off < CAPTURE_RADIUS && Math.abs(vel[2]) < 2.5 && tilt < 3 * DEG && this.rollErr < PIN_ROLL_CATCH) {
+      // (Closed on the hull, the arms hold it: a lean of a few degrees, from one off-centre engine
+      // pushing against them, still sets the pins on the rails.)
+      if (arms.contact && off < CAPTURE_RADIUS && Math.abs(vel[2]) < 2.5 && tilt < TERMINAL_NEAR_TILT && this.rollErr < PIN_ROLL_CATCH) {
         setThrottle(ship, 'ship', 0);
         this.phase = 'caught';
         ship.status = 'caught';

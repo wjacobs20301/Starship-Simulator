@@ -1,5 +1,5 @@
 import type { PilotCommand } from '../sim/pilot';
-import type { ManeuverNode, MenuScene, MissionStart, Snapshot } from '../sim/simulation';
+import type { FlightOptions, ManeuverNode, MenuScene, MissionStart, Snapshot } from '../sim/simulation';
 import type { ReturnTarget } from '../sim/shipReturn';
 import type { Trajectory } from '../sim/trajectory';
 import type { WeatherConfig } from '../weather/model';
@@ -9,9 +9,9 @@ export type ToWorker =
   /**
    * Back to the stack on the pad (and which pad: 0 = Pad 1, 1 = Pad 2; default the last), or run
    * ahead to a mission's start; boosterOcean: land the booster on the Gulf there (pad ENU m);
-   * payload: Starlink satellites to deploy in orbit (else the payload simulators).
+   * options: the flight's (payload, parking orbit, engine failures...).
    */
-  | { type: 'reset'; pad?: number; start?: MissionStart; boosterOcean?: [number, number] | null; payload?: 'starlink' | null }
+  | { type: 'reset'; pad?: number; start?: MissionStart; boosterOcean?: [number, number] | null; options?: FlightOptions }
   /** A main-menu backdrop (from a reset). */
   | { type: 'scene'; kind: MenuScene }
   | { type: 'warp'; value: number }
