@@ -8,9 +8,10 @@ export type ToWorker =
   | { type: 'launch' }
   /**
    * Back to the stack on the pad (and which pad: 0 = Pad 1, 1 = Pad 2; default the last), or run
-   * ahead to a mission's start; boosterOcean: land the booster on the Gulf there (pad ENU m).
+   * ahead to a mission's start; boosterOcean: land the booster on the Gulf there (pad ENU m);
+   * payload: Starlink satellites to deploy in orbit (else the payload simulators).
    */
-  | { type: 'reset'; pad?: number; start?: MissionStart; boosterOcean?: [number, number] | null }
+  | { type: 'reset'; pad?: number; start?: MissionStart; boosterOcean?: [number, number] | null; payload?: 'starlink' | null }
   /** A main-menu backdrop (from a reset). */
   | { type: 'scene'; kind: MenuScene }
   | { type: 'warp'; value: number }

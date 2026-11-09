@@ -261,7 +261,7 @@ export class GameMenu {
             ? (m.setup.start === 'boosterLanding' ? this.padPicker() : '') +
               `<button class="mn-go" data-act="launch">Start mission <b>›</b></button>` +
               `<div class="mn-hint">Starts ${START_LABEL[m.setup.start!]}${m.group === 'manual' ? ', you at the controls' : ''}.</div></div></div>`
-            : this.padPicker() +
+            : (m.setup.pad !== undefined ? `<div class="mn-pads"><div class="mn-label">Launch pad</div><div class="mn-hint">Pad ${m.setup.pad + 1}, as the real flight</div></div>` : this.padPicker()) +
               `<button class="mn-go" data-act="launch">Go to the pad <b>›</b></button>` +
               `<div class="mn-hint">Then press <kbd>Space</kbd> to start the countdown.</div></div></div>`)
         );

@@ -2,7 +2,7 @@
 // produces render/telemetry snapshots in the pad's local ENU frame.
 
 import { G0, MU, OMEGA_E, PAD, DEG } from './constants';
-import { MISSION, STARSHIP_V3, SUPER_HEAVY_V3 } from './config/starshipV3';
+import { MISSION, STARLINK_V3, STARSHIP_V3, SUPER_HEAVY_V3 } from './config/starshipV3';
 import { type Aux, DEFAULT_ENV, type Env, currentAux, rk4Step } from './dynamics';
 import { engineMassFlow, engineThrust } from './engine';
 import { Pilot, type PilotCommand } from './pilot';
@@ -77,7 +77,8 @@ const RAILS_BURN_LEAD = 90;
 
 /** The ship's entry as flown by its autopilot, measured from the sim (flaps included): approx. */
 
-import { type StageId, Vehicle, massProps } from './vehicle';
+import { type StageId, Vehicle, massProps, stageDry } from './vehicle';
+import { PayloadBay } from './payload';
 
 export const DT = 0.01;
 
@@ -191,6 +192,15 @@ export interface Snapshot {
   } | null;
   /** An autopilot is coasting until this sim time (a hint: the player may warp). */
   waitUntil: number | null;
+  /** The ship's payload bay, on a Starlink flight: the door (0 closed .. 1 open), how many are left, and the satellites already out. */
+  payload: {
+    state: string;
+    door: number;
+    aboard: number;
+    total: number;
+    /** Each one deployed: its number, where (pad ENU, m), its attitude (its axes -> ENU), and since when it's out (s). */
+    sats: { n: number; pos: V3; rot: M3; age: number }[];
+  } | null;
   /** Why the last return command was refused (and when, sim time), for the return panel. */
   returnNotice: { text: string; t: number } | null;
 }
@@ -226,6 +236,10 @@ export class Simulation {
   launchPad = 0;
   /** Or the booster lands on the Gulf here (pad ENU east / north, m), not at the tower. */
   boosterOcean: [number, number] | null = null;
+  /** What the ship carries: Starlink V3 satellites to deploy in orbit, or (null) the test flights' payload simulators. */
+  payloadKind: 'starlink' | null = null;
+  /** Its payload bay (Starlink flights). */
+  bay: PayloadBay | null = null;
 
   constructor(public env: Env = DEFAULT_ENV) {
     this.reset();
@@ -239,6 +253,8 @@ export class Simulation {
       { def: SUPER_HEAVY_V3, prop: SUPER_HEAVY_V3.propMass },
       { def: STARSHIP_V3, prop: STARSHIP_V3.propMass * MISSION.shipPropLoad },
     ]);
+    this.bay = this.payloadKind === 'starlink' ? new PayloadBay() : null;
+    if (this.bay) stack.stages[1].payload = PayloadBay.massFor(this.bay.aboard);
     this.vehicles = [stack];
     this.health.clear();
     this.gripped.clear();
@@ -469,6 +485,7 @@ export class Simulation {
     this.pilot.targetDir = booster && br && this.pilot.flies(booster) && this.aux.get('booster') ? br.targetHold(booster, this.aux.get('booster')!, dt) : null;
     this.mission.update(dt);
     this.trackBurn(dt);
+    this.bay?.update(this.t, dt, this.mission.missionTime, this.find('ship'), (text) => this.log(text));
 
     // (Standing vehicles first: one hanging above looks at where they are at the step's end.)
     const order = [...this.vehicles].sort((a, b) => Number(a.status === 'caught') - Number(b.status === 'caught'));
@@ -630,6 +647,8 @@ export class Simulation {
   /** Whether time warp may go on rails: everything in flight coasting above the atmosphere. */
   railsAllowed(): boolean {
     if (this.mission.phase === 'countdown' || this.mission.phase === 'ascent' || this.mission.phase === 'hotstaging') return false;
+    // (Deploying: the satellites leave one by one at physics speed.)
+    if (this.bay?.busy) return false;
     // A burn coming up: off rails in time to turn to it (on rails the attitude is frozen).
     const until = this.railsUntil();
     if (until !== null && this.t >= until - 0.01) return false;
@@ -659,6 +678,9 @@ export class Simulation {
     }
     const r = this.mission.shipReturn;
     if (r && r.phase === 'burn' && r.plan.burns[r.burnIndexNow]?.label === 'entry burn') until = Math.min(until ?? Infinity, this.t);
+    // (And at the satellites' deployment, to watch it.)
+    const tz = this.mission.tZero;
+    if (this.bay?.state === 'stowed' && tz !== null && this.t < tz + STARLINK_V3.deployAt) until = Math.min(until ?? Infinity, tz + STARLINK_V3.deployAt);
     return until;
   }
 
@@ -688,6 +710,8 @@ export class Simulation {
       }
       for (const t of this.towers) t.update(h);
       this.t += h;
+      // (The deployment starts on time on rails too: then time runs at physics speed to watch it.)
+      this.bay?.update(this.t, h, this.mission.missionTime, this.find('ship'), (text) => this.log(text));
       done += h;
       this.refreshAux();
       if (!this.railsAllowed()) break;
@@ -1202,6 +1226,8 @@ export class Simulation {
   }
 
   snapshot(): Snapshot {
+    // (The satellites up to now: they're moved at each step's start, the vehicles to its end.)
+    this.bay?.fly(this.t);
     const toEcef = eciToEcefMatrix(this.t);
     const bodyToEnuBase = mat3Mul(ECEF_TO_ENU, toEcef);
     const vehicles = this.vehicles.map((v): VehicleSnapshot => {
@@ -1285,6 +1311,20 @@ export class Simulation {
       shipReturn: this.returnSnapshot(),
       waitUntil: this.waitUntil,
       returnNotice: this.returnNotice,
+      payload: this.bay
+        ? {
+            state: this.bay.state,
+            door: this.bay.door,
+            aboard: this.bay.aboard,
+            total: this.bay.total,
+            sats: this.bay.sats.map((s) => ({
+              n: s.n,
+              pos: mat3Vec(ECEF_TO_ENU, sub(eciToEcef(s.r, this.t), PAD_GROUND_ECEF)),
+              rot: mat3Mul(bodyToEnuBase, mat3FromQ(PayloadBay.attitude(s, this.t))),
+              age: this.t - s.released,
+            })),
+          }
+        : null,
     };
   }
 
@@ -1351,7 +1391,7 @@ function flightPerformance(v: Vehicle, aux: Aux): { twr: number; twrMax: number;
       thrust += engineThrust(e.place.type, 1, aux.pAmb);
       flow += engineMassFlow(e.place.type, 1);
     }
-    const m0 = upper + s.def.dryMass + s.prop;
+    const m0 = upper + stageDry(s) + s.prop;
     const isp = flow > 0 ? thrust / (flow * G0) : 0;
     deltaV[s.def.id] = isp > 0 ? isp * G0 * Math.log(m0 / (m0 - s.prop)) : 0;
     upper = m0;

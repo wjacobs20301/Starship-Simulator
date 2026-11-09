@@ -56,6 +56,8 @@ export class VehicleMesh {
   private motion = new THREE.Vector3();
   private surfaces: Surface[] = [];
   private qInv = new THREE.Quaternion();
+  /** The payload bay's PEZ door (the ship model's "Cargo Door"), where it sits closed, and the dark bay behind it. */
+  private door: { node: THREE.Object3D; closed: THREE.Vector3; bay: THREE.Mesh } | null = null;
   /** Meshes with simpler versions for when the camera is far off (models.ts). */
   private detailed: { mesh: THREE.Mesh; full: THREE.BufferGeometry; levels: { distance: number; geometry: THREE.BufferGeometry }[] }[] = [];
 
@@ -80,6 +82,7 @@ export class VehicleMesh {
       });
       this.engines.set(id, collectEngines(model));
       this.surfaces.push(...(id === 'ship' ? flaps(model) : gridFins(model)));
+      if (id === 'ship') this.door = payloadDoor(model);
       this.frostStages.set(id, this.frost.addStage(model, def));
       this.heatUp(model);
       // The cluster plume starts at the stage's nozzle exit plane (booster base / RVac exits).
@@ -120,6 +123,20 @@ export class VehicleMesh {
         e.glow.emissiveIntensity = s.throttles[i] > 0.02 ? 2 + 4 * s.throttles[i] : 0;
       });
     }
+  }
+
+  /**
+   * The payload door: 0 closed .. 1 open. It opens the way the PEZ door does on the flight
+   * videos: in, then away along the hull's inside, leaving the slot open onto the dark bay.
+   */
+  setPayloadDoor(open: number): void {
+    const d = this.door;
+    if (!d) return;
+    const a = THREE.MathUtils.clamp(open / 0.35, 0, 1);
+    const b = THREE.MathUtils.clamp((open - 0.35) / 0.65, 0, 1);
+    // (Model axes: +X toward the axis from the door, +Y up the ship.)
+    d.node.position.copy(d.closed).add(new THREE.Vector3(0.3 * a + 0.15 * b, 1.3 * b * b * (3 - 2 * b), 0));
+    d.bay.visible = open > 0.002;
   }
 
   /** Call once the root is placed for this frame (camera-relative, so its distance is the camera's). */
@@ -192,6 +209,42 @@ export class VehicleMesh {
     for (const m of this.owned) m.dispose();
     this.frost.dispose();
   }
+}
+
+/**
+ * The ship's PEZ door, and the bay behind its slot: a dark box just inside the hull, shown while
+ * the door is open (the hull has a hole there, under the door).
+ */
+function payloadDoor(model: THREE.Object3D): { node: THREE.Object3D; closed: THREE.Vector3; bay: THREE.Mesh } | null {
+  // (three.js loads "Cargo Door" as "Cargo_Door".)
+  const node = model.getObjectByName('Cargo_Door') ?? model.getObjectByName('Cargo Door');
+  if (!node) return null;
+  model.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(node);
+  const local = box.clone().applyMatrix4(new THREE.Matrix4().copy(model.matrixWorld).invert());
+  const size = local.getSize(new THREE.Vector3());
+  // The open slot: a dark strip on the hull where the door was (a hair proud of the skin, so it
+  // shows whether or not the hull is cut there), curved round with it. A satellite on its way
+  // out is hidden behind it until it clears the skin: it slides out of the dark.
+  const r = 4.58;
+  const half = Math.asin(Math.min(0.99, (size.z * 0.5) / 4.5));
+  const g = new THREE.BufferGeometry();
+  const pos: number[] = [];
+  const idx: number[] = [];
+  const n = 24;
+  for (let i = 0; i <= n; i++) {
+    const t = -half + (2 * half * i) / n;
+    for (const y of [local.min.y + 0.02, local.max.y - 0.02]) pos.push(-r * Math.cos(t), y, r * Math.sin(t));
+  }
+  for (let i = 0; i < n; i++) idx.push(i * 2, i * 2 + 1, i * 2 + 2, i * 2 + 1, i * 2 + 3, i * 2 + 2);
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  const bay = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: 0x08090a, roughness: 0.9, metalness: 0.2, side: THREE.DoubleSide }));
+  bay.visible = false;
+  bay.name = 'PayloadBay';
+  model.add(bay);
+  return { node, closed: node.position.clone(), bay };
 }
 
 /** Engine nodes in simulation order, each with its own glowing nozzle-interior material. */

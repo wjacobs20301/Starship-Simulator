@@ -7,7 +7,7 @@ import { MISSION } from '../sim/config/starshipV3';
 import type { MissionStart } from '../sim/simulation';
 import type { Snapshot, VehicleSnapshot } from '../sim/simulation';
 
-export type MissionId = 'free' | 'ift' | 'shipcatch' | 'boosterreturn' | 'boostersplash' | 'ascent' | 'orbit' | 'boosterocean' | 'catch' | 'landing';
+export type MissionId = 'free' | 'ift' | 'flight15' | 'shipcatch' | 'boosterreturn' | 'boostersplash' | 'ascent' | 'orbit' | 'boosterocean' | 'catch' | 'landing';
 export type ObjectiveState = 'pending' | 'done' | 'failed';
 
 /** Where the ship aims in the Indian Ocean (the autopilot's nominal splashdown), degrees. */
@@ -53,6 +53,10 @@ export interface FlightRecord {
   shipDeltaV: number;
   /** Ship below 20 km on the way down, still in one piece (made it through entry). */
   entrySurvived: boolean;
+  /** Starlink satellites deployed (of how many), and whether the payload door has closed again. */
+  deployed: number;
+  payloadTotal: number;
+  doorClosed: boolean;
 }
 
 export interface Objective {
@@ -76,6 +80,10 @@ export interface MissionSetup {
   followBooster?: boolean;
   /** At SECO, send the ship home on autopilot (tower catch or the ocean target). */
   shipReturn?: 'tower' | 'ocean';
+  /** Always from this pad (0 = Pad 1, 1 = Pad 2), as the real flight. */
+  pad?: number;
+  /** The ship carries Starlink V3 satellites and deploys them in orbit. */
+  payload?: 'starlink';
 }
 
 /** A target shown in the world, on the map and in the flight readout. */
@@ -112,6 +120,18 @@ const space: Objective = {
 const catchBooster: Objective = {
   label: 'Booster caught by the chopsticks',
   check: (r) => (r.caught ? 'done' : r.stackLost || r.boosterLost || r.boosterLanded ? 'failed' : 'pending'),
+};
+const orbitReached: Objective = {
+  label: 'Ship in orbit (perigee above 150 km)',
+  check: (r) => (r.shipOrbit && r.shipOrbit.perigee > 150e3 ? 'done' : r.stackLost || r.shipLost || r.entrySurvived ? 'failed' : 'pending'),
+};
+const allDeployed: Objective = {
+  label: 'Deploy all 26 Starlink V3 satellites',
+  check: (r) => (r.payloadTotal > 0 && r.deployed >= r.payloadTotal ? 'done' : r.stackLost || r.shipLost || r.entrySurvived ? 'failed' : 'pending'),
+};
+const doorClosed: Objective = {
+  label: 'Payload door closed for entry',
+  check: (r) => (r.doorClosed ? 'done' : r.stackLost || r.shipLost || r.entrySurvived ? 'failed' : 'pending'),
 };
 const catchShip: Objective = {
   label: 'Ship caught by a tower',
@@ -251,6 +271,26 @@ export const MISSIONS: MissionDef[] = [
 
   // --- Autopilot: flown for you (L takes over, L again hands back) ---
   {
+    id: 'flight15',
+    title: 'Flight 15',
+    group: 'auto',
+    brief:
+      "Starship's fifteenth flight, as SpaceX plans it (November 2026): Super Heavy lifts off from Pad 2 and flies home to its tower; " +
+      'the ship goes on to orbit, opens its payload door half an hour after liftoff and deploys 26 Starlink V3 satellites, one about every 70 seconds. ' +
+      'Then about 14 orbits, nearly a day, before it deorbits, comes in over Mexico and is caught by the Pad 1 tower: the first catch of both stages. ' +
+      'Warp (1–8, or , .) through the orbits; time drops back to normal for the deployment, the flip and the catch.',
+    setup: { shipReturn: 'tower', pad: 1, payload: 'starlink' },
+    objectives: [liftoff, separation, catchBooster, orbitReached, allDeployed, doorClosed, catchShip],
+    score(r) {
+      // (Out of 1000: the objectives 850, the catches' precision 150.)
+      const points: [Objective, number][] = [[liftoff, 75], [separation, 75], [catchBooster, 150], [orbitReached, 100], [allDeployed, 175], [doorClosed, 75], [catchShip, 200]];
+      const lines = points.map(([o, p]) => done(o, r, p));
+      if (r.caught) lines.push(precision(`Booster catch precision (${r.caught.off.toFixed(2)} m off)`, 75, r.caught.off, 2.5));
+      if (r.shipCaught) lines.push(precision(`Ship catch precision (${r.shipCaught.off.toFixed(2)} m off)`, 75, r.shipCaught.off, 2.5));
+      return lines;
+    },
+  },
+  {
     id: 'ift',
     title: 'Flight Test',
     group: 'auto',
@@ -351,6 +391,9 @@ export function emptyRecord(): FlightRecord {
     shipOrbit: null,
     shipDeltaV: 0,
     entrySurvived: false,
+    deployed: 0,
+    payloadTotal: 0,
+    doorClosed: false,
   };
 }
 
@@ -401,6 +444,14 @@ export class MissionTracker {
       const orbit = /^SECO.*orbit (-?\d+) x (-?\d+) km/.exec(e.text);
       if (orbit && !r.seco) r.seco = { perigee: Number(orbit[1]) * 1000, apogee: Number(orbit[2]) * 1000 };
       if (/^Booster struck/.test(e.text)) r.boosterLost = true;
+      const sat = /^Starlink (\d+) of (\d+) deployed/.exec(e.text);
+      if (sat) {
+        r.deployed = Number(sat[1]);
+        r.payloadTotal = Number(sat[2]);
+      }
+      const door = /^Payload door opening: (\d+)/.exec(e.text);
+      if (door) r.payloadTotal = Number(door[1]);
+      if (/^Payload door closed/.test(e.text)) r.doorClosed = true;
       const splash = /^Starship splashdown.*?([\d.]+) m\/s/.exec(e.text);
       if (splash) this.splashSpeed = Number(splash[1]);
       const boosterSplash = /^Super Heavy (?:splashdown|touchdown).*?([\d.]+) m\/s/.exec(e.text);

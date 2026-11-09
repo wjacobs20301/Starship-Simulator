@@ -56,6 +56,7 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       else {
         if (msg.pad !== undefined) sim.launchPad = msg.pad;
         sim.boosterOcean = msg.boosterOcean ?? null;
+        sim.payloadKind = msg.payload ?? null;
         sim.reset();
         if (msg.start && msg.start !== 'pad') sim.startAt(msg.start);
         sceneId++;

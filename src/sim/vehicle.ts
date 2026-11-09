@@ -23,10 +23,15 @@ export interface StageDef {
   xBase: number;
   length: number;
   radius: number;
-  /** Dry mass including any payload or ballast, kg. */
+  /** Dry mass (structure, engines, ballast), kg: without the payload. */
   dryMass: number;
   /** Dry center of mass as a fraction of stage length from the base. */
   dryCgFrac: number;
+  /**
+   * The payload it carries unless told otherwise (kg), and where its mass centre sits (fraction
+   * of the stage length from the base). A flight may load another (StageState.payload).
+   */
+  payload?: { mass: number; cgFrac: number };
   /** Full propellant load, kg. */
   propMass: number;
   /** Oxidizer-to-fuel mass ratio. */
@@ -68,7 +73,14 @@ export interface EngineState {
 export interface StageState {
   def: StageDef;
   prop: number;
+  /** Payload aboard, kg (default: the stage's own, StageDef.payload). */
+  payload?: number;
 }
+
+/** A stage's payload aboard now, kg. */
+export const payloadOf = (s: StageState): number => s.payload ?? s.def.payload?.mass ?? 0;
+/** A stage's mass without propellant (dry structure and the payload aboard), kg. */
+export const stageDry = (s: StageState): number => s.def.dryMass + payloadOf(s);
 
 export type VehicleStatus = 'held' | 'flight' | 'caught' | 'landed' | 'destroyed';
 
@@ -165,6 +177,12 @@ export function massProps(stages: readonly StageState[], props: ArrayLike<number
       ix: d.dryMass * r2,
       it: d.dryMass * (r2 / 2 + d.length ** 2 / 12),
     });
+    const pl = payloadOf(s);
+    if (pl > 0) {
+      const x = d.xBase + (d.payload?.cgFrac ?? d.dryCgFrac) * d.length;
+      // (Spread as the dry structure is: the default load is ballast tuned with it.)
+      parts.push({ m: pl, x, ix: pl * r2, it: pl * (r2 / 2 + d.length ** 2 / 12) });
+    }
     let prop = Math.max(0, props[i]);
     if (d.header) {
       const h = Math.min(prop, d.header.mass);

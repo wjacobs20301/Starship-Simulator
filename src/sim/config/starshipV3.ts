@@ -96,10 +96,11 @@ export const STARSHIP_V3: StageDef = {
   xBase: BOOSTER_LENGTH,
   length: SHIP_LENGTH,
   radius: 4.5,
-  // Approx dry + a payload-simulator load in the payload bay (test flights carry Starlink
-  // simulators). The payload sits high, which keeps the CG near the belly-flop CP. / tune
-  dryMass: 135e3 + 60e3,
+  // Approx dry (with the PEZ dispenser), and by default a payload-simulator load in the
+  // payload bay (test flights carry Starlink simulators). / tune
+  dryMass: 135e3,
   dryCgFrac: 0.48,
+  payload: { mass: 60e3, cgFrac: 0.48 },
   propMass: 1600e3, // approx / tune
   mixtureRatio: 3.6,
   loxDensity: 1200,
@@ -116,6 +117,30 @@ export const STARSHIP_V3: StageDef = {
     ...ring(RAPTOR3, 3, 0.86, SHIP_RSL_X, 0, Math.PI / 3),
     ...ring(RAPTOR3_VAC, 3, 3.18, SHIP_RVAC_X, 1, 0),
   ],
+};
+
+/**
+ * Starlink V3, as Starship carries them (Flight 14 deployed the first 26 operational ones,
+ * 2026-09-28; Flight 15 plans another 26). SpaceX hasn't published its size or mass: these are
+ * the most quoted estimates. ~1,900 kg (press estimates); a flat bus ~7 m long; two solar wings,
+ * each 6.36 x 20.2 m (SpaceX's 2022 FCC filing for the full-size satellite). They leave the
+ * payload bay one at a time through the PEZ door, a slot on the ship's leeward side, pushed
+ * out by the dispenser. approx / tune
+ */
+export const STARLINK_V3 = {
+  mass: 1900,
+  /** The bus's width (across: the way it leaves the slot), m. */
+  width: 3.5,
+  /** Satellites per flight (Flight 14 and 15). */
+  count: 26,
+  /** Deployment: starts this long after liftoff (Flight 14: T+34 min), one every interval
+   *  (26 in ~30 min), pushed out at this speed, m/s. */
+  deployAt: 34 * 60,
+  interval: 68,
+  pushSpeed: 0.4,
+  /** The PEZ door: its middle's height above the ship's base (m), and how long it takes to open / close, s. */
+  doorX: 35.1,
+  doorTime: 12,
 };
 
 /** Mission / flight-software parameters for a test-flight-style suborbital profile. */

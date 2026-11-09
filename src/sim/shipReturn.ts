@@ -38,7 +38,7 @@ import { entryAlpha, entryAttitude, heatFlux } from './shipReentry';
 import type { Simulation } from './simulation';
 import { ARMS, type TowerArms } from './tower';
 import { type EntryModel, orbitalFrame, predictTrajectory, propagate } from './trajectory';
-import { type Vehicle, setThrottle } from './vehicle';
+import { type Vehicle, setThrottle, stageDry } from './vehicle';
 
 export type ReturnTarget =
   | { kind: 'tower'; pad: number }
@@ -177,7 +177,7 @@ const VENT_RATE = 40e3;
 export function maneuverDeltaV(ship: Vehicle): number {
   const s = ship.stages[0];
   const header = (s.def.header?.mass ?? s.def.reserve) + LANDING_MARGIN_PROP;
-  const dry = s.def.dryMass;
+  const dry = stageDry(s);
   const vac = ship.engines.find((e) => e.place.ring === 1)?.place.type;
   const isp = vac ? vac.ispVac : 370;
   const m0 = dry + s.prop;
@@ -203,7 +203,7 @@ export function planReturn(
   const vac = ship.engines.find((e) => e.place.ring === 1)?.place.type;
   const isp = (vac ? vac.ispVac : 370) * 9.80665;
   const reserve = (st.def.header?.mass ?? st.def.reserve) + LANDING_MARGIN_PROP;
-  const base = st.def.dryMass + reserve;
+  const base = stageDry(st) + reserve;
   const lightFor = (dv: number) => Math.min(mass, base * Math.exp((1.15 * dv + 30) / isp));
   let m = lightFor(2500);
   let p = planReturnAt(ship, t, m, target, options, keepPass);
@@ -1182,7 +1182,7 @@ export class ShipReturn {
     const isp = (vac ? vac.ispVac : 370) * 9.80665;
     const dvLeft = this.plan.burns.slice(this.burnIndex).reduce((a, b) => a + norm(b.dv), 0);
     const reserve = (s.def.header?.mass ?? s.def.reserve) + LANDING_MARGIN_PROP;
-    const mEnd = s.def.dryMass + reserve;
+    const mEnd = stageDry(s) + reserve;
     const keep = reserve + mEnd * (Math.exp((1.15 * dvLeft + 30) / isp) - 1);
     const excess = s.prop - keep;
     if (excess <= 0 || (!this.venting && excess < 5e3)) {

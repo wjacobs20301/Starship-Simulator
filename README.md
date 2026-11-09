@@ -72,6 +72,8 @@ The controls are fly-by-wire, in the style of Kerbal Space Program. Pitch, yaw a
 ### 3D models
 The vehicle and tower models start from community models (see [Credits](#credits)). Blender scripts in `art/blender/` scale them to full size, split the stack into booster and ship, add pivots for the engines, fins, flaps, arms and QD arm, and optimise them for real time. The finished models are already in `public/models/`, so you don't need Blender to run the game.
 
+The Starlink V3 satellite is this project's own model, since no public one exists: `art/blender/starlink_v3.py` builds it from the published figures (a flat ~7 m bus, two 6.36 × 20.2 m solar wings from SpaceX's FCC filing, six laser links), following the V2 Mini's layout where V3's isn't public. Build it with `Blender -b --factory-startup -P art/blender/build_starlink.py`, then `npx tsx scripts/optimize-models.ts starlink_v3`.
+
 ## Running it locally
 
 You'll need [Node.js](https://nodejs.org/) 22 or newer.

@@ -31,7 +31,7 @@ export class Hud {
 
   update(
     s: Snapshot,
-    info: { camera: string; tracked: string; warp: string; paused: boolean; armsPad: number; orbit?: { inclination: number; period: number } | null; weather?: string },
+    info: { camera: string; tracked: string; warp: string; paused: boolean; armsPad: number; orbit?: { inclination: number; period: number } | null; weather?: string; payload?: string },
   ): void {
     this.webcast.update(s);
     const label = (s.shipPhase && SHIP_PHASE_LABEL[s.shipPhase]) || PHASE_LABEL[s.phase];
@@ -55,7 +55,8 @@ export class Hud {
               ? '<span class="bad">chopsticks wrecked</span>'
               : `arms: rails ${arms.top.toFixed(0)} m, open ${arms.angle.toFixed(0)}°${Math.abs(arms.slew) > 0.5 ? `, swung ${arms.slew.toFixed(0)}°` : ''}`)
         : '')
-      + (info.weather ? `<br>Weather: ${info.weather}` : '');
+      + (info.weather ? `<br>Weather: ${info.weather}` : '')
+      + (info.payload ? `<br>${info.payload}` : '');
     // (Only touch the DOM when the text changes: every write costs a style / layout pass.)
     if (status !== this.lastStatus) {
       this.status.innerHTML = status;

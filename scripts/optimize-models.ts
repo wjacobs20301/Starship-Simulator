@@ -18,7 +18,9 @@ const io = new NodeIO()
   .registerExtensions(ALL_EXTENSIONS)
   .registerDependencies({ 'meshopt.decoder': MeshoptDecoder, 'meshopt.encoder': MeshoptEncoder });
 
-for (const file of readdirSync(inDir).filter((f) => f.endsWith('.glb'))) {
+// (Names on the command line: only those, e.g. `npx tsx scripts/optimize-models.ts starlink_v3`.)
+const only = process.argv.slice(2);
+for (const file of readdirSync(inDir).filter((f) => f.endsWith('.glb') && (!only.length || only.includes(f.replace(/\.glb$/, ''))))) {
   const src = resolve(inDir, file);
   const dst = resolve(outDir, file);
   const doc = await io.read(src);

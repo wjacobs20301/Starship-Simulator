@@ -125,7 +125,9 @@ const TOWER_TOP = 150;
 const CATCH_DIVERT: [number, number] = [32000, -4000];
 /** The landing burn's aim: how hard it steers the predicted end point onto the mount. */
 const LAND_AIM_GAIN = 2;
-export const HOVER_TUNING = { wn: 1.6, zeta: 1.0, kp: 0.15, kd: 1.0, byFins: true };
+// (kd 1.3: at 1.0, over Pad 2's arms in gusty air it could swing side to side for the whole hover
+// and run dry: 2 of 8 calm-day winds. 1.3 catches them all at both towers.)
+export const HOVER_TUNING = { wn: 1.6, zeta: 1.0, kp: 0.15, kd: 1.3, byFins: true };
 const FIN_TILT_MAX = 12 * DEG;
 /**
  * Final trim of the boostback: with less than this velocity change still to make, 3 engines at

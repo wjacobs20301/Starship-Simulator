@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { OMEGA_E, PAD } from '../src/sim/constants';
 import { STARSHIP_V3 } from '../src/sim/config/starshipV3';
 import { SHIP_CATCH_PIN } from '../src/sim/shipReturn';
-import { type V3, add, cross } from '../src/sim/math';
+import { type V3, add, cross, normalize, qFromAxisAngle } from '../src/sim/math';
 import { MOUNTS, TOWERS, armColumns, armContact, awayFromTower, catchGap, catchPoint, cylinder, qdContact, surfaceUnder, towerContact } from '../src/sim/padCollision';
 import { PAD_COLLIDERS } from '../src/sim/padColliders';
 import { padDirToEci, padToEci } from '../src/sim/padFrame';
@@ -42,6 +42,11 @@ describe('tower and chopstick collisions', () => {
     const { cg, vel } = place(sim);
     b.r = padToEci(cg, sim.t);
     b.v = add(padDirToEci(vel, sim.t), cross([0, 0, OMEGA_E], b.r));
+    // Upright and still (not leaning however the approach had it: that would steer it off).
+    const up = padDirToEci([0, 0, 1], sim.t);
+    const axis = cross([1, 0, 0], up);
+    b.q = qFromAxisAngle(normalize(axis), Math.acos(Math.max(-1, Math.min(1, up[0]))));
+    b.w = [0, 0, 0];
     for (let i = 0; i < 800; i++) sim.step();
     return { sim, b };
   };

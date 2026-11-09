@@ -26,6 +26,7 @@ import { Weather } from './render/weather';
 import { starbaseDay } from './weather/model';
 import { Rain } from './render/fx/rain';
 import { Lightning } from './render/fx/lightning';
+import { StarlinkFleet, loadStarlink } from './render/starlink';
 import { type FxVehicle, LaunchFx, explosionRadius, vehicleNoise } from './render/fx/launchFx';
 import { VentFx } from './render/fx/vent';
 import { LaunchAudio } from './audio/launchAudio';
@@ -126,6 +127,8 @@ facilitiesLoaded
 
 let models: ModelLibrary | null = null;
 let padRig: PadRig | null = null;
+/** The deployed Starlink satellites (once their model has loaded). */
+let starlink: StarlinkFleet | null = null;
 const loading = document.querySelector<HTMLElement>('#loading')!;
 const loadingBar = loading.querySelector<HTMLElement>('.ld-bar i')!;
 const loadingText = loading.querySelector<HTMLElement>('.ld-text')!;
@@ -145,10 +148,17 @@ loadModels(world.renderer, (f) => (loadingBar.style.transform = `scaleX(${f})`))
         origin.place(garden, [0, 0, 0]);
       })
       .catch(() => {});
+    // The Starlink satellites (Starlink flights deploy them): their own small model.
+    loadStarlink()
+      .then((model) => {
+        starlink = new StarlinkFleet(model);
+        world.scene.add(starlink.group);
+      })
+      .catch((err) => console.error('Starlink model failed to load', err));
     loadingBar.style.transform = 'scaleX(1)';
     loading.classList.add('done');
     setTimeout(() => loading.remove(), 1000);
-    if (import.meta.env.DEV) Object.assign(window, { __debug: { models, padRig, world, meshes, terrain, settings, updateSettings, rig, fx, sound, pr: () => pixelRatio, frame, globeTiles, mapView, flightPanel, hud, plot, ambience, audioEngine, lightning, menu, menuAudio, weather, moon, origin, showScene } });
+    if (import.meta.env.DEV) Object.assign(window, { __debug: { models, padRig, world, meshes, terrain, settings, updateSettings, rig, fx, sound, pr: () => pixelRatio, frame, globeTiles, mapView, flightPanel, hud, plot, ambience, audioEngine, lightning, starlink: () => starlink, menu, menuAudio, weather, moon, origin, showScene } });
   })
   .catch((err) => {
     loadingText.textContent = import.meta.env.DEV
@@ -217,7 +227,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
   // Hot staging hands the player a fresh stage: full throttle, all engines.
   if (prev && prev.snap.phase === 'hotstaging' && curr.snap.phase === 'shipburn' && pilot.manual) setPilot({ throttle: 1, engines: 0 });
   const shipOrbit = trajectories.get('ship')?.orbit ?? null;
-  hud.update(curr.snap, { camera: rig.map ? 'Map' : CAMERA_LABELS[rig.mode], tracked: trackedName(), warp: warpLabel(), paused, armsPad, orbit: shipOrbit, weather: weather.enabled ? WEATHER_NAME[weatherToday] : '' });
+  hud.update(curr.snap, { camera: rig.map ? 'Map' : CAMERA_LABELS[rig.mode], tracked: trackedName(), warp: warpLabel(), paused, armsPad, orbit: shipOrbit, weather: weather.enabled ? WEATHER_NAME[weatherToday] : '', payload: payloadLine(curr.snap) });
 };
 
 // --- Missions -------------------------------------------------------------------------
@@ -249,7 +259,8 @@ const menu = new GameMenu(
       menuAudio.go();
       missionUi.select(id);
       menu.close();
-      setLaunchPad(pad);
+      // (A real flight's own pad, if it has one.)
+      setLaunchPad(missionById(id).setup.pad ?? pad);
       resetFlight();
     },
     freeRoam: (pad) => {
@@ -406,8 +417,9 @@ function resetFlight(): void {
   applyWeatherSetting();
   const setup = tracker.mission.setup;
   const start = setup.start ?? 'pad';
+  if (setup.pad !== undefined && launchPad !== setup.pad) setLaunchPad(setup.pad);
   startDay(missionDaylight());
-  send({ type: 'reset', pad: launchPad, start, boosterOcean: setup.boosterOcean ? BOOSTER_OCEAN_ENU : null });
+  send({ type: 'reset', pad: launchPad, start, boosterOcean: setup.boosterOcean ? BOOSTER_OCEAN_ENU : null, payload: setup.payload ?? null });
   scenesSent++;
   send({ type: 'warp', value: 1 });
   send({ type: 'node', node: null });
@@ -522,6 +534,11 @@ function followMission(snap: Snapshot): void {
       send({ type: 'return', target });
     }
     if (setup.shipReturn && /^Return: flip and landing burn/.test(e.text)) send({ type: 'warp', value: 1 });
+    // Starlink flights: back to normal speed, the camera on the ship, for the deployment.
+    if (setup.payload && /^Payload door opening/.test(e.text)) {
+      trackedId = 'ship';
+      send({ type: 'warp', value: 1 });
+    }
   }
   if (snap.phase === 'prelaunch') return;
   const result = tracker.update(snap);
@@ -703,6 +720,15 @@ function syncMeshes(vehicles: VehicleSnapshot[], simTime: number): void {
       world.scene.add(m.root);
     }
   }
+}
+
+/** The payload in the status corner: how many Starlinks are out, and the door. */
+function payloadLine(s: Snapshot): string {
+  const p = s.payload;
+  if (!p) return '';
+  const out = p.total - p.aboard;
+  const door = p.state === 'opening' ? ', door opening' : p.state === 'closing' ? ', door closing' : p.door > 0.5 ? ', door open' : '';
+  return `Starlink V3: ${out} of ${p.total} deployed${door}`;
 }
 
 /** Mid-body of a vehicle along its axis, from the booster-base origin, m. */
@@ -1038,6 +1064,7 @@ function frame(): void {
     if (p) qb.copy(vehicleQuaternion(p.rot, qa).slerp(qb, alpha));
     mesh.root.quaternion.copy(qb);
     mesh.update(v, simTime);
+    if (v.stages.includes('ship')) mesh.setPayloadDoor(snap.payload?.door ?? 0);
     const w = enuToWorld(pos);
     placements.push({ snap: v, mesh, world: w });
     {
@@ -1053,7 +1080,9 @@ function frame(): void {
     }
     if (v.id === trackedId) {
       up.set(0, 1, 0).applyQuaternion(qb);
-      const mid = midpoint(v);
+      // (Dev-only: __focusAlong, m, moves the aim along the tracked vehicle's axis from its base.)
+      const along = import.meta.env.DEV ? (window as unknown as { __focusAlong?: number }).__focusAlong : undefined;
+      const mid = along ?? midpoint(v);
       target = {
         center: [w[0] + up.x * mid, w[1] + up.y * mid, w[2] + up.z * mid],
         axis: [up.x, up.y, up.z],
@@ -1062,8 +1091,11 @@ function frame(): void {
     }
   }
 
-  // Dev-only: __debug.focus = [x, y, z] (world) aims the orbit camera at a fixed point instead.
-  const focus0 = import.meta.env.DEV ? (window as unknown as { __focus?: V3 }).__focus : undefined;
+  // Dev-only: __debug.focus = [x, y, z] (world) aims the orbit camera at a fixed point instead;
+  // __focusSat = n at the nth Starlink deployed.
+  const focusSat = import.meta.env.DEV ? (window as unknown as { __focusSat?: number }).__focusSat : undefined;
+  const satAt = focusSat !== undefined ? snap.payload?.sats.find((x) => x.n === focusSat) : undefined;
+  const focus0 = satAt ? enuToWorld(satAt.pos) : import.meta.env.DEV ? (window as unknown as { __focus?: V3 }).__focus : undefined;
   const aim = focus0 ? { center: focus0, axis: [0, 1, 0] as V3, size: 60 } : (target ?? (watching ? { center: watching.at, axis: [0, 1, 0] as V3, size: watching.radius } : null));
   // Back off far enough to take in the whole fireball.
   if (watching && rig.mode === 'orbit' && !rig.map) rig.distance += (Math.max(rig.distance, watching.radius * 3.2) - rig.distance) * Math.min(1, frameDt * 1.5);
@@ -1098,6 +1130,16 @@ function frame(): void {
   for (const pl of placements) {
     origin.place(pl.mesh.root, pl.world);
     pl.mesh.afterPlace();
+  }
+  // The satellites out of the bay, between snapshots as the vehicles are (they move as fast).
+  if (starlink) {
+    const cur = snap.payload;
+    const before = prev?.snap.payload;
+    const sats = cur?.sats.map((s) => {
+      const q = before?.sats.find((x) => x.n === s.n);
+      return q ? { ...s, pos: [q.pos[0] + (s.pos[0] - q.pos[0]) * alpha, q.pos[1] + (s.pos[1] - q.pos[1]) * alpha, q.pos[2] + (s.pos[2] - q.pos[2]) * alpha] as V3 } : s;
+    });
+    starlink.update(cur && sats ? { ...cur, sats } : null, origin.camera, enuToWorld);
   }
   // Dev-only: __fxMissionTime overrides the countdown clock the effects see (to preview the deluge).
   const fxClock = import.meta.env.DEV ? (window as unknown as { __fxMissionTime?: number }).__fxMissionTime : undefined;
