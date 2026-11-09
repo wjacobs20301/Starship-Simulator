@@ -171,7 +171,9 @@ export class VehicleMesh {
   /** Call once the root is placed for this frame (camera-relative, so its distance is the camera's). */
   afterPlace(): void {
     if (this.slotModel) {
-      this.slotModel.updateMatrixWorld(true);
+      // (Its parents first: the root has just been moved for this frame. From a stale parent the
+      // cut lands metres off the bay, and patches of hull vanish while the camera moves.)
+      this.slotModel.updateWorldMatrix(true, false);
       this.slot.uSlotFromWorld.value.copy(this.slotModel.matrixWorld).invert();
     }
     // Level of detail from the camera's distance to the vehicle's middle.

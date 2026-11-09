@@ -133,7 +133,7 @@ export class StarlinkFleet {
     let ny = 0;
     // The ones still aboard, in the dispenser's stack (inside the hull: seen only from the bay).
     if (payload && ship && payload.aboard > 0) {
-      ship.updateMatrixWorld(true);
+      ship.updateWorldMatrix(true, false);
       const shift = payload.since < RESTACK_AFTER + RESTACK ? 1 - smooth(RESTACK_AFTER, RESTACK_AFTER + RESTACK, payload.since) : 0;
       for (let k = 0; k < payload.aboard && n < this.max; k++) {
         // (Centred on the ship's axis, where its corners clear the hull; the next one level with
