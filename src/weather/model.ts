@@ -92,9 +92,31 @@ export interface Sample {
   fog: number;
   /** Deep convection (thunderstorms: towers to the tropopause, anvils) 0..1. */
   conv: number;
+  /** A middle layer over the low clouds (altocumulus, altostratus) 0..1, and its height, m. */
+  mid: number;
+  midAlt: number;
+  /** The cirrus's height, m (higher in the tropics, lower toward the poles). */
+  ciAlt: number;
 }
 
-export const newSample = (): Sample => ({ cover: 0, base: 1000, top: 2000, broken: 0.5, cell: 0.3, high: 0, precip: 0, fog: 0, conv: 0 });
+export const newSample = (): Sample => ({ cover: 0, base: 1000, top: 2000, broken: 0.5, cell: 0.3, high: 0, precip: 0, fog: 0, conv: 0, mid: 0, midAlt: 4000, ciAlt: 10000 });
+
+/** Cloud base of cumulus from the air's dew-point spread (temperature minus dew point), m: the lifting condensation level, ~125 m per deg C. */
+export const condensationLevel = (spread: number): number => Math.min(3000, Math.max(350, 125 * spread));
+
+/**
+ * The air's dew-point spread over the site on a day of each kind, deg C: dry clear days lift the
+ * cumulus bases high; muggy, overcast or wet days keep them low. (And how much middle cloud.)
+ */
+const SITE_AIR: Record<Exclude<SiteWeather, 'natural'>, { spread: number; mid: number }> = {
+  clear: { spread: 14, mid: 0 },
+  fair: { spread: 8, mid: 0.1 },
+  partly: { spread: 6, mid: 0.35 },
+  overcast: { spread: 3, mid: 0.75 },
+  rain: { spread: 2, mid: 0.85 },
+  storm: { spread: 5, mid: 0.45 },
+  fog: { spread: 1.5, mid: 0.15 },
+};
 
 const smooth = (a: number, b: number, x: number) => {
   const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
@@ -525,7 +547,17 @@ export class WeatherModel {
     return this.sampleWith(this.states(t), lat, lon, t, sun, out);
   }
 
-  private acc = { w: 0, keep: 1, base: 0, top: 0, broken: 0, cell: 0, high: 1, precip: 1, fog: 0, topMax: 0, conv: 0 };
+  private acc = { w: 0, keep: 1, base: 0, top: 0, broken: 0, cell: 0, high: 1, precip: 1, fog: 0, topMax: 0, conv: 0, mid: 1, midW: 0, midAlt: 0 };
+  /** Cumulus cloud base at the point being sampled, m (condensationLevel of its air). */
+  private lcl = 900;
+  /** A middle layer: cover c at height alt, m (combined like the low clouds' cover). */
+  private addMid = (c: number, alt: number): void => {
+    if (c <= 0.005) return;
+    const A = this.acc;
+    A.mid *= 1 - clamp01(c);
+    A.midAlt += alt * c;
+    A.midW += c;
+  };
 
   /** Add a cloud layer to the accumulator: cover, base, top, broken, cell, rain, high cloud. */
   private add = (c: number, base: number, top: number, broken: number, cell: number, precip = 0, high = 0): void => {
@@ -546,7 +578,7 @@ export class WeatherModel {
 
   private sampleWith(states: State[], lat: number, lon: number, t: number, sun: readonly number[] | undefined, out: Sample): Sample {
     const A = this.acc;
-    A.w = 0; A.keep = 1; A.base = 0; A.top = 0; A.broken = 0; A.cell = 0; A.high = 1; A.precip = 1; A.fog = 0; A.topMax = 0; A.conv = 0;
+    A.w = 0; A.keep = 1; A.base = 0; A.top = 0; A.broken = 0; A.cell = 0; A.high = 1; A.precip = 1; A.fog = 0; A.topMax = 0; A.conv = 0; A.mid = 1; A.midW = 0; A.midAlt = 0;
     const add = this.add;
 
     const n = unit(lat, lon);
@@ -598,6 +630,32 @@ export class WeatherModel {
     const subHigh = Math.exp(-(((al - 29 - 0.2 * season * Math.sign(lat || 1)) / 9) ** 2)) * (1 - broadL);
     const keepClim = (1 - supp) * (1 - 0.88 * desert);
 
+    // How dry the air is (dew-point spread, deg C), which sets how high cumulus form: muggy
+    // over the sea and in the tropics, drier over land, much drier over deserts, varying from
+    // day to day with the weather; near the site, the day's weather asked for.
+    const dryN = this.evolving(n, lat, t, 4, 2, 40 * 3600, this.noise);
+    let spread = (1 - L) * 4 + L * 7 + 12 * desert - 2 * itcz + 4 * dryN;
+    const siteN = unit(this.cfg.siteLat, this.cfg.siteLon);
+    const siteAng = Math.acos(Math.min(1, n[0] * siteN[0] + n[1] * siteN[1] + n[2] * siteN[2])) / DEG;
+    const siteK = this.cfg.site === 'natural' ? 0 : Math.exp(-((siteAng / 6) ** 2)) * Math.exp(-(((t - this.cfg.t0) / (1.5 * DAY)) ** 2));
+    const siteAir = this.cfg.site === 'natural' ? null : SITE_AIR[this.cfg.site];
+    if (siteAir) spread += (siteAir.spread - spread) * siteK;
+    this.lcl = condensationLevel(Math.max(1.5, spread));
+    const lcl = this.lcl;
+    // A cumulus layer's base and top for this air: from its condensation level, the top shifted
+    // with it (the same depth of cloud).
+    const cuBase = lcl;
+    const cuTop = (top: number, base0: number) => top + (lcl - base0);
+
+    // A middle layer: altocumulus / altostratus here and there in the mid-latitudes and the
+    // tropics' moist air, at 2.5 to 6 km.
+    const midN = this.evolving(n, lat, t, 7, 2, 20 * 3600, this.noise2);
+    const midAltN = this.evolving(n, lat, t, 3, 1, 30 * 3600, this.noise);
+    const midBand = Math.exp(-(((al - 40) / 18) ** 2)) + 0.5 * itcz;
+    let midC = smooth(0.15, 0.75, midN) * midBand * 0.55 * (1 - supp) * (1 - 0.8 * desert);
+    if (siteAir) midC += (siteAir.mid - midC) * siteK;
+    this.addMid(midC, 2500 + 3500 * (0.5 + 0.5 * midAltN));
+
     // Deep convection: clusters and lines of thunderstorms (ITCZ, tropical land, summer land).
     const convPot = clamp01(itcz * (1 - 0.6 * L) + tropLand + 0.8 * midLand) * (1 - 0.6 * subHigh);
     if (convPot > 0.02) {
@@ -606,13 +664,13 @@ export class WeatherModel {
       const deep = convPot * smooth(0.36 - 0.25 * convPot, 0.78 - 0.25 * convPot, cv);
       // Anvils: the storms' tops spread out far around the cores, thinning away from them.
       const anvil = convPot * smooth(0.02 - 0.25 * convPot, 0.55 - 0.25 * convPot, cv);
-      add(deep * 1.3 * keepClim, 700, 9000 + 6500 * smooth(0.1, 0.8, deep) * (1 - 0.25 * smooth(25, 40, al)), 0.35, 0.65, deep * 0.9, anvil * keepClim);
+      add(deep * 1.3 * keepClim, 0.85 * cuBase, 9000 + 6500 * smooth(0.1, 0.8, deep) * (1 - 0.25 * smooth(25, 40, al)), 0.35, 0.65, deep * 0.9, anvil * keepClim);
       A.conv = Math.max(A.conv, smooth(0.05, 0.4, deep * keepClim));
-      add(0.3 * convPot * (0.5 + 0.5 * clump) * keepClim, 700, 2200, 0.92, 0.12);
+      add(0.3 * convPot * (0.5 + 0.5 * clump) * keepClim, cuBase, cuTop(2200, 700), 0.92, 0.12);
     }
     // Trade cumulus over the subtropical / tropical oceans.
     const trade = (1 - L) * Math.exp(-(((al - 16) / 12) ** 2));
-    if (trade > 0.02) add(trade * (0.12 + 0.16 * smooth(-0.3, 0.6, conv)) * vary * clump * keepClim, 600, 1500 + 900 * (0.5 + 0.5 * clim), 0.9, 0.18);
+    if (trade > 0.02) add(trade * (0.12 + 0.16 * smooth(-0.3, 0.6, conv)) * vary * clump * keepClim, cuBase, cuTop(1500 + 900 * (0.5 + 0.5 * clim), 600), 0.9, 0.18);
     // Stratocumulus decks over cold oceans off west coasts (the subtropical highs' east flanks).
     if (this.land) {
       const msc = this.land.coldOcean(lat, lon) * Math.exp(-(((al - 24 - 0.3 * season * Math.sign(lat || 1)) / 10) ** 2));
@@ -623,7 +681,7 @@ export class WeatherModel {
     if (stormOcean > 0.02) add(stormOcean * 0.5 * smooth(-0.45, 0.45, clim) * (0.4 + 0.6 * clump) * (1 - supp), 700, 2000 + 600 * clim, 0.5, 0.75, 0.05);
     // Fair-weather cumulus over land by day (not deserts).
     const fair = L * diur * (1 - smooth(55, 70, al)) * 0.45;
-    if (fair > 0.02) add(fair * vary * clump * keepClim, 900, 2400, 0.95, 0.08);
+    if (fair > 0.02) add(fair * vary * clump * keepClim, cuBase, cuTop(2400, 900), 0.95, 0.08);
     // Mid / high-latitude land: grey stratus decks, more in winter.
     const greyLand = L * Math.exp(-(((al - 55) / 12) ** 2)) * (0.18 - 0.1 * sF) * smooth(0, 0.5, clim);
     if (greyLand > 0.02) add(greyLand * vary * (0.4 + 0.6 * clump) * (1 - supp), 500, 1800, 0.35, 0.45);
@@ -633,12 +691,16 @@ export class WeatherModel {
     // Cirrus: jet-stream cirrus in the mid-latitudes, here and there.
     const jetCi = Math.exp(-(((al - 40 + 4 * sF) / 10) ** 2)) * smooth(0.2, 0.7, clim) * 0.45 * (1 - supp);
     if (jetCi > 0.01) add(0, 0, 0, 0, 0, 0, jetCi);
+    // (Its height: near the tropopause, higher in the tropics.)
+    out.ciAlt = 12500 - 3500 * smooth(15, 60, al) + 900 * midAltN;
 
     // --- Systems ---
     for (const st of sys) this.system(st, n, L, add);
 
     const cover = 1 - A.keep;
     out.cover = cover;
+    out.mid = 1 - A.mid;
+    out.midAlt = A.midW > 0 ? A.midAlt / A.midW : 4000;
     if (A.w > 0) {
       out.base = A.base / A.w;
       out.top = Math.max(out.base + 300, Math.max(A.top / A.w, A.topMax * 0.9));
@@ -759,8 +821,10 @@ export class WeatherModel {
         const ahead2 = smooth(-0.1, 0.4, X) * smooth(3.0, 2.0, X) * smooth(yW - 0.2, yW + 0.3, Y) * smooth(1.8, 1.0, Y);
         add(0, 0, 0, 0, 0, 0, ahead2 * 0.7 * a);
         add(band * 0.97 * a * tex, 700, 8500 + 2500 * (1 - along), 0.3, 0.55, band * 0.75 * a * (1 - 0.5 * along), band * 0.7 * a);
-        add(warmSec * 0.45 * a * tex, 600, 1800, 0.55, 0.4);
-        add(coldSec * 0.6 * a, 850, 2600, 0.62, 1.0);
+        add(warmSec * 0.45 * a * tex, this.lcl, 1800 + (this.lcl - 600), 0.55, 0.4);
+        add(coldSec * 0.6 * a, this.lcl, 2600 + (this.lcl - 850), 0.62, 1.0);
+        // (The warm front's cloud shield: a middle deck, altostratus, ahead of it.)
+        this.addMid(shield * 0.8 * a, 3500 + 2000 * (1 - nearWarm));
         void dry;
         break;
       }
@@ -791,7 +855,7 @@ export class WeatherModel {
         const streets = 0.5 + 0.5 * nz.fbm(X * 2.2 + st.ox, Y * 7 + st.oy, 3.3, 2);
         const patchy = 1 - smooth(0.2, 0.55, rho) * (1 - smooth(0.32, 0.62, streets));
         const c = smooth(1, 0.5, rho) * patchy * a;
-        add(c * 0.5, 800, 2300, 0.92, 0.12);
+        add(c * 0.5, this.lcl, 2300 + (this.lcl - 800), 0.92, 0.12);
         break;
       }
       case 'storm': {
@@ -805,9 +869,9 @@ export class WeatherModel {
         const core = smooth(1, 0.35, rho) * smooth(0.38, 0.62, cells) * a;
         // (Rain: where the cells are, which the renderer and the weather where the camera is work
         // out from conv; this, the share of the area under them.)
-        add(area, 900, 11500 + 3000 * smooth(0.45, 0.8, cells), 0.4, 0.6, Math.max(core, 0.45 * area), area * 0.35);
+        add(area, this.lcl, 11500 + 3000 * smooth(0.45, 0.8, cells), 0.4, 0.6, Math.max(core, 0.45 * area), area * 0.35);
         this.acc.conv = Math.max(this.acc.conv, area);
-        add(smooth(1.6, 0.8, rho) * 0.35 * a, 900, 3200, 0.9, 0.15);
+        add(smooth(1.6, 0.8, rho) * 0.35 * a, this.lcl, 3200 + (this.lcl - 900), 0.9, 0.15);
         break;
       }
       case 'fog': {
@@ -995,7 +1059,8 @@ export class WeatherModel {
    * south pole, column 0 at 180 W.
    *   a: cover, top (0..16 km), base (0..4 km), broken
    *   b: high cloud, precip, fog, cell size
-   *   c: deep convection (thunderstorms), and three spare
+   *   c: deep convection (thunderstorms), middle-layer cover, its height (2..8 km), cirrus
+   *      height (6..14 km)
    */
   bake(t: number, sun: readonly number[] | undefined, W: number, H: number, a: Uint8Array, b: Uint8Array, j0 = 0, j1 = H, c?: Uint8Array): void {
     const states = this.states(t);
@@ -1020,7 +1085,12 @@ export class WeatherModel {
         b[o + 1] = Math.round(clamp01(s.precip) * 255);
         b[o + 2] = Math.round(clamp01(s.fog) * 255);
         b[o + 3] = Math.round(clamp01(s.cell) * 255);
-        if (c) c[o] = Math.round(clamp01(s.conv) * 255);
+        if (c) {
+          c[o] = Math.round(clamp01(s.conv) * 255);
+          c[o + 1] = Math.round(clamp01(s.mid) * 255);
+          c[o + 2] = Math.round(clamp01((s.midAlt - 2000) / 6000) * 255);
+          c[o + 3] = Math.round(clamp01((s.ciAlt - 6000) / 8000) * 255);
+        }
       }
     }
   }

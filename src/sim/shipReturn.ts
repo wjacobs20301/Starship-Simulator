@@ -134,15 +134,22 @@ export function entryAlphaFlown(mach: number, alphaUp: number): number {
  */
 export function entryModel(bank: number, alphaUp: number): EntryModel {
   const base = SHIP_ENTRY_MODEL.liftToDrag!;
-  const up = alphaAero(entryAlpha(30) + alphaUp);
+  const a0 = entryAlpha(30);
+  const up = alphaAero(a0 + alphaUp);
+  const cb = Math.cos(bank);
+  // (Above Mach 3 the schedule holds the entry attitude: one ratio for the whole hypersonic
+  // glide, worked out once; the predictor asks this every step.)
+  const hyper = up.ld * cb;
   return {
     dragArea: SHIP_ENTRY_MODEL.dragArea * up.drag,
-    liftToDrag: (sp) => {
-      const mach = sp / 300;
-      const sched = entryAlpha(mach);
-      const flown = Math.max(sched, entryAlpha(30) + alphaUp);
-      return base(sp) * (alphaAero(flown).ld / alphaAero(sched).ld) * Math.cos(bank);
-    },
+    liftToDrag: alphaUp <= 0
+      ? (sp) => base(sp) * cb
+      : (sp) => {
+          if (sp > 900) return base(sp) * hyper;
+          const sched = entryAlpha(sp / 300);
+          const flown = Math.max(sched, a0 + alphaUp);
+          return base(sp) * (alphaAero(flown).ld / alphaAero(sched).ld) * cb;
+        },
   };
 }
 

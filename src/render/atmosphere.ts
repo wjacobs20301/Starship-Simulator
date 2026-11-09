@@ -200,6 +200,33 @@ const CLOUD_GLSL = /* glsl */ `
     gConvMap = a.y * 16000.0 - a.z * 4000.0 > 4500.0 ? mix(textureLod(tWxC0, uv, 0.0).r, textureLod(tWxC1, uv, 0.0).r, uWxBlend) : 0.0;
   }
 
+  // The weather map's third image at n: deep convection, the middle layer's cover, its height
+  // (2..8 km) and the cirrus's height (6..14 km).
+  vec4 weatherC(vec3 n) {
+    vec3 e = uWorldToEcef * n;
+    vec2 uv = vec2(atan(e.y, e.x) * 0.15915494 + 0.5, asin(clamp(e.z, -1.0, 1.0)) * 0.31830989 + 0.5);
+    return mix(textureLod(tWxC0, uv, 0.0), textureLod(tWxC1, uv, 0.0), uWxBlend);
+  }
+
+  // Where the ray crosses a sheet whose height varies over the planet: first at a nominal height,
+  // then again at the sheet's height there (from the map's third image, channel k: alt = lo +
+  // span * value). Returns the distance (or -1) and the point's map values.
+  float sheetHit(vec3 ro, vec3 rd, float tEnd, float nominal, int k, float lo, float span, out vec4 c) {
+    float r0 = length(ro);
+    float rn = uRc + nominal;
+    vec2 h = hitSphere(ro, rd, rn);
+    float t = r0 > rn ? h.x : h.y;
+    if (t <= 0.0 || t > tEnd) return -1.0;
+    c = weatherC(normalize(ro + rd * t));
+    float alt = lo + span * (k == 2 ? c.b : c.a);
+    float rs = uRc + alt;
+    h = hitSphere(ro, rd, rs);
+    t = r0 > rs ? h.x : h.y;
+    if (t <= 0.0 || t > tEnd) return -1.0;
+    c = weatherC(normalize(ro + rd * t));
+    return t;
+  }
+
   // Mip level for noise of period "scale" (m) seen from distance t: about one texel per pixel.
   float noiseLod(float t, float scale) {
     return max(0.0, log2(max(t, 1.0) * uPixAng * ${NOISE_SIZE}.0 / scale));
@@ -620,14 +647,14 @@ const CLOUD_GLSL = /* glsl */ `
     return exp(-((BR + BO) * l.x + BM * 1.1 * l.y));
   }
 
-  // Thin cirrus where the ray crosses CIRRUS_ALT: (light, opacity) and its distance.
+  // Thin cirrus where the ray crosses its height there (8.5 to 13 km: higher in the tropics):
+  // (light, opacity) and its distance.
   vec4 cirrus(vec3 ro, vec3 rd, float tEnd, float mu, out float tc) {
-    float rc = uRc + ${CIRRUS_ALT}.0;
-    vec2 h = hitSphere(ro, rd, rc);
-    tc = length(ro) > rc ? h.x : h.y;
-    if (tc <= 0.0 || tc > tEnd) return vec4(0.0);
+    vec4 cw;
+    tc = sheetHit(ro, rd, tEnd, ${CIRRUS_ALT}.0, 3, 6000.0, 8000.0, cw);
+    if (tc <= 0.0) return vec4(0.0);
     vec3 p = ro + rd * tc;
-    vec3 n = p / rc;
+    vec3 n = normalize(p);
     vec4 wa;
     vec4 wb;
     weatherMap(n, wa, wb);
@@ -651,6 +678,39 @@ const CLOUD_GLSL = /* glsl */ `
     }
     if (a < 0.005) return vec4(0.0);
     vec3 col = uCloudSun * (sunAt(p) * (0.7 + 1.2 * cloudPhase(mu, 0.7)) + vec3(0.2, 0.26, 0.36) * smoothstep(-0.15, 0.1, dot(n, uSun)));
+    return vec4(col * a, a);
+  }
+
+  // The middle layer (altocumulus, altostratus) where the ray crosses its height there (2.5 to
+  // 6 km): thin, it's rows of small rounded cells; dense, a smooth grey sheet. (light, opacity)
+  // and its distance.
+  vec4 midDeck(vec3 ro, vec3 rd, float tEnd, float mu, out float tm) {
+    vec4 cw;
+    tm = sheetHit(ro, rd, tEnd, 4000.0, 2, 2000.0, 6000.0, cw);
+    if (tm <= 0.0 || cw.g < 0.02) return vec4(0.0);
+    vec3 p = ro + rd * tm;
+    vec3 n = normalize(p);
+    float cov = cw.g;
+    float cosv = max(abs(dot(rd, n)), 0.08);
+    // Patches of it (tens of km), more of the sky as the cover grows.
+    float big = textureLod(tNoise, p / 45000.0 + uDrift * 1.5, noiseLod(tm, 45000.0)).g;
+    float patchy = smoothstep(0.62 - 0.3 * cov, 0.72 - 0.25 * cov, big + 0.2 * cov);
+    // Altocumulus cells (~1 km), along the wind.
+    vec3 q = vec3(p.x / 1600.0, p.y / 1100.0, p.z / 1300.0) + uDrift * 6.0;
+    float cells = textureLod(tNoise, q, noiseLod(tm, 1100.0)).g;
+    float ac = smoothstep(0.47, 0.6, cells + 0.08 * cov);
+    float sheet = smoothstep(0.5, 0.9, cov);
+    float a = patchy * mix(0.7 * ac, 0.82, sheet);
+    // From far off: the average, as a sheet of the same opacity.
+    float farC = smoothstep(1500.0, 3500.0, tm * uPixAng / cosv);
+    if (farC > 0.0) a = mix(a, patchy * mix(0.3, 0.8, sheet), farC);
+    // (Seen edge-on, a thin sheet still hides what's beyond it.)
+    a = 1.0 - pow(1.0 - clamp(a, 0.0, 0.97), 0.6 + 0.4 / cosv);
+    if (a < 0.005) return vec4(0.0);
+    float day = smoothstep(-0.15, 0.1, dot(n, uSun));
+    // (Seen from below, its sunlit side is above: greyer.)
+    float below = length(ro) < uRc + 2000.0 + 6000.0 * cw.b ? mix(0.75, 0.4, sheet) : 1.0;
+    vec3 col = uCloudSun * (sunAt(p) * (0.55 + 1.1 * cloudPhase(mu, 0.55)) * below + vec3(0.2, 0.26, 0.36) * 0.8 * day);
     return vec4(col * a, a);
   }
 
@@ -1168,11 +1228,27 @@ const CLOUD_GLSL = /* glsl */ `
       else low = vec4(low.rgb + low.a * rn.rgb, low.a * rn.a);
       tLow = min(tLow, tR);
     }
-    // Put the cirrus in front of or behind the lower clouds (it's above them).
-    vec4 outc;
-    if (ci.a > 0.0 && tc < tLow) outc = vec4(ci.rgb + (1.0 - ci.a) * low.rgb, (1.0 - ci.a) * low.a);
-    else outc = vec4(low.rgb + low.a * ci.rgb, low.a * (1.0 - ci.a));
-    tFirst = tLow < 1e29 ? tLow : (ci.a > 0.02 ? tc : 1e30);
+    // The low clouds, the middle layer and the cirrus, nearest first along the ray (each as
+    // light added and light let through).
+    float tm;
+    vec4 md = midDeck(ro, rd, tEnd, mu, tm);
+    vec4 L0 = low;
+    vec4 L1 = vec4(md.rgb, 1.0 - md.a);
+    vec4 L2 = vec4(ci.rgb, 1.0 - ci.a);
+    float d0 = tLow;
+    float d1 = md.a > 0.0 ? tm : 1e31;
+    float d2 = ci.a > 0.0 ? tc : 1e31;
+    // (Three: sort by swapping.)
+    vec4 tmpL;
+    float tmpD;
+    if (d1 < d0) { tmpL = L0; L0 = L1; L1 = tmpL; tmpD = d0; d0 = d1; d1 = tmpD; }
+    if (d2 < d1) { tmpL = L1; L1 = L2; L2 = tmpL; tmpD = d1; d1 = d2; d2 = tmpD; }
+    if (d1 < d0) { tmpL = L0; L0 = L1; L1 = tmpL; tmpD = d0; d0 = d1; d1 = tmpD; }
+    vec4 outc = vec4(L0.rgb + L0.a * (L1.rgb + L1.a * L2.rgb), L0.a * L1.a * L2.a);
+    // (The clouds' distance: the low clouds or the middle layer, whichever's nearer; the cirrus
+    // only where there's neither.)
+    tFirst = min(tLow < 1e29 ? tLow : 1e30, md.a > 0.02 ? tm : 1e30);
+    if (tFirst > 1e29 && ci.a > 0.02) tFirst = tc;
     return outc;
   }
 `;

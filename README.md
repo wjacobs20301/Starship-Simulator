@@ -67,7 +67,7 @@ The controls are fly-by-wire, in the style of Kerbal Space Program. Pitch, yaw a
   - *The rest of the world:* NASA's Blue Marble.
 - **Starbase:** both pads are built at their real positions. The Mega Bays, Gigabay, tank farm and the rest of the site are extruded from OpenStreetMap, along with South Padre Island and Port Isabel across the water.
 - **Sky:** a physically based atmosphere, with single Rayleigh and Mie scattering ray-marched per pixel. It gives blue skies, red sunsets, haze over distant land and the thin blue limb seen from orbit.
-- **Weather:** planet-wide volumetric clouds that are new each flight, with rain under heavy cloud.
+- **Weather:** planet-wide volumetric clouds that are new each flight, with rain under heavy cloud. Cumulus form at the air's condensation level, from its dew-point spread (~125 m per deg C): low on muggy days and over the sea, 1.5 to 3 km on dry days and over dry land, so the whole cloud field sits higher or lower from day to day. Above them there can be a middle layer (altocumulus cells, or an altostratus sheet ahead of warm fronts) at 2.5 to 6 km, and cirrus at 8.5 to 13 km (higher in the tropics).
 - **Night sky:** the real bright stars at their catalogue positions, the Milky Way, and the Moon at true scale in its real phase.
 - **At night:** floodlights on the towers, lit buildings and red beacons.
 
