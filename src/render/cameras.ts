@@ -233,8 +233,9 @@ export class CameraRig {
         return pos;
       }
       case 'bay': {
-        // Inside the payload bay, as on the webcasts: behind the dispenser's stack and above it,
-        // looking down over the next satellite and out of the slot as each one slides away.
+        // Inside the payload bay, as on the webcasts: up in a corner between the dispenser's stack
+        // and the door, looking down along the slot as each satellite slides out of it, the Earth
+        // beyond. (The bay's floor, the tank dome, is just below the slot.)
         if (!target.door) {
           pos = [c[0] + this.up.x * target.size, c[1] + this.up.y * target.size, c[2] + this.up.z * target.size];
           break;
@@ -243,9 +244,9 @@ export class CameraRig {
         const out = new THREE.Vector3(...target.door.out);
         const side = new THREE.Vector3(...target.door.side);
         const slot = new THREE.Vector3(...target.door.at);
-        const at = slot.clone().addScaledVector(out, -3.2).addScaledVector(axis, 1.6).addScaledVector(side, 0.3);
-        const look = slot.clone().addScaledVector(out, 4).addScaledVector(axis, -0.9);
-        return this.aim(camera, [at.x, at.y, at.z], look, axis, 72);
+        const at = slot.clone().addScaledVector(out, -1.7).addScaledVector(axis, 1.5).addScaledVector(side, 3.0);
+        const look = slot.clone().addScaledVector(out, 1.5).addScaledVector(axis, -0.4).addScaledVector(side, -1.2);
+        return this.aim(camera, [at.x, at.y, at.z], look, axis, 76);
       }
       case 'satellite': {
         // On a satellite, a few metres beyond and above it, looking back at the ship (a long lens that keeps

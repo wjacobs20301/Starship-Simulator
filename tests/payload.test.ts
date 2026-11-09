@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { STARLINK_V3 } from '../src/sim/config/starshipV3';
+import { STARLINK_V3, STARSHIP_V3 } from '../src/sim/config/starshipV3';
 import { orbitApsides } from '../src/sim/guidance';
 import { norm, qrotInv, sub } from '../src/sim/math';
 import { Simulation } from '../src/sim/simulation';
@@ -83,7 +83,7 @@ describe('Starlink deployment (Flight 15)', () => {
 });
 
 describe('Starlink spacing and the deploy key', () => {
-  it('the satellites string out: none closes on another or comes back to the ship', { timeout: 300_000 }, () => {
+  it('the satellites string out: none closes on another or comes back near the ship', { timeout: 300_000 }, () => {
     const sim = flight15();
     const ship = sim.find('ship')!;
     const bay = sim.bay!;
@@ -101,16 +101,23 @@ describe('Starlink spacing and the deploy key', () => {
       for (let p = 0; p < s.length; p++) {
         // (Once clear of the slot: neighbours leave it ~35 m apart.)
         if (sim.t - s[p].released < 60) continue;
-        toShip = Math.min(toShip, norm(sub(s[p].r, ship.r)));
+        // (The gap to the hull: the ship as a cylinder, base to nose, round its axis.)
+        const rel = qrotInv(ship.q, sub(s[p].r, ship.r));
+        const xcg = massProps(ship.stages, ship.stages.map((st) => st.prop)).xcg;
+        const lo = STARSHIP_V3.xBase - xcg;
+        const hi = lo + STARSHIP_V3.length;
+        const along = Math.max(0, lo - rel[0], rel[0] - hi);
+        const out = Math.max(0, Math.hypot(rel[1], rel[2]) - STARSHIP_V3.radius);
+        toShip = Math.min(toShip, Math.hypot(along, out));
         for (let q = p + 1; q < s.length; q++) if (sim.t - s[q].released >= 60) pair = Math.min(pair, norm(sub(s[p].r, s[q].r)));
       }
     }
     expect(bay.sats).toHaveLength(26);
     expect(pair).toBeGreaterThan(25);
-    expect(toShip).toBeGreaterThan(30);
+    expect(toShip).toBeGreaterThan(25);
   });
 
-  it('each satellite leaves straight through the slot: it fills it with only centimetres to spare', { timeout: 300_000 }, () => {
+  it('each satellite leaves straight through the slot, clear of its edges', { timeout: 300_000 }, () => {
     const sim = flight15();
     const ship = sim.find('ship')!;
     const bay = sim.bay!;
@@ -127,7 +134,7 @@ describe('Starlink spacing and the deploy key', () => {
         if (!start.has(s.n)) start.set(s.n, rel);
         const st = start.get(s.n)!;
         // Until its inner edge is out past the hull.
-        if (st[1] - rel[1] < STARLINK_V3.width + 0.6) {
+        if (st[1] - rel[1] < STARSHIP_V3.radius + STARLINK_V3.width / 2 + 0.3) {
           along = Math.max(along, Math.abs(rel[0] - st[0]));
           across = Math.max(across, Math.abs(rel[2] - st[2]));
           seen++;
@@ -139,9 +146,12 @@ describe('Starlink spacing and the deploy key', () => {
     expect(seen).toBeGreaterThan(1000);
     expect(along).toBeLessThan(0.02);
     expect(across).toBeLessThan(0.02);
-    // (The slot runs 34.65-35.52 m up the ship; a stowed satellite spans -0.38/+0.43 m about its bus.)
-    expect(STARLINK_V3.doorX - 0.38).toBeGreaterThan(34.65);
-    expect(STARLINK_V3.doorX + 0.43).toBeLessThan(35.52);
+    // (The slot runs 34.65-35.52 m up the ship; a stowed satellite spans -0.11/+0.16 m about its bus.)
+    expect(STARLINK_V3.doorX - 0.11).toBeGreaterThan(34.65);
+    expect(STARLINK_V3.doorX + 0.16).toBeLessThan(35.52);
+    // (Its corners, centred on the ship's axis, clear the hull; the stack's top too, up in the nose.)
+    expect(Math.hypot(STARLINK_V3.length / 2, STARLINK_V3.width / 2)).toBeLessThan(STARSHIP_V3.radius - 0.2);
+    expect(STARLINK_V3.doorX + STARLINK_V3.count * STARLINK_V3.pitch).toBeLessThan(43.5);
   });
 
   it('B deploys when asked (Free Roam): not before separation, held and resumed, burned up if suborbital', { timeout: 120_000 }, () => {

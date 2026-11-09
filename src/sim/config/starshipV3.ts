@@ -131,22 +131,28 @@ export const STARLINK_V3 = {
   mass: 1900,
   /** The bus's width (across: the way it leaves the slot), m. */
   width: 3.5,
+  /** Its length (along the slot: the bus with its thruster), m. */
+  length: 7.4,
   /** Satellites per flight (Flight 14 and 15). */
   count: 26,
   /** Deployment: starts this long after liftoff (Flight 14: T+34 min), one every interval
    *  (26 in ~30 min), pushed straight out at this speed, m/s. */
   deployAt: 34 * 60,
   interval: 68,
-  pushSpeed: 0.6,
+  pushSpeed: 0.7,
   /**
    * The PEZ door: where a satellite's middle (its bus) passes through the slot, above the ship's
    * base (m: the slot runs 34.65-35.52 m, and a stowed satellite, wings folded on its back, spans
-   * -0.38/+0.43 m about its bus), and how long the door takes to open / close, s.
+   * -0.11/+0.16 m about its bus), and how long the door takes to open / close, s.
    */
   doorX: 35.06,
-  /** A stowed satellite's thickness, and its place in the dispenser's stack (pitch), m. */
-  thickness: 0.81,
-  pitch: 0.86,
+  /**
+   * A stowed satellite's thickness (flat-packed: V2 Minis stack ~0.27 m each on a Falcon 9), and
+   * its place in the dispenser's stack (pitch), m: 26 make a stack ~7.5 m tall, from the slot up
+   * into the nose.
+   */
+  thickness: 0.27,
+  pitch: 0.29,
   doorTime: 12,
 };
 

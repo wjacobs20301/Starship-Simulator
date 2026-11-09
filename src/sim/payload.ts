@@ -38,8 +38,8 @@ const BURN_UP_ALT = 100e3;
  */
 const DETUMBLE_AT = 90;
 const DETUMBLE_TAU = 45;
-/** Its tip-off tumble starts once it's clear of the slot (it slides out on the dispenser's rails until then), s after release. */
-const CLEAR_SLOT = (STARLINK_V3.width + 0.6) / STARLINK_V3.pushSpeed;
+/** Its tip-off tumble starts once it's clear of the hull (it slides out on the dispenser's rails and through the slot until then), s after release. */
+const CLEAR_SLOT = (STARSHIP_V3.radius + STARLINK_V3.width / 2 + 0.3) / STARLINK_V3.pushSpeed;
 /** The ship is at the deployment attitude when within this (rad) and turning slower than this (rad/s). */
 const ALIGNED = 3 * (Math.PI / 180);
 const SETTLED = 0.003;
@@ -51,14 +51,16 @@ const SETTLED = 0.003;
  * the way round, so the door sweeps through straight down to down-and-ahead: each satellite
  * leaves on its own path relative to the ship (the first ones drifting ahead, the last behind),
  * not all on one looping path that would bring them back through each other. (Chosen with the
- * Clohessy-Wiltshire relative motion: this keeps every pair tens of metres apart for hours.)
+ * Clohessy-Wiltshire relative motion, then checked in the full sim, drag and the ship's recoil
+ * included: every pair stays ~45 m apart or more, and none comes back within ~35 m of the hull.
+ * Ten degrees less and the one pushed straight down comes back to the hull an orbit later.)
  */
 export function deployAttitude(ship: Vehicle): { nose: V3; bodyZ: V3; door: V3 } {
   const R = norm3(ship.r);
   const N = norm3(cross(ship.r, ship.v));
   const T = cross(N, R);
-  const door = add(scale(R, -0.5), scale(T, -0.866));
-  const nose = add(scale(R, 0.866), scale(T, -0.5));
+  const door = add(scale(R, -0.342), scale(T, -0.94));
+  const nose = add(scale(R, 0.94), scale(T, -0.342));
   // Body axes: x the nose, y away from the door, z = x cross y.
   const bodyZ = cross(nose, scale(door, -1));
   return { nose, bodyZ, door };
@@ -242,13 +244,13 @@ export class PayloadBay {
     const st = ship.stages[0];
     const xcg = shipCg(ship);
     // The door: on the ship's leeward side (body -y), its middle STARLINK_V3.doorX above the base.
-    // (Straight out of the slot, which it fills with only centimetres to spare, each push a
-    // percent or two different: the dispenser's spring.)
+    // (Straight out through the slot, each push a percent or two different: the dispenser's
+    // spring.)
     const speed = STARLINK_V3.pushSpeed * (1 + 0.04 * this.rnd());
     const out: V3 = qrot(ship.q, [0, -1, 0]);
-    // (Its middle starts just inside the hull, its outer edge in the slot: it slides out of it
-    // over the next ten seconds or so.)
-    const rDoor: V3 = qrot(ship.q, [STARSHIP_V3.xBase + STARLINK_V3.doorX - xcg, -(STARSHIP_V3.radius - STARLINK_V3.width / 2 + 0.2), 0]);
+    // (It starts from the dispenser's stack, centred on the ship's axis level with the slot, and
+    // slides out through it over the next ten seconds or so.)
+    const rDoor: V3 = qrot(ship.q, [STARSHIP_V3.xBase + STARLINK_V3.doorX - xcg, 0, 0]);
     const wEci = qrot(ship.q, ship.w);
     const vSat = add(add(ship.v, cross(wEci, rDoor)), scale(out, speed));
     this.aboard--;

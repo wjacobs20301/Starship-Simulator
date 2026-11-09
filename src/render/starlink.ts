@@ -17,9 +17,17 @@ import type { Snapshot } from '../sim/simulation';
 
 /** The model's sizes (art/blender/starlink_v3.py), m. */
 const BUS_W = 3.5;
-const BUS_T = 0.3;
 const PANEL_W = 2.02;
-const PANEL_T = 0.025;
+/**
+ * Flattened from the model, as the V3s are flat-packed (V2 Minis stack ~0.27 m each on a Falcon
+ * 9): the bus to this fraction of its thickness, about its middle, and each solar panel to this
+ * one. Stowed, wings folded on its back, it's STARLINK_V3.thickness thick.
+ */
+const BUS_FLAT = 0.3;
+const PANEL_FLAT = 0.3;
+const BUS_T = 0.3 * BUS_FLAT;
+const PANEL_T = 0.025 * PANEL_FLAT;
+const FLAT = new THREE.Matrix4().makeScale(1, BUS_FLAT, 1);
 const PANELS = 10;
 const YOKE = 1.1;
 
@@ -38,17 +46,12 @@ const wingStart = (n: number) => WINGS_FROM + WINGS_SPREAD * (((Math.sin(n * 12.
 /** Satellites farther than this from the camera aren't drawn, m. */
 const DRAW_RANGE = 60e3;
 /**
- * The dispenser's stack in the bay (ship body axes): each satellite's middle this far in from the
- * hull (m: its outer edge just inside the skin), the one at the slot sliding out to where the
- * sim releases it over the last SLIDE seconds; once the last one is clear of the slot (RESTACK_AFTER)
- * the stack moves up a place, over RESTACK seconds.
+ * The dispenser's stack in the bay: centred on the ship's axis (a satellite's corners then clear
+ * the hull), the next one level with the slot and the rest above it. Once the last one is out of
+ * the hull (RESTACK_AFTER, s) the stack moves down a place, over RESTACK seconds.
  */
-const STOWED_IN = STARSHIP_V3.radius - STARLINK_V3.width / 2 - 0.3;
-const RELEASED_IN = STARSHIP_V3.radius - STARLINK_V3.width / 2 + 0.2;
-const SLIDE = 1.2;
-const RESTACK = 10;
-/** The stack waits this long after a release (the last one clear of the slot: s) before moving up. */
-const RESTACK_AFTER = (STARLINK_V3.width + 0.8) / STARLINK_V3.pushSpeed + 2;
+const RESTACK = 8;
+const RESTACK_AFTER = (STARSHIP_V3.radius + STARLINK_V3.width / 2 + 0.3) / STARLINK_V3.pushSpeed + 1;
 /** Ship body axes -> its mesh's (+Y up the ship, +X body y, -Z body z). */
 const BODY_TO_MESH = new THREE.Matrix4().set(0, 1, 0, 0, 1, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1);
 
@@ -123,14 +126,14 @@ export class StarlinkFleet {
     if (payload && ship && payload.aboard > 0) {
       ship.updateMatrixWorld(true);
       const shift = payload.since < RESTACK_AFTER + RESTACK ? 1 - smooth(RESTACK_AFTER, RESTACK_AFTER + RESTACK, payload.since) : 0;
-      const slide = payload.nextIn !== null ? smooth(SLIDE, 0, payload.nextIn) : 0;
       for (let k = 0; k < payload.aboard && n < this.max; k++) {
-        const x = STARLINK_V3.doorX - (k + shift) * STARLINK_V3.pitch;
-        const inward = k === 0 ? STOWED_IN + (RELEASED_IN - STOWED_IN) * slide : STOWED_IN;
+        // (Centred on the ship's axis, where its corners clear the hull; the next one level with
+        // the slot, the rest above it, moving down a place once each one is out.)
+        const x = STARLINK_V3.doorX + (k + shift) * STARLINK_V3.pitch;
         // (Mesh axes: up the ship +Y, the door on -X.)
-        this.m.makeTranslation(-inward, BOOSTER_LENGTH + x, 0);
+        this.m.makeTranslation(0, BOOSTER_LENGTH + x, 0);
         this.sat.multiplyMatrices(ship.matrixWorld, this.m).multiply(BODY_TO_MESH).multiply(StarlinkFleet.MODEL_TO_BODY);
-        for (const p of this.bus) p.mesh.setMatrixAt(n, this.part.multiplyMatrices(this.sat, p.local));
+        for (const p of this.bus) p.mesh.setMatrixAt(n, this.part.multiplyMatrices(this.sat, FLAT).multiply(p.local));
         n++;
         for (const side of [1, -1]) {
           np = this.wing(side, 0, Math.PI / 2, np);
@@ -146,7 +149,7 @@ export class StarlinkFleet {
       // The satellite's frame in the world (camera-relative).
       this.rot.copy(StarlinkFleet.ENU_TO_WORLD).multiply(m3(s.rot, this.m)).multiply(StarlinkFleet.MODEL_TO_BODY);
       this.sat.copy(this.rot).setPosition(dx, dy, dz);
-      for (const p of this.bus) p.mesh.setMatrixAt(n, this.part.multiplyMatrices(this.sat, p.local));
+      for (const p of this.bus) p.mesh.setMatrixAt(n, this.part.multiplyMatrices(this.sat, FLAT).multiply(p.local));
       n++;
       // Its wings, as far out as they've got (the -side one first: its stack rides on top).
       const t0 = wingStart(s.n);
@@ -195,7 +198,8 @@ export class StarlinkFleet {
     // Blender -> model axes for each.
     const X = B(x.x, x.y, x.z, new THREE.Vector3());
     const Y = B(along.x, along.y, along.z, new THREE.Vector3()).multiplyScalar(stretch);
-    const Z = B(z.x, z.y, z.z, new THREE.Vector3());
+    // (A panel's thickness is its template's model Y, along Z here: flattened.)
+    const Z = B(z.x, z.y, z.z, new THREE.Vector3()).multiplyScalar(parts === this.panel ? PANEL_FLAT : 1);
     // Template (Blender X, Y, Z) is model (X, Z, -Y): its columns in model axes.
     const p = B(at.x, at.y, at.z, new THREE.Vector3());
     this.m.makeBasis(X, Z, Y.clone().negate()).setPosition(p);
@@ -211,7 +215,7 @@ export class StarlinkFleet {
     for (let k = 0; k < PANELS; k++) {
       d.copy(u).multiplyScalar(Math.cos(g)).addScaledVector(w, (k % 2 === 0 ? 1 : -1) * Math.sin(g));
       this.place(this.panel, index++, side, d, at);
-      at.addScaledVector(d, PANEL_W).addScaledVector(u, (PANEL_T + 0.003) * Math.sin(g));
+      at.addScaledVector(d, PANEL_W).addScaledVector(u, (PANEL_T + 0.002) * Math.sin(g));
     }
     return index;
   }

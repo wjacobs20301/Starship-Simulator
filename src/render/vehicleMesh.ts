@@ -335,17 +335,27 @@ const BAY_LAMP = 25;
 function payloadBay(model: THREE.Object3D, slot: THREE.Box3, half: number): THREE.PointLight {
   const group = new THREE.Group();
   group.name = 'PayloadBayInside';
-  const R = 4.32;
-  const top = slot.max.y + 2.4;
-  const bottom = STARLINK_V3.doorX - STARLINK_V3.count * STARLINK_V3.pitch - 0.8;
-  const wall = new THREE.MeshStandardMaterial({ color: 0x6b6e74, roughness: 0.7, metalness: 0.2, side: THREE.DoubleSide });
+  // From just below the slot (the model's tank dome is the floor there) to just over the stack's
+  // top, up in the nose: the wall just inside the skin, following the nose's taper.
+  const bottom = slot.min.y - 0.6;
+  const top = STARLINK_V3.doorX + STARLINK_V3.count * STARLINK_V3.pitch + 0.5;
+  const radius = (y: number) => Math.min(4.32, hullRadiusAt(y) - 0.12);
+  // (Unlit: the sun's light doesn't stop at the hull (no shadow reaches in here), so a lit wall
+  // would glare. A dim grey, lighter near the slot where the daylight spills in.)
+  const wall = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
+  const shade = (x: number, y: number, z: number) => {
+    const d = Math.hypot(x + 4.5, (y - STARLINK_V3.doorX) * 1.6, z * 0.35);
+    return 0.05 + 0.13 * Math.exp(-d / 2.2);
+  };
   // The wall: a grid round the hull and up it, without the cells over the slot.
-  const rows = [bottom, slot.min.y, slot.max.y, top];
+  const rows = [bottom, slot.min.y, slot.max.y];
+  for (let y = Math.ceil(slot.max.y + 0.01); y < top; y += 0.5) rows.push(y);
+  rows.push(top);
   const n = 72;
   const pos: number[] = [];
   const idx: number[] = [];
   const angle = (i: number) => -Math.PI + (2 * Math.PI * i) / n;
-  for (const y of rows) for (let i = 0; i <= n; i++) pos.push(-R * Math.cos(angle(i)), y, R * Math.sin(angle(i)));
+  for (const y of rows) for (let i = 0; i <= n; i++) pos.push(-radius(y) * Math.cos(angle(i)), y, radius(y) * Math.sin(angle(i)));
   for (let r = 0; r < rows.length - 1; r++) {
     for (let i = 0; i < n; i++) {
       // (The door side, -X, is at angle 0.)
@@ -355,30 +365,45 @@ function payloadBay(model: THREE.Object3D, slot: THREE.Box3, half: number): THRE
     }
   }
   const g = new THREE.BufferGeometry();
+  const shadeOf = (p: number[]) => {
+    const c: number[] = [];
+    for (let i = 0; i < p.length; i += 3) {
+      const v = shade(p[i], p[i + 1], p[i + 2]);
+      c.push(v, v, v * 1.06);
+    }
+    return new THREE.Float32BufferAttribute(c, 3);
+  };
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('color', shadeOf(pos));
   g.setIndex(idx);
-  g.computeVertexNormals();
   group.add(new THREE.Mesh(g, wall));
   for (const y of [bottom, top]) {
-    const cap = new THREE.Mesh(new THREE.CircleGeometry(R, n), wall);
-    cap.rotation.x = -Math.PI / 2;
-    cap.position.y = y;
-    group.add(cap);
+    const cg = new THREE.CircleGeometry(radius(y), n);
+    cg.rotateX(-Math.PI / 2);
+    cg.translate(0, y, 0);
+    cg.setAttribute('color', shadeOf(Array.from(cg.attributes.position.array)));
+    group.add(new THREE.Mesh(cg, wall));
   }
-  // The dispenser's rails, either end of the stack.
+  // The dispenser's rails, at either end of the stack (on the ship's axis, across the slot).
   const rail = new THREE.MeshStandardMaterial({ color: 0x8a8d92, roughness: 0.45, metalness: 0.8 });
-  const len = slot.max.y - bottom;
-  const inward = STARSHIP_V3.radius - STARLINK_V3.width / 2 - 0.3;
+  const len = top - slot.min.y;
   for (const z of [-1, 1]) {
-    const r = new THREE.Mesh(new THREE.BoxGeometry(0.16, len, 0.16), rail);
-    r.position.set(-inward, bottom + len / 2, z * 3.86);
+    const r = new THREE.Mesh(new THREE.BoxGeometry(0.3, len, 0.14), rail);
+    r.position.set(0, slot.min.y + len / 2, z * (STARLINK_V3.length / 2 + 0.12));
     group.add(r);
   }
   const lamp = new THREE.PointLight(0xfff2e0, 0, 30, 2);
-  lamp.position.set(-0.3, slot.max.y + 2.1, 0);
+  lamp.position.set(2.9, slot.max.y + 1.5, 0);
   group.add(lamp);
   model.add(group);
   return lamp;
+}
+
+/** The ship's hull radius at a height above its base (m): the barrel, then the nose's taper. */
+function hullRadiusAt(y: number): number {
+  if (y <= 38) return 4.5;
+  const t = Math.min(1, (y - 38) / (52.1 - 38));
+  return Math.max(0.6, 4.5 * Math.pow(1 - t * t, 0.62));
 }
 
 /** Engine nodes in simulation order, each with its own glowing nozzle-interior material. */
