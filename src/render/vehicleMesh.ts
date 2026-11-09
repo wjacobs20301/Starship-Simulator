@@ -3,7 +3,7 @@
 // booster base, matching the physics body frame. Engine nodes are driven by the simulated gimbal.
 
 import * as THREE from 'three';
-import { BOOSTER_LENGTH, STARSHIP_V3, SUPER_HEAVY_V3 } from '../sim/config/starshipV3';
+import { BOOSTER_LENGTH, STARLINK_V3, STARSHIP_V3, SUPER_HEAVY_V3 } from '../sim/config/starshipV3';
 import type { StageId } from '../sim/vehicle';
 import { toFxLayer } from './atmosphere';
 import { Frost } from './fx/frost';
@@ -59,7 +59,10 @@ export class VehicleMesh {
   private surfaces: Surface[] = [];
   private qInv = new THREE.Quaternion();
   /** The payload bay's PEZ door (the ship model's "Cargo Door"), where it sits closed, and the dark bay behind it. */
-  private door: { node: THREE.Object3D; closed: THREE.Vector3; bay: THREE.Mesh } | null = null;
+  private door: { node: THREE.Object3D; closed: THREE.Vector3; bay: THREE.Mesh; lamp: THREE.PointLight } | null = null;
+  /** The payload slot cut through the hull while the door is open (cutSlot), and the ship model it's in. */
+  private slot = { uSlotFromWorld: { value: new THREE.Matrix4() }, uSlotOpen: { value: 0 } };
+  private slotModel: THREE.Object3D | null = null;
   /** Gaps in the heat shield where tiles are missing (ship only). */
   private gaps: TileGaps | null = null;
   /** Meshes with simpler versions for when the camera is far off (models.ts). */
@@ -93,6 +96,10 @@ export class VehicleMesh {
       }
       this.frostStages.set(id, this.frost.addStage(model, def));
       this.heatUp(model);
+      if (id === 'ship' && this.door) {
+        this.slotModel = model;
+        cutSlot(model, this.slot);
+      }
       // The cluster plume starts at the stage's nozzle exit plane (booster base / RVac exits).
       const plume = new Plume(def, id === 'booster' ? 0 : BOOSTER_LENGTH);
       this.plumes.set(id, plume);
@@ -137,14 +144,22 @@ export class VehicleMesh {
    * The payload door: 0 closed .. 1 open. It opens the way the PEZ door does on the flight
    * videos: in, then away along the hull's inside, leaving the slot open onto the dark bay.
    */
-  setPayloadDoor(open: number): void {
+  setPayloadDoor(open: number, inside = false): void {
     const d = this.door;
     if (!d) return;
     const a = THREE.MathUtils.clamp(open / 0.35, 0, 1);
     const b = THREE.MathUtils.clamp((open - 0.35) / 0.65, 0, 1);
     // (Model axes: +X toward the axis from the door, +Y up the ship.)
     d.node.position.copy(d.closed).add(new THREE.Vector3(0.3 * a + 0.15 * b, 1.3 * b * b * (3 - 2 * b), 0));
-    d.bay.visible = open > 0.002;
+    // The dark strip over the slot is for looking at it from outside; from the bay camera it would
+    // block the view out.
+    d.bay.visible = open > 0.002 && !inside;
+    // (And the door, slid up inside the bay, would fill the bay camera's view: it isn't drawn there.)
+    d.node.visible = !inside;
+    // (The bay's lamps: on while the door is open. Never removed, only dimmed: taking a light out
+    // of the scene would rebuild every shader.)
+    d.lamp.intensity = open > 0.002 ? BAY_LAMP : 0;
+    this.slot.uSlotOpen.value = open > 0.02 ? 1 : 0;
   }
 
   /** The heat shield's gaps (missing tiles) and how hot / charred they are. */
@@ -154,6 +169,10 @@ export class VehicleMesh {
 
   /** Call once the root is placed for this frame (camera-relative, so its distance is the camera's). */
   afterPlace(): void {
+    if (this.slotModel && this.slot.uSlotOpen.value > 0) {
+      this.slotModel.updateMatrixWorld(true);
+      this.slot.uSlotFromWorld.value.copy(this.slotModel.matrixWorld).invert();
+    }
     // Level of detail from the camera's distance to the vehicle's middle.
     const d = Math.max(0, this.root.position.length() - 40);
     for (const m of this.detailed) {
@@ -229,7 +248,7 @@ export class VehicleMesh {
  * The ship's PEZ door, and the bay behind its slot: a dark box just inside the hull, shown while
  * the door is open (the hull has a hole there, under the door).
  */
-function payloadDoor(model: THREE.Object3D): { node: THREE.Object3D; closed: THREE.Vector3; bay: THREE.Mesh } | null {
+function payloadDoor(model: THREE.Object3D): { node: THREE.Object3D; closed: THREE.Vector3; bay: THREE.Mesh; lamp: THREE.PointLight } | null {
   // (three.js loads "Cargo Door" as "Cargo_Door".)
   const node = model.getObjectByName('Cargo_Door') ?? model.getObjectByName('Cargo Door');
   if (!node) return null;
@@ -258,7 +277,108 @@ function payloadDoor(model: THREE.Object3D): { node: THREE.Object3D; closed: THR
   bay.visible = false;
   bay.name = 'PayloadBay';
   model.add(bay);
-  return { node, closed: node.position.clone(), bay };
+  const lamp = payloadBay(model, local, half);
+  return { node, closed: node.position.clone(), bay, lamp };
+}
+
+/** The payload slot in the ship model's axes: its height range (m), half-angle round the hull from -X, and the skin's radius range. */
+const SLOT = { y0: 34.66, y1: 35.51, half: Math.asin(3.76 / 4.5), r0: 4.15, r1: 4.85 };
+
+/**
+ * Cut the payload slot through the ship's hull while the door is open (the model's skin has no
+ * hole under the door): the hull's pixels in the slot are discarded, so from the bay the slot
+ * opens onto space. Only a thin shell at the hull's radius is cut, so nothing else in the model
+ * (the door itself, the flaps) is touched.
+ */
+function cutSlot(model: THREE.Object3D, u: { uSlotFromWorld: { value: THREE.Matrix4 }; uSlotOpen: { value: number } }): void {
+  const done = new Set<THREE.Material>();
+  model.traverse((o) => {
+    if (!(o instanceof THREE.Mesh) || o.name === 'PayloadBay' || o.parent?.name === 'PayloadBayInside') return;
+    for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
+      if (done.has(m) || !(m as THREE.MeshStandardMaterial).isMeshStandardMaterial) continue;
+      done.add(m);
+      const prev = Object.prototype.hasOwnProperty.call(m, 'onBeforeCompile') ? m.onBeforeCompile.bind(m) : null;
+      const prevKey = prev ? m.customProgramCacheKey() : '';
+      m.onBeforeCompile = (shader: THREE.WebGLProgramParametersWithUniforms, renderer: THREE.WebGLRenderer) => {
+        prev?.(shader, renderer);
+        Object.assign(shader.uniforms, u);
+        shader.vertexShader = shader.vertexShader
+          .replace('#include <common>', '#include <common>\nvarying vec3 vSlotWorld;')
+          .replace('#include <begin_vertex>', '#include <begin_vertex>\nvSlotWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+        shader.fragmentShader = shader.fragmentShader
+          .replace('#include <common>', '#include <common>\nuniform mat4 uSlotFromWorld;\nuniform float uSlotOpen;\nvarying vec3 vSlotWorld;')
+          .replace(
+            '#include <clipping_planes_fragment>',
+            `#include <clipping_planes_fragment>
+if (uSlotOpen > 0.5) {
+  vec3 sp = (uSlotFromWorld * vec4(vSlotWorld, 1.0)).xyz;
+  float sr = length(sp.xz);
+  if (sp.y > ${SLOT.y0.toFixed(3)} && sp.y < ${SLOT.y1.toFixed(3)} && sr > ${SLOT.r0.toFixed(3)} && sr < ${SLOT.r1.toFixed(3)} && abs(atan(sp.z, -sp.x)) < ${SLOT.half.toFixed(4)}) discard;
+}`,
+          );
+      };
+      m.customProgramCacheKey = () => `${prevKey}|pez-slot-v1`;
+      m.needsUpdate = true;
+    }
+  });
+}
+
+/** The bay lamps' brightness (the sun is 2.6): a dim working light a few metres out. */
+const BAY_LAMP = 25;
+
+/**
+ * Inside the payload bay (seen only from the bay camera: the hull hides it from outside): a dark
+ * wall just inside the skin all round, open where the slot is, closed top and bottom, two
+ * dispenser rails the satellites stack along, and a lamp over the slot. slot: the door's box in
+ * model axes; half: the slot's half-angle round the hull.
+ */
+function payloadBay(model: THREE.Object3D, slot: THREE.Box3, half: number): THREE.PointLight {
+  const group = new THREE.Group();
+  group.name = 'PayloadBayInside';
+  const R = 4.32;
+  const top = slot.max.y + 2.4;
+  const bottom = STARLINK_V3.doorX - STARLINK_V3.count * STARLINK_V3.pitch - 0.8;
+  const wall = new THREE.MeshStandardMaterial({ color: 0x6b6e74, roughness: 0.7, metalness: 0.2, side: THREE.DoubleSide });
+  // The wall: a grid round the hull and up it, without the cells over the slot.
+  const rows = [bottom, slot.min.y, slot.max.y, top];
+  const n = 72;
+  const pos: number[] = [];
+  const idx: number[] = [];
+  const angle = (i: number) => -Math.PI + (2 * Math.PI * i) / n;
+  for (const y of rows) for (let i = 0; i <= n; i++) pos.push(-R * Math.cos(angle(i)), y, R * Math.sin(angle(i)));
+  for (let r = 0; r < rows.length - 1; r++) {
+    for (let i = 0; i < n; i++) {
+      // (The door side, -X, is at angle 0.)
+      if (r === 1 && Math.abs(angle(i + 0.5)) < half + 0.01) continue;
+      const k = r * (n + 1) + i;
+      idx.push(k, k + n + 1, k + 1, k + 1, k + n + 1, k + n + 2);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  group.add(new THREE.Mesh(g, wall));
+  for (const y of [bottom, top]) {
+    const cap = new THREE.Mesh(new THREE.CircleGeometry(R, n), wall);
+    cap.rotation.x = -Math.PI / 2;
+    cap.position.y = y;
+    group.add(cap);
+  }
+  // The dispenser's rails, either end of the stack.
+  const rail = new THREE.MeshStandardMaterial({ color: 0x8a8d92, roughness: 0.45, metalness: 0.8 });
+  const len = slot.max.y - bottom;
+  const inward = STARSHIP_V3.radius - STARLINK_V3.width / 2 - 0.3;
+  for (const z of [-1, 1]) {
+    const r = new THREE.Mesh(new THREE.BoxGeometry(0.16, len, 0.16), rail);
+    r.position.set(-inward, bottom + len / 2, z * 3.86);
+    group.add(r);
+  }
+  const lamp = new THREE.PointLight(0xfff2e0, 0, 30, 2);
+  lamp.position.set(-0.3, slot.max.y + 2.1, 0);
+  group.add(lamp);
+  model.add(group);
+  return lamp;
 }
 
 /** Engine nodes in simulation order, each with its own glowing nozzle-interior material. */

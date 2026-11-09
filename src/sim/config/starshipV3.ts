@@ -134,12 +134,19 @@ export const STARLINK_V3 = {
   /** Satellites per flight (Flight 14 and 15). */
   count: 26,
   /** Deployment: starts this long after liftoff (Flight 14: T+34 min), one every interval
-   *  (26 in ~30 min), pushed out at this speed, m/s. */
+   *  (26 in ~30 min), pushed straight out at this speed, m/s. */
   deployAt: 34 * 60,
   interval: 68,
-  pushSpeed: 0.4,
-  /** The PEZ door: its middle's height above the ship's base (m), and how long it takes to open / close, s. */
-  doorX: 35.1,
+  pushSpeed: 0.6,
+  /**
+   * The PEZ door: where a satellite's middle (its bus) passes through the slot, above the ship's
+   * base (m: the slot runs 34.65-35.52 m, and a stowed satellite, wings folded on its back, spans
+   * -0.38/+0.43 m about its bus), and how long the door takes to open / close, s.
+   */
+  doorX: 35.06,
+  /** A stowed satellite's thickness, and its place in the dispenser's stack (pitch), m. */
+  thickness: 0.81,
+  pitch: 0.86,
   doorTime: 12,
 };
 

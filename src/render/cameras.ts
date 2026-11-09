@@ -23,8 +23,8 @@ const MAP_MAX = 1.2e9;
 /** Closest the camera may come to the ground or sea, m. */
 const GROUND_CLEARANCE = 2;
 
-export type CameraMode = 'orbit' | 'chase' | 'pad' | 'tower' | 'spectator' | 'inspect';
-export const CAMERA_MODES: CameraMode[] = ['orbit', 'chase', 'pad', 'tower', 'spectator', 'inspect'];
+export type CameraMode = 'orbit' | 'chase' | 'pad' | 'tower' | 'spectator' | 'inspect' | 'bay' | 'satellite';
+export const CAMERA_MODES: CameraMode[] = ['orbit', 'chase', 'pad', 'tower', 'spectator', 'inspect', 'bay', 'satellite'];
 export const CAMERA_LABELS: Record<CameraMode, string> = {
   orbit: 'Orbit (drag / scroll)',
   chase: 'Chase',
@@ -32,7 +32,11 @@ export const CAMERA_LABELS: Record<CameraMode, string> = {
   tower: 'Tower camera',
   spectator: 'South Padre Island (~9 km)',
   inspect: 'Heat shield inspection (Starlink camera)',
+  bay: 'Payload bay camera',
+  satellite: 'Starlink camera',
 };
+/** Camera modes that need something to look from: the payload door (a Starlink ship), a satellite out. */
+const NEEDS: Partial<Record<CameraMode, 'door' | 'sat'>> = { bay: 'door', satellite: 'sat' };
 
 // Fixed viewpoints in pad ENU (m).
 /** The tower cameras: on a boom above each tower's top, out over its arms (looking down at a catch). */
@@ -56,6 +60,10 @@ export interface CameraTarget {
   size: number;
   /** The ship's belly (heat shield side, body +y), world (unit): for the inspection camera. */
   belly?: V3;
+  /** A Starlink ship's payload door: its middle on the hull, the way out of it, and along the slot (world, unit). */
+  door?: { at: V3; out: V3; side: V3 };
+  /** The satellite the Starlink camera rides on (world). */
+  sat?: V3;
 }
 
 export class CameraRig {
@@ -153,9 +161,16 @@ export class CameraRig {
     return [pos[0] + up.x * lift, pos[1] + up.y * lift, pos[2] + up.z * lift];
   }
 
-  cycle(): void {
+  /** Next camera; has: whether there's a payload door / a satellite to look from (else those are skipped). */
+  cycle(has: (need: 'door' | 'sat') => boolean = () => false): void {
     this.map = false;
-    this.mode = CAMERA_MODES[(CAMERA_MODES.indexOf(this.mode) + 1) % CAMERA_MODES.length];
+    let i = CAMERA_MODES.indexOf(this.mode);
+    for (let k = 0; k < CAMERA_MODES.length; k++) {
+      i = (i + 1) % CAMERA_MODES.length;
+      const need = NEEDS[CAMERA_MODES[i]];
+      if (!need || has(need)) break;
+    }
+    this.mode = CAMERA_MODES[i];
   }
 
   /** Returns the camera world position and field of view for this frame. */
@@ -217,6 +232,36 @@ export class CameraRig {
         camera.lookAt(look.x - pos[0], look.y - pos[1], look.z - pos[2]);
         return pos;
       }
+      case 'bay': {
+        // Inside the payload bay, as on the webcasts: behind the dispenser's stack and above it,
+        // looking down over the next satellite and out of the slot as each one slides away.
+        if (!target.door) {
+          pos = [c[0] + this.up.x * target.size, c[1] + this.up.y * target.size, c[2] + this.up.z * target.size];
+          break;
+        }
+        const axis = new THREE.Vector3(...target.axis);
+        const out = new THREE.Vector3(...target.door.out);
+        const side = new THREE.Vector3(...target.door.side);
+        const slot = new THREE.Vector3(...target.door.at);
+        const at = slot.clone().addScaledVector(out, -3.2).addScaledVector(axis, 1.6).addScaledVector(side, 0.3);
+        const look = slot.clone().addScaledVector(out, 4).addScaledVector(axis, -0.9);
+        return this.aim(camera, [at.x, at.y, at.z], look, axis, 72);
+      }
+      case 'satellite': {
+        // On a satellite, a few metres beyond and above it, looking back at the ship (a long lens that keeps
+        // the ship a steady size as the satellite drifts away).
+        if (!target.sat) {
+          pos = [c[0] + this.up.x * target.size, c[1] + this.up.y * target.size, c[2] + this.up.z * target.size];
+          break;
+        }
+        const s = target.sat;
+        const away = new THREE.Vector3(s[0] - c[0], s[1] - c[1], s[2] - c[2]);
+        const d = Math.max(1, away.length());
+        away.divideScalar(d);
+        const at: V3 = [s[0] + away.x * 4 + this.up.x * 4, s[1] + away.y * 4 + this.up.y * 4, s[2] + away.z * 4 + this.up.z * 4];
+        const zoom = THREE.MathUtils.clamp(2 * Math.atan((target.size * 1.1) / (d + 6)) * THREE.MathUtils.RAD2DEG, 2, 70);
+        return this.aim(camera, at, new THREE.Vector3(...c), this.up, zoom);
+      }
       case 'pad':
       case 'spectator': {
         pos = this.mode === 'pad' ? PAD_CAM : SPECTATOR_CAM;
@@ -242,6 +287,18 @@ export class CameraRig {
     camera.position.set(0, 0, 0);
     camera.up.copy(this.up);
     camera.lookAt(c[0] - pos[0], c[1] - pos[1], c[2] - pos[2]);
+    return pos;
+  }
+
+  /** Put the camera at pos looking at look (world), with this up and field of view. */
+  private aim(camera: THREE.PerspectiveCamera, pos: V3, look: THREE.Vector3, up: THREE.Vector3, fov: number): V3 {
+    if (Math.abs(camera.fov - fov) > 1e-3) {
+      camera.fov = fov;
+      camera.updateProjectionMatrix();
+    }
+    camera.position.set(0, 0, 0);
+    camera.up.copy(up);
+    camera.lookAt(look.x - pos[0], look.y - pos[1], look.z - pos[2]);
     return pos;
   }
 }

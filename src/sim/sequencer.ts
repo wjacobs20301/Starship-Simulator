@@ -248,6 +248,12 @@ export class Mission {
           this.shipManual = false;
           if (this.shipReturn) this.shipReturn.update(ship, sim.aux.get('ship')!, dt);
           else this.shipReentry?.update(ship, sim.aux.get('ship')!, dt);
+          // A Starlink deployment under way holds its attitude between burns (the return's waits
+          // for a burn already do; this covers its coast to the entry and a flight with no return).
+          const waitingForBurn = this.shipReturn?.phase === 'burn';
+          if (!waitingForBurn && sim.pilot.deployHold && !ship.engines.some((e) => e.throttleCmd > 0)) {
+            applyControl(ship, sim.aux.get('ship')!, sim.pilot.deployHold.nose, dt, undefined, sim.pilot.deployHold.bodyZ);
+          }
         } else if (ship) this.shipManual = true;
         break;
 

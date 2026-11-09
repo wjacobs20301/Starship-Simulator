@@ -1,8 +1,9 @@
 // The Starlink V3 satellites a Starlink flight deploys (sim/payload.ts), drawn from the Blender
 // model (art/blender/starlink_v3.py: the bus, one solar panel, a wing yoke). Each one slides out
-// of the ship's PEZ slot, drifts away turning slowly, and a couple of minutes later unfolds its
-// two solar wings: each swings out over the side on its yoke, then opens out like an accordion
-// to 20 m.
+// of the ship's PEZ slot and drifts away turning slowly, until its own attitude control stops the
+// tumble; some ten minutes later, well clear of the ship and the others, it unfolds its two solar
+// wings one after the other: each swings out over the side on its yoke, then opens out slowly
+// like an accordion to 20 m.
 //
 // All of them together are a handful of instanced meshes (one per part of the model), not
 // hundreds of objects: 26 satellites x 20 panels each.
@@ -10,6 +11,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
+import { BOOSTER_LENGTH, STARLINK_V3, STARSHIP_V3 } from '../sim/config/starshipV3';
 import type { M3, V3 } from '../sim/math';
 import type { Snapshot } from '../sim/simulation';
 
@@ -19,14 +21,36 @@ const BUS_T = 0.3;
 const PANEL_W = 2.02;
 const PANEL_T = 0.025;
 const PANELS = 10;
-const STACK_T = PANELS * PANEL_T + 0.02;
 const YOKE = 1.1;
 
-/** When the wings deploy after release, s: swing out, then unfold. */
-const SWING = [100, 160] as const;
-const UNFOLD = [160, 400] as const;
+/**
+ * When the wings deploy after release, s: each satellite starts some 8-12 minutes out (its own
+ * checkout first), swings a wing out over 90 s, then unfolds it over five minutes; the second
+ * wing follows the first by WING_LAG.
+ */
+const WINGS_FROM = 480;
+const WINGS_SPREAD = 240;
+const SWING_TIME = 90;
+const UNFOLD_TIME = 300;
+const WING_LAG = 45;
+/** A satellite's own start time for its wings (repeatable: from its number). */
+const wingStart = (n: number) => WINGS_FROM + WINGS_SPREAD * (((Math.sin(n * 12.9898) * 43758.5453) % 1 + 1) % 1);
 /** Satellites farther than this from the camera aren't drawn, m. */
 const DRAW_RANGE = 60e3;
+/**
+ * The dispenser's stack in the bay (ship body axes): each satellite's middle this far in from the
+ * hull (m: its outer edge just inside the skin), the one at the slot sliding out to where the
+ * sim releases it over the last SLIDE seconds; once the last one is clear of the slot (RESTACK_AFTER)
+ * the stack moves up a place, over RESTACK seconds.
+ */
+const STOWED_IN = STARSHIP_V3.radius - STARLINK_V3.width / 2 - 0.3;
+const RELEASED_IN = STARSHIP_V3.radius - STARLINK_V3.width / 2 + 0.2;
+const SLIDE = 1.2;
+const RESTACK = 10;
+/** The stack waits this long after a release (the last one clear of the slot: s) before moving up. */
+const RESTACK_AFTER = (STARLINK_V3.width + 0.8) / STARLINK_V3.pushSpeed + 2;
+/** Ship body axes -> its mesh's (+Y up the ship, +X body y, -Z body z). */
+const BODY_TO_MESH = new THREE.Matrix4().set(0, 1, 0, 0, 1, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1);
 
 interface Part {
   mesh: THREE.InstancedMesh;
@@ -90,11 +114,30 @@ export class StarlinkFleet {
    * Each frame. payload: the snapshot's; cam: the camera's world position (the floating origin);
    * enuToWorld: pad ENU -> world (float64).
    */
-  update(payload: Snapshot['payload'], cam: readonly number[], enuToWorld: (p: V3) => V3): void {
+  update(payload: Snapshot['payload'], cam: readonly number[], enuToWorld: (p: V3) => V3, ship: THREE.Object3D | null = null): void {
     const sats = payload?.sats ?? [];
     let n = 0;
     let np = 0;
     let ny = 0;
+    // The ones still aboard, in the dispenser's stack (inside the hull: seen only from the bay).
+    if (payload && ship && payload.aboard > 0) {
+      ship.updateMatrixWorld(true);
+      const shift = payload.since < RESTACK_AFTER + RESTACK ? 1 - smooth(RESTACK_AFTER, RESTACK_AFTER + RESTACK, payload.since) : 0;
+      const slide = payload.nextIn !== null ? smooth(SLIDE, 0, payload.nextIn) : 0;
+      for (let k = 0; k < payload.aboard && n < this.max; k++) {
+        const x = STARLINK_V3.doorX - (k + shift) * STARLINK_V3.pitch;
+        const inward = k === 0 ? STOWED_IN + (RELEASED_IN - STOWED_IN) * slide : STOWED_IN;
+        // (Mesh axes: up the ship +Y, the door on -X.)
+        this.m.makeTranslation(-inward, BOOSTER_LENGTH + x, 0);
+        this.sat.multiplyMatrices(ship.matrixWorld, this.m).multiply(BODY_TO_MESH).multiply(StarlinkFleet.MODEL_TO_BODY);
+        for (const p of this.bus) p.mesh.setMatrixAt(n, this.part.multiplyMatrices(this.sat, p.local));
+        n++;
+        for (const side of [1, -1]) {
+          np = this.wing(side, 0, Math.PI / 2, np);
+          ny = this.yokeAt(side, 0, ny);
+        }
+      }
+    }
     for (const s of sats) {
       if (n >= this.max) break;
       const w = enuToWorld(s.pos);
@@ -105,10 +148,12 @@ export class StarlinkFleet {
       this.sat.copy(this.rot).setPosition(dx, dy, dz);
       for (const p of this.bus) p.mesh.setMatrixAt(n, this.part.multiplyMatrices(this.sat, p.local));
       n++;
-      // Its wings, as far out as they've got.
-      const a = (Math.PI / 2) * smooth(SWING[0], SWING[1], s.age);
-      const g = (Math.PI / 2) * (1 - smooth(UNFOLD[0], UNFOLD[1], s.age));
+      // Its wings, as far out as they've got (the -side one first: its stack rides on top).
+      const t0 = wingStart(s.n);
       for (const side of [1, -1]) {
+        const ts = t0 + (side < 0 ? 0 : WING_LAG);
+        const a = (Math.PI / 2) * smooth(ts, ts + SWING_TIME, s.age);
+        const g = (Math.PI / 2) * (1 - smooth(ts + SWING_TIME, ts + SWING_TIME + UNFOLD_TIME, s.age));
         np = this.wing(side, a, g, np);
         ny = this.yokeAt(side, a, ny);
       }
@@ -134,8 +179,9 @@ export class StarlinkFleet {
    */
   private frame(side: number, a: number): { hinge: THREE.Vector3; u: THREE.Vector3; w: THREE.Vector3 } {
     const [hinge, u, w] = this.v;
-    // (The other wing's stack rides on this one's, stowed.)
-    const lift = side < 0 ? STACK_T * (1 - Math.sin(a)) : 0;
+    // (Stowed, the two folded wings lie side by side on its back, a hair apart where they meet,
+    // not one on the other: that keeps it thin enough for the slot.)
+    const lift = side < 0 ? 0.02 * (1 - Math.sin(a)) : 0;
     hinge.set(0, side * (BUS_W / 2 + 0.05), BUS_T / 2 + 0.01 + lift);
     u.set(0, side * Math.sin(a), Math.cos(a));
     w.set(0, -side * Math.cos(a), Math.sin(a));

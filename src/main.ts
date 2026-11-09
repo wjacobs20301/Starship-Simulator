@@ -1,8 +1,9 @@
 import * as THREE from 'three';
-import { BOOSTER_LENGTH, SHIP_LENGTH, STARSHIP_V3, SUPER_HEAVY_V3 } from './sim/config/starshipV3';
+import { BOOSTER_LENGTH, SHIP_LENGTH, STARLINK_V3, STARSHIP_V3, SUPER_HEAVY_V3 } from './sim/config/starshipV3';
 import type { V3 } from './sim/math';
 import type { FlightOptions, MenuScene, Snapshot, VehicleSnapshot } from './sim/simulation';
-import { CAMERA_LABELS, CameraRig } from './render/cameras';
+import type { ReturnTarget } from './sim/shipReturn';
+import { CAMERA_LABELS, CameraRig, type CameraTarget } from './render/cameras';
 import { FloatingOrigin, enuToWorld, vehicleQuaternion } from './render/floatingOrigin';
 import { type ModelLibrary, loadModels } from './render/models';
 import { applyShipSerial } from './render/decals';
@@ -186,6 +187,8 @@ let effectiveWarp = 1;
 let rails = false;
 let paused = false;
 let trackedId = 'stack';
+/** A Starlink the cameras follow instead (V steps on to them after the vehicles), by its number. */
+let satFocus: number | null = null;
 /** Which pad's tower arms the arrow keys drive (0 = Pad 1). */
 let armsPad = 0;
 
@@ -541,7 +544,12 @@ function followMission(snap: Snapshot): void {
     if (setup.shipReturn && /^SECO/.test(e.text)) {
       trackedId = 'ship';
       const aim = tracker.mission.target?.vehicle === 'ship' ? tracker.mission.target : SPLASH_TARGET;
-      const target = setup.shipReturn === 'tower' ? ({ kind: 'tower', pad: -1 } as const) : ({ kind: 'ocean', lat: aim.lat, lon: aim.lon } as const);
+      const target: ReturnTarget =
+        setup.shipReturn === 'tower'
+          ? setup.shipCatchSlew !== undefined
+            ? { kind: 'tower', pad: launchPad, slew: setup.shipCatchSlew }
+            : { kind: 'tower', pad: -1 }
+          : { kind: 'ocean', lat: aim.lat, lon: aim.lon };
       send({ type: 'return', target });
     }
     if (setup.shipReturn && /^Return: flip and landing burn/.test(e.text)) send({ type: 'warp', value: 1 });
@@ -650,12 +658,32 @@ bindKeys({
   },
   toggleSas: () => setPilot({ sas: pilot.sas === 'off' ? 'stability' : 'off' }),
   cycleEngines: () => setPilot({ engines: (pilot.engines + 1) % 3 }),
+  deploy: () => send({ type: 'deploy' }),
   throttleFull: () => setPilot({ throttle: 1 }),
   throttleCut: () => setPilot({ throttle: 0 }),
-  cycleCamera: () => rig.cycle(),
+  cycleCamera: () =>
+    rig.cycle((need) => {
+      const ship = curr?.snap.vehicles.find((v) => v.id === trackedId && v.stages.length === 1 && v.stages[0] === 'ship' && v.status !== 'destroyed');
+      return !!ship && (need === 'door' ? !!curr?.snap.payload : !!curr?.snap.payload?.sats.length);
+    }),
   toggleMap: () => rig.toggleMap(lastTarget),
   cycleTarget: () => {
     const ids = curr?.snap.vehicles.filter((v) => v.status !== 'destroyed').map((v) => v.id) ?? [];
+    // After the vehicles, the satellites out (the cameras follow one; the ship stays the one tracked).
+    const sats = curr?.snap.payload?.sats.map((s) => s.n) ?? [];
+    if (satFocus !== null) {
+      const i = sats.indexOf(satFocus);
+      satFocus = i >= 0 && i + 1 < sats.length ? sats[i + 1] : null;
+      if (satFocus === null && ids.length) trackedId = ids[0];
+      setPilot({ manual: manualVehicles.has(trackedId) });
+      return;
+    }
+    if (sats.length && ids.indexOf(trackedId) === ids.length - 1 && ids.includes('ship')) {
+      trackedId = 'ship';
+      satFocus = sats[0];
+      setPilot({ manual: manualVehicles.has(trackedId) });
+      return;
+    }
     if (ids.length) trackedId = ids[(ids.indexOf(trackedId) + 1) % ids.length];
     // Looking at another vehicle doesn't take its autopilot away: the controls are yours only
     // on the ones you've taken over (L).
@@ -682,6 +710,7 @@ bindKeys({
 });
 
 function trackedName(): string {
+  if (satFocus !== null) return `Starlink ${satFocus}`;
   return curr?.snap.vehicles.find((v) => v.id === trackedId)?.name ?? '—';
 }
 
@@ -736,7 +765,9 @@ function syncMeshes(vehicles: VehicleSnapshot[], simTime: number): void {
 /** A flight's options: the mission's setup, and the player's realism settings where it leaves them open. */
 function flightOptions(setup: MissionSetup): FlightOptions {
   return {
-    payload: setup.payload ?? null,
+    // (Free roam: Starlinks if the player loaded them, deployed when they press B.)
+    payload: setup.payload ?? (tracker.mission.id === 'free' && settings.freeStarlink ? 'starlink' : null),
+    deploy: setup.payload ? 'auto' : 'manual',
     parkingAlt: setup.parkingAlt ?? null,
     faults: setup.faults ?? (settings.engineFailures ? 'random' : 'off'),
     faultSeed: Math.floor(Math.random() * 2 ** 31),
@@ -756,7 +787,13 @@ function payloadLine(s: Snapshot): string {
   const p = s.payload;
   if (p) {
     const out = p.total - p.aboard;
-    const door = p.state === 'opening' ? ', door opening' : p.state === 'closing' ? ', door closing' : p.door > 0.5 ? ', door open' : '';
+    const door =
+      p.state === 'orienting' ? ', ship turning to deploy'
+      : p.state === 'opening' ? ', door opening'
+      : p.state === 'closing' ? ', door closing'
+      : p.door > 0.5 ? ', door open'
+      : p.state === 'stowed' && tracker.mission.id === 'free' ? ' · <kbd>B</kbd> to deploy'
+      : '';
     lines.push(`Starlink V3: ${out} of ${p.total} deployed${door}`);
   }
   const ship = s.vehicles.find((v) => v.stages.length === 1 && v.stages[0] === 'ship' && v.status === 'flight');
@@ -1103,7 +1140,17 @@ function frame(): void {
   }
 
   const placements: FxVehicle[] = [];
-  let target: { center: V3; axis: V3; size: number; belly?: V3 } | null = null;
+  let target: CameraTarget | null = null;
+  /** A satellite's world position, between snapshots. */
+  const satWorld = (n: number): V3 | null => {
+    const s = snap.payload?.sats.find((x) => x.n === n);
+    if (!s) return null;
+    const q = prev?.snap.payload?.sats.find((x) => x.n === n);
+    return enuToWorld(q ? [q.pos[0] + (s.pos[0] - q.pos[0]) * alpha, q.pos[1] + (s.pos[1] - q.pos[1]) * alpha, q.pos[2] + (s.pos[2] - q.pos[2]) * alpha] : s.pos);
+  };
+  if (satFocus !== null && !snap.payload?.sats.some((x) => x.n === satFocus)) satFocus = null;
+  const sats = snap.payload?.sats ?? [];
+  const camSat = satFocus ?? (sats.length ? sats[sats.length - 1].n : null);
   for (const v of snap.vehicles) {
     const mesh = meshes.get(v.id);
     if (!mesh) continue;
@@ -1116,7 +1163,7 @@ function frame(): void {
     mesh.root.quaternion.copy(qb);
     mesh.update(v, simTime);
     if (v.stages.includes('ship')) {
-      mesh.setPayloadDoor(snap.payload?.door ?? 0);
+      mesh.setPayloadDoor(snap.payload?.door ?? 0, rig.mode === 'bay' && !rig.map && v.id === trackedId);
       mesh.setShield(snap.shield);
     }
     const w = enuToWorld(pos);
@@ -1143,6 +1190,16 @@ function frame(): void {
         size: v.stages.length === 2 ? BOOSTER_LENGTH + SHIP_LENGTH : v.stages[0] === 'ship' ? SHIP_LENGTH : BOOSTER_LENGTH,
         belly: ((b) => [b.x, b.y, b.z] as V3)(new THREE.Vector3(1, 0, 0).applyQuaternion(qb)),
       };
+      if (v.stages.length === 1 && v.stages[0] === 'ship') {
+        // The payload door (Starlink flights): on the leeward side (mesh -x), doorX above the ship's base.
+        if (snap.payload) {
+          const out = new THREE.Vector3(-1, 0, 0).applyQuaternion(qb);
+          const h = BOOSTER_LENGTH + STARLINK_V3.doorX;
+          const side = new THREE.Vector3(0, 0, -1).applyQuaternion(qb);
+          target.door = { at: [w[0] + up.x * h + out.x * 4.5, w[1] + up.y * h + out.y * 4.5, w[2] + up.z * h + out.z * 4.5], out: [out.x, out.y, out.z], side: [side.x, side.y, side.z] };
+        }
+        if (camSat !== null) target.sat = satWorld(camSat) ?? undefined;
+      }
     }
   }
 
@@ -1151,7 +1208,9 @@ function frame(): void {
   const focusSat = import.meta.env.DEV ? (window as unknown as { __focusSat?: number }).__focusSat : undefined;
   const satAt = focusSat !== undefined ? snap.payload?.sats.find((x) => x.n === focusSat) : undefined;
   const focus0 = satAt ? enuToWorld(satAt.pos) : import.meta.env.DEV ? (window as unknown as { __focus?: V3 }).__focus : undefined;
-  const aim = focus0 ? { center: focus0, axis: [0, 1, 0] as V3, size: 60 } : (target ?? (watching ? { center: watching.at, axis: [0, 1, 0] as V3, size: watching.radius } : null));
+  // (A satellite picked with V: the cameras that follow something follow it.)
+  const picked = satFocus !== null && !['bay', 'satellite', 'inspect'].includes(rig.mode) ? satWorld(satFocus) : null;
+  const aim = picked ? { center: picked, axis: [0, 1, 0] as V3, size: 24 } : focus0 ? { center: focus0, axis: [0, 1, 0] as V3, size: 60 } : (target ?? (watching ? { center: watching.at, axis: [0, 1, 0] as V3, size: watching.radius } : null));
   // Back off far enough to take in the whole fireball.
   if (watching && rig.mode === 'orbit' && !rig.map) rig.distance += (Math.max(rig.distance, watching.radius * 3.2) - rig.distance) * Math.min(1, frameDt * 1.5);
   if (target) lastTarget = target.center;
@@ -1194,7 +1253,7 @@ function frame(): void {
       const q = before?.sats.find((x) => x.n === s.n);
       return q ? { ...s, pos: [q.pos[0] + (s.pos[0] - q.pos[0]) * alpha, q.pos[1] + (s.pos[1] - q.pos[1]) * alpha, q.pos[2] + (s.pos[2] - q.pos[2]) * alpha] as V3 } : s;
     });
-    starlink.update(cur && sats ? { ...cur, sats } : null, origin.camera, enuToWorld);
+    starlink.update(cur && sats ? { ...cur, sats } : null, origin.camera, enuToWorld, meshes.get('ship')?.root ?? null);
   }
   // Dev-only: __fxMissionTime overrides the countdown clock the effects see (to preview the deluge).
   const fxClock = import.meta.env.DEV ? (window as unknown as { __fxMissionTime?: number }).__fxMissionTime : undefined;

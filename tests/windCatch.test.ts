@@ -26,7 +26,7 @@ function fly(seed: number, site: SiteWeather) {
 }
 
 describe('booster return in the wind', () => {
-  for (const [seed, site] of [[2, 'natural'], [3, 'rain'], [4, 'clear'], [14, 'overcast']] as const) {
+  for (const [seed, site] of [[2, 'natural'], [3, 'rain'], [4, 'clear'], [13, 'rain']] as const) {
     it(`seed ${seed} (${site}): flies through it and is caught`, { timeout: 120_000 }, () => {
       const { sim, booster } = fly(seed, site);
       expect(sim.events.some((e) => /lost|structural/.test(e.text))).toBe(false);
@@ -39,6 +39,16 @@ describe('booster return in the wind', () => {
     expect(towerWind).toBeGreaterThan(CATCH_WIND_LIMIT);
     expect(sim.events.some((e) => /^Catch no-go/.test(e.text))).toBe(true);
     expect(booster?.status).toBe('landed');
+  });
+
+  it('over the limit lower down, or in strong winds aloft: no catch, lands on the Gulf instead', { timeout: 240_000 }, () => {
+    // (Seed 14, overcast: just under the limit at the tower but over it from there up through the
+    // bottom kilometres. Seed 15, rain: ~20 m/s up where the landing burn starts.)
+    for (const [seed, site, why] of [[14, 'overcast', /below 3 km/], [15, 'rain', /winds aloft/]] as const) {
+      const { sim, booster } = fly(seed, site);
+      expect(sim.events.some((e) => /^Catch no-go/.test(e.text) && why.test(e.text))).toBe(true);
+      expect(booster?.status).toBe('landed');
+    }
   });
 
   it('missions get fair weather: light wind at the tower for hours', () => {

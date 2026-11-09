@@ -57,10 +57,12 @@ describe('booster recovery after a player-flown ascent', () => {
     expect(r.events.some((e) => /^Entry burn startup/.test(e))).toBe(true);
   }, 60_000);
 
-  it('the boostback puts the landing point within 100 m of the tower', () => {
+  it('one boostback burn puts the landing point within a kilometre; the fins and landing burn do the rest', () => {
     const r = fly(9999, null);
     const cutoff = r.events.find((e) => /^Boostback burn shutdown/.test(e))!;
-    expect(Number(/miss ([\d.]+) km/.exec(cutoff)![1])).toBeLessThan(0.1);
+    expect(Number(/miss ([\d.]+) km/.exec(cutoff)![1])).toBeLessThan(1);
+    // (No second burn before the landing burn: as on the real flights.)
+    expect(r.events.some((e) => /^Course correction burn/.test(e))).toBe(false);
     expectCaught(r);
   }, 60_000);
 });

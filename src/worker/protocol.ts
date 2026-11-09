@@ -22,6 +22,8 @@ export type ToWorker =
   | { type: 'pilot'; cmd: Partial<PilotCommand> }
   /** Player staging. */
   | { type: 'stage' }
+  /** Start, hold or resume the Starlink deployment (B). */
+  | { type: 'deploy' }
   /** Plan / change / delete the maneuver node. */
   | { type: 'node'; node: ManeuverNode | null }
   /** Ship: go home (tower / ocean target) under autopilot, or cancel (null). */

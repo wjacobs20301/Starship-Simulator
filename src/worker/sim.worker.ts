@@ -84,6 +84,9 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
     case 'stage':
       sim.stage();
       break;
+    case 'deploy':
+      sim.requestDeploy();
+      break;
     case 'node':
       sim.setNode(msg.node);
       lastPredict = -Infinity;

@@ -80,6 +80,8 @@ export class Pilot {
   maneuverDir: V3 | null = null;
   /** Target hold (booster catch): thrust direction leaning toward the catch point, and the roll reference (ECI), set by the sim. */
   targetDir: { dir: V3; rollRef: V3 } | null = null;
+  /** The Starlink deployment attitude (ECI: nose, body +z), while the bay wants it; set by the sim. */
+  deployHold: { nose: V3; bodyZ: V3 } | null = null;
 
   set(patch: Partial<PilotCommand>): void {
     const prev = this.cmd;
@@ -112,6 +114,14 @@ export class Pilot {
     if (input) {
       this.hold = null;
       applyRateControl(v, aux, [c.roll * ROLL_RATE, -c.yaw * PITCH_YAW_RATE, c.pitch * PITCH_YAW_RATE], dt);
+      return;
+    }
+    // A Starlink deployment the player started: the ship turns to its deployment attitude and
+    // holds it (stick input takes over; afterwards SAS locks whatever attitude it's left in).
+    if (this.deployHold && v.id === 'ship') {
+      this.hold = null;
+      this.sasDir = this.deployHold.nose;
+      applyControl(v, aux, this.deployHold.nose, dt, undefined, this.deployHold.bodyZ);
       return;
     }
     if (c.sas === 'off') {

@@ -3,15 +3,16 @@
 //   flip       right after hot staging: 13 inner engines at low throttle swing the booster
 //              around toward the launch site (staged low in thick air, it first coasts up
 //              nose-first until the air is thin enough to turn in)
-//   boostback  13 engines at full throttle, aimed by an impact predictor (ballistic flight with
-//              drag, then the landing burn simulated) until the predicted landing point nears the
-//              tower; then a precise trim on the 3 center engines, from how the landing point
-//              moves with the velocity
+//   boostback  one burn: 13 engines at full throttle, aimed by an impact predictor (ballistic
+//              flight with drag, then the landing burn simulated) until the predicted landing
+//              point nears the tower, then down to the 3 center engines (still lit: one burn)
+//              for a precise finish, from how the landing point moves with the velocity
 //   coast      engines off, engines-first, up to apogee and back down. On the way: propellant
 //              the landing doesn't need is vented (a heavy booster falls faster and can't hover),
 //              a steep fall from high up gets an entry burn to keep the airframe inside its
-//              limits, and a course correction burn puts the landing point back on the mount
-//              if it has wandered
+//              limits, and only if the landing point has wandered well off (an engine out, an
+//              entry burn) a course correction burn puts it back; anything less the grid fins
+//              and the landing burn take out
 //   entry      the grid fins steer (small angle of attack) to trim the landing point
 //   landing    13-engine landing burn to a hover point beside the arms, lit at the latest moment
 //              it works with margin for this booster as it is (landingPlan.ts simulates it
@@ -107,6 +108,9 @@ const HOVER_ABOVE = CATCH.finBottom + 10;
  * an arm otherwise).
  */
 const ARMS_CORRIDOR = 4;
+/** Farther off than this (m), the hover closes in at up to HOVER_CLOSE_SPEED (m/s) before the position loop takes over. */
+const HOVER_FAR = 15;
+const HOVER_CLOSE_SPEED = 6;
 /** Clearance kept between the booster's base and the arms' rails while outside the corridor, m. */
 const ARMS_CLEARANCE = 5;
 /**
@@ -153,6 +157,11 @@ const LANDING_GAINS = { wn: 1.4, zeta: 0.9, rollDamp: 0.5 };
 /** Final-approach tuning (exported for tests / tuning scripts). */
 /** Steady wind at the tower's top over which the catch is called off, m/s (~23 knots). */
 export const CATCH_WIND_LIMIT = 11.8;
+/** Steady wind anywhere from the tower's top up to ALOFT_TOP (m), where the landing burn flies, over which the catch is called off too, m/s. */
+export const ALOFT_WIND_LIMIT = 14.5;
+const ALOFT_TOP = 8000;
+/** The tower's wind limit (CATCH_WIND_LIMIT) holds up to this height too, m. */
+const LOW_TOP = 3000;
 /** Height the catch wind is judged at (the tower's top), m. */
 const TOWER_TOP = 150;
 /** Where a booster that can't be caught comes down instead: the Gulf offshore, pad ENU m. */
@@ -164,15 +173,17 @@ const LAND_AIM_GAIN = 2;
 export const HOVER_TUNING = { wn: 1.6, zeta: 1.0, kp: 0.15, kd: 1.3, byFins: true };
 const FIN_TILT_MAX = 12 * DEG;
 /**
- * Final trim of the boostback: with less than this velocity change still to make, 3 engines at
- * low throttle (the 13 take a moment to wind down: ~10 m/s more), m/s.
+ * The boostback's finish: with less than this velocity change still to make, down to the 3
+ * center engines (the 13 take a moment to wind down: ~10 m/s more), m/s. Several seconds on
+ * them: time for the booster to turn the last degree or two onto the heading that takes out the
+ * miss across as well as along.
  */
-const TRIM_DV = 25;
+const TRIM_DV = 60;
 /**
  * Course correction on the way down: when the predicted miss is over this (m), in air thinner
  * than this (Pa), above this altitude (m).
  */
-const CORRECTION_MIN_MISS = 150;
+const CORRECTION_MIN_MISS = 400;
 const CORRECTION_Q_MAX = 3e3;
 const CORRECTION_MIN_ALT = 30e3;
 /** Acceleration range for the trim, m/s^2. */
@@ -305,9 +316,34 @@ export class BoosterReturn {
     if (w) {
       const v = w({ lat: PAD.latDeg * DEG, lon: PAD.lonDeg * DEG, h: PAD.groundAlt + TOWER_TOP }, sim.t, false);
       const speed = Math.hypot(v[0], v[1]);
+      // (The same limit through the bottom few km, where the booster brakes and lines up.)
+      let low = 0;
+      let lowAt = 0;
+      for (let h = TOWER_TOP + 250; h <= LOW_TOP; h += 250) {
+        const u = w({ lat: PAD.latDeg * DEG, lon: PAD.lonDeg * DEG, h: PAD.groundAlt + h }, sim.t, false);
+        const s = Math.hypot(u[0], u[1]);
+        if (s > low) [low, lowAt] = [s, h];
+      }
       if (speed > CATCH_WIND_LIMIT) {
         this.ocean = CATCH_DIVERT;
         this.log(`Catch no-go: wind ${speed.toFixed(1)} m/s at the tower (limit ${CATCH_WIND_LIMIT}); landing offshore`);
+      } else if (low > CATCH_WIND_LIMIT) {
+        this.ocean = CATCH_DIVERT;
+        this.log(`Catch no-go: wind ${low.toFixed(1)} m/s at ${(lowAt / 1000).toFixed(1)} km (limit ${CATCH_WIND_LIMIT} below ${LOW_TOP / 1000} km); landing offshore`);
+      } else {
+        // And in strong winds aloft, where the landing burn flies: they carry the booster wide of
+        // the tower, more than the hover's propellant can bring it back from.
+        let aloft = 0;
+        let at = 0;
+        for (let h = TOWER_TOP; h <= ALOFT_TOP; h += 250) {
+          const u = w({ lat: PAD.latDeg * DEG, lon: PAD.lonDeg * DEG, h: PAD.groundAlt + h }, sim.t, false);
+          const s = Math.hypot(u[0], u[1]);
+          if (s > aloft) [aloft, at] = [s, h];
+        }
+        if (aloft > ALOFT_WIND_LIMIT) {
+          this.ocean = CATCH_DIVERT;
+          this.log(`Catch no-go: winds aloft ${aloft.toFixed(1)} m/s at ${(at / 1000).toFixed(1)} km (limit ${ALOFT_WIND_LIMIT}); landing offshore`);
+        }
       }
     }
   }
@@ -440,15 +476,18 @@ export class BoosterReturn {
         // The velocity change still needed to put the landing point on the mount.
         const dv = J && missNow ? this.trimDv(J, missNow) : null;
         const need = dv ? norm(dv) : Infinity;
-        // The last few m/s on the 3 center engines at low throttle, so the cutoff is precise.
+        // The last tens of m/s on the 3 center engines, so the cutoff is precise.
         if (!this.trimming && need < TRIM_DV) {
           this.trimming = true;
         }
         let done = false;
-        if (this.trimming && dv) {
-          done = this.trimStep(booster, aux, dv, axisPad, dt);
+        if (this.trimming && dv && J && missNow) {
+          done = this.finishBoostback(booster, aux, J, missNow, dv, axisPad, dt);
         } else {
-          applyControl(booster, aux, this.boostbackDir(missNow, t), dt, undefined, this.rollRef());
+          // (Once it's known how the landing point moves with the velocity, headed so the push
+          // takes out the miss across as well as along: lined up for the finish on the center
+          // engines, which turn the booster only slowly.)
+          applyControl(booster, aux, dv && J && missNow ? normalize(padDirToEci(this.correctionHeading(J, missNow, dv), t)) : this.boostbackDir(missNow, t), dt, undefined, this.rollRef());
           setThrottle(booster, 'booster', 1, (ring) => ring <= 1);
           if (missNow && !this.missRef) this.missRef = normalize(missNow);
           // Overshot on the main burn (the trim should have taken over before this).
@@ -627,11 +666,22 @@ export class BoosterReturn {
           if (Math.hypot(ref[0], ref[1]) < 4 && Math.hypot(refV[0], refV[1]) < 1.5) {
             for (let k = 0; k < 2; k++) this.hoverI[k] = clamp(this.hoverI[k] + ref[k] * dt, -IMAX, IMAX);
           }
-          aCorr = [
-            -HOVER_TUNING.kp * ref[0] - HOVER_TUNING.kd * refV[0] - KI * this.hoverI[0],
-            -HOVER_TUNING.kp * ref[1] - HOVER_TUNING.kd * refV[1] - KI * this.hoverI[1],
-            0,
-          ];
+          const refOff = Math.hypot(ref[0], ref[1]);
+          if (refOff > HOVER_FAR) {
+            // Well off to the side (a windy day carried the landing burn wide): close in at up to
+            // HOVER_CLOSE_SPEED, not the creep the position loop gives far out (~1 m/s for every
+            // 8 m off), which spends the hover's propellant just getting there; slowing so as to
+            // reach the position loop's range without overshooting (it tilts only so far on 3
+            // engines: ~1 m/s^2 to spare for braking).
+            const vIn = Math.min(HOVER_CLOSE_SPEED, Math.sqrt(2 * 0.8 * (refOff - HOVER_FAR + 4))) / refOff;
+            aCorr = [HOVER_TUNING.kd * (-ref[0] * vIn - refV[0]), HOVER_TUNING.kd * (-ref[1] * vIn - refV[1]), 0];
+          } else {
+            aCorr = [
+              -HOVER_TUNING.kp * ref[0] - HOVER_TUNING.kd * refV[0] - KI * this.hoverI[0],
+              -HOVER_TUNING.kp * ref[1] - HOVER_TUNING.kd * refV[1] - KI * this.hoverI[1],
+              0,
+            ];
+          }
         }
         // Remove the drag we're already getting (engines-first, it's a big help early on). Drag
         // acts along the velocity through the air, not over the ground: taken that way, the
@@ -704,6 +754,35 @@ export class BoosterReturn {
   private missNow(miss: V3 | null): V3 | null {
     const J = this.jac?.J;
     return miss && J ? [miss[0] + dot(J[0] as V3, this.dvSince), miss[1] + dot(J[1] as V3, this.dvSince), 0] : miss;
+  }
+
+  /**
+   * The end of the boostback, one burn tailing off: down to the 3 center engines, still pushing
+   * along the booster's axis (it doesn't stop to turn), for as long as that brings the landing
+   * point closer: the push along the axis that best cancels the predicted miss (least squares,
+   * from how the landing point moves with the velocity), then shutdown. The thrust pointed a
+   * little high or low mostly moves the landing point downrange too, so little is left over; the
+   * grid fins and the landing burn take out the rest. True once done.
+   */
+  private finishBoostback(booster: Vehicle, aux: Aux, J: number[][], miss: V3, dv: V3, axisPad: V3, dt: number): boolean {
+    const t = this.sim.t;
+    const mass = aux.mp.mass;
+    const type = booster.engines[0].place.type;
+    // How the landing point moves per m/s along the axis, and the push that best cancels the miss.
+    const jx = dot(J[0] as V3, axisPad);
+    const jy = dot(J[1] as V3, axisPad);
+    const j2 = jx * jx + jy * jy;
+    const along = j2 > 1e-9 ? -(jx * miss[0] + jy * miss[1]) / j2 : 0;
+    const few = workingEngines(booster, 0, (ring) => ring === 0) >= 2;
+    const lit = Math.max(1, few ? workingEngines(booster, 0, (ring) => ring === 0) : workingEngines(booster, 0, (ring) => ring <= 1));
+    const aWant = clamp(along / 2, TRIM_ACCEL[0], TRIM_ACCEL[1]);
+    const throttle = clamp(throttleForThrust(type, (aWant * mass) / lit, aux.pAmb), type.minThrottle, 1);
+    const aSet = (lit * engineThrust(type, throttle, aux.pAmb)) / mass;
+    const done = along < Math.max(0.05, 1.5 * aSet * dt);
+    setThrottle(booster, 'booster', 0, (ring) => ring > (few ? 0 : 1));
+    setThrottle(booster, 'booster', done ? 0 : throttle, (ring) => ring <= (few ? 0 : 1));
+    applyControl(booster, aux, normalize(padDirToEci(this.correctionHeading(J, miss, dv), t)), dt, undefined, this.rollRef());
+    return done;
   }
 
   /**
@@ -1026,6 +1105,37 @@ export class BoosterReturn {
     // gentler entry.
     const c = Math.cos(BOOSTBACK_PITCH);
     return [(-miss[0] / d) * c, (-miss[1] / d) * c, -Math.sin(BOOSTBACK_PITCH)];
+  }
+
+  /**
+   * The boostback's thrust direction (pad ENU) at its usual pitch, headed so that pushing along
+   * it moves the landing point straight back along the miss (J: how the landing point moves with
+   * the velocity). Then one burn along the axis can take out the whole miss, downrange and
+   * across. (The landing point doesn't move the same for every heading: pushed straight against
+   * the miss, it would drift sideways too.) Falls back to the heading of dv.
+   */
+  private correctionHeading(J: number[][], miss: V3, dv: V3): V3 {
+    const c = Math.cos(BOOSTBACK_PITCH);
+    const s = Math.sin(BOOSTBACK_PITCH);
+    const dir = (psi: number): V3 => [Math.cos(psi) * c, Math.sin(psi) * c, -s];
+    // J a parallel to the miss: A cos(psi) + B sin(psi) = C.
+    const [m0, m1] = [miss[0], miss[1]];
+    const A = c * (J[0][0] * m1 - J[1][0] * m0);
+    const B = c * (J[0][1] * m1 - J[1][1] * m0);
+    const C = s * (J[0][2] * m1 - J[1][2] * m0);
+    const R = Math.hypot(A, B);
+    if (R > 1e-9 && Math.abs(C) <= R && Math.hypot(m0, m1) > 1) {
+      const phi = Math.atan2(B, A);
+      const off = Math.acos(C / R);
+      // (Of the two headings, the one that moves the landing point against the miss.)
+      for (const psi of [phi + off, phi - off]) {
+        const a = dir(psi);
+        if (dot(J[0] as V3, a) * m0 + dot(J[1] as V3, a) * m1 < 0) return a;
+      }
+    }
+    const h = Math.hypot(dv[0], dv[1]);
+    if (h < 1e-3) return this.boostbackDirPad(miss);
+    return [(dv[0] / h) * c, (dv[1] / h) * c, -s];
   }
 
   private boostbackDir(miss: V3 | null, t: number): V3 {

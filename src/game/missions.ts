@@ -87,6 +87,11 @@ export interface MissionSetup {
   followBooster?: boolean;
   /** At SECO, send the ship home on autopilot (tower catch or the ocean target). */
   shipReturn?: 'tower' | 'ocean';
+  /**
+   * The ship is caught by the tower it launched from (the one that caught the booster), its arms
+   * swung this far round (deg) once they've set the booster back on the launch mount.
+   */
+  shipCatchSlew?: number;
   /** Always from this pad (0 = Pad 1, 1 = Pad 2), as the real flight. */
   pad?: number;
   /** The ship carries Starlink V3 satellites and deploys them in orbit. */
@@ -295,9 +300,10 @@ export const MISSIONS: MissionDef[] = [
       "Starship's fifteenth flight, as SpaceX plans it (November 2026): Super Heavy lifts off from Pad 2 and flies home to its tower; " +
       'the ship goes on to orbit, opens its payload door half an hour after liftoff and deploys 26 Starlink V3 satellites, one about every 70 seconds. ' +
       'Cameras on the satellites look back at the heat shield: GO or NO-GO for the catch. ' +
-      'Then about 14 orbits, nearly a day, before the Raptors relight to deorbit; it comes in over the Pacific and Mexico and is caught by the Pad 1 tower: the first catch of both stages. ' +
+      'Meanwhile the Pad 2 tower sets the booster back on the launch mount and swings its arms 70 degrees round to the side. ' +
+      'About 14 orbits later, nearly a day, the Raptors relight to deorbit; the ship comes in over the Pacific and Mexico and is caught there, beside the booster: the first catch of both stages, by the same tower. ' +
       'Warp (1–8, or , .) through the orbits; time drops back to normal for the deployment, the flip and the catch. C cycles the cameras (the tower camera, the heat shield inspection).',
-    setup: { shipReturn: 'tower', pad: 1, payload: 'starlink', parkingAlt: 275e3 },
+    setup: { shipReturn: 'tower', shipCatchSlew: -70, pad: 1, payload: 'starlink', parkingAlt: 275e3 },
     objectives: [liftoff, separation, catchBooster, orbitReached, allDeployed, doorClosed, relight, catchShip],
     score(r) {
       // (Out of 1000: the objectives 850, the catches' precision 150.)

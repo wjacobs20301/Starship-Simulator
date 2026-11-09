@@ -1,7 +1,7 @@
 // Owns the world state: vehicles, time, events. Steps physics at a fixed dt and
 // produces render/telemetry snapshots in the pad's local ENU frame.
 
-import { G0, MU, OMEGA_E, PAD, DEG } from './constants';
+import { G0, MU, OMEGA_E, PAD, DEG, RE } from './constants';
 import { MISSION, STARLINK_V3, STARSHIP_V3, SUPER_HEAVY_V3 } from './config/starshipV3';
 import { type Aux, DEFAULT_ENV, type Env, currentAux, rk4Step } from './dynamics';
 import { engineMassFlow, engineThrust } from './engine';
@@ -46,6 +46,8 @@ export interface FlightOptions {
   tiles?: TileSetting;
   /** After its splashdown the ship tips over and breaks up (as on Flight 14 and earlier flights). */
   splashFireball?: boolean;
+  /** The Starlinks deploy on their own at the planned time (the missions), or when the player asks (Free Roam). */
+  deploy?: 'auto' | 'manual';
 }
 
 export type MissionStart = 'pad' | 'separation' | 'boosterLanding' | 'entry';
@@ -218,6 +220,9 @@ export interface Snapshot {
     door: number;
     aboard: number;
     total: number;
+    /** Seconds until the dispenser pushes the next one out (while deploying), and since the last one left. */
+    nextIn: number | null;
+    since: number;
     /** Each one deployed: its number, where (pad ENU, m), its attitude (its axes -> ENU), and since when it's out (s). */
     sats: { n: number; pos: V3; rot: M3; age: number }[];
   } | null;
@@ -260,6 +265,8 @@ export class Simulation {
   boosterOcean: [number, number] | null = null;
   /** What the ship carries: Starlink V3 satellites to deploy in orbit, or (null) the test flights' payload simulators. */
   payloadKind: 'starlink' | null = null;
+  /** Whether the Starlinks deploy on their own or when asked (configure). */
+  deployMode: 'auto' | 'manual' = 'auto';
   /** Its payload bay (Starlink flights). */
   bay: PayloadBay | null = null;
   /** Engine failures this flight: none, random (at roughly real rates) or scripted (a replay). */
@@ -289,6 +296,7 @@ export class Simulation {
     this.faultSeed = o.faultSeed ?? 1;
     this.tileLoss = o.tiles ?? 'off';
     this.splashFireball = o.splashFireball ?? false;
+    this.deployMode = o.deploy ?? 'auto';
   }
 
   reset(): void {
@@ -299,7 +307,7 @@ export class Simulation {
       { def: SUPER_HEAVY_V3, prop: SUPER_HEAVY_V3.propMass },
       { def: STARSHIP_V3, prop: STARSHIP_V3.propMass * MISSION.shipPropLoad },
     ]);
-    this.bay = this.payloadKind === 'starlink' ? new PayloadBay() : null;
+    this.bay = this.payloadKind === 'starlink' ? new PayloadBay(undefined, this.deployMode === 'auto') : null;
     this.faults = new EngineFaults(this.engineFaults, this.faultSeed, (text) => this.log(text));
     this.shield = new HeatShield(this.tileLoss, this.faultSeed + 7, (text) => this.log(text));
     if (this.bay) stack.stages[1].payload = PayloadBay.massFor(this.bay.aboard);
@@ -307,6 +315,7 @@ export class Simulation {
     this.health.clear();
     this.gripped.clear();
     this.node = null;
+    this.turnaround = null;
     this.waitUntil = null;
     this.returnNotice = null;
     this.inOrbitSince = null;
@@ -537,8 +546,10 @@ export class Simulation {
     this.mission.update(dt);
     this.trackBurn(dt);
     this.bay?.update(this.t, dt, this.mission.missionTime, this.find('ship'), (text) => this.log(text));
+    this.pilot.deployHold = this.bay?.hold ?? null;
     this.watchShield();
     this.watchSplash();
+    this.padTurnaround();
     this.faults.update(this.vehicles, (v) => this.aux.get(v.id)?.geo.h ?? 0, this.t, this.mission.missionTime, dt);
 
     // (Standing vehicles first: one hanging above looks at where they are at the step's end.)
@@ -688,12 +699,16 @@ export class Simulation {
     }
     if (target.kind === 'tower') {
       const free = (p: number) => !this.towers[p].disabled && !this.vehicles.some((v) => v.status === 'caught' && v.caughtPad === p);
-      const pad = target.pad >= 0 && free(target.pad) ? target.pad : [0, 1].find(free);
+      // A catch beside the tower (arms swung round): its arms set down the booster they hold
+      // first, then swing round for the ship (padTurnaround).
+      const swung = target.slew !== undefined && target.pad >= 0 && !this.towers[target.pad].disabled;
+      const pad = swung || (target.pad >= 0 && free(target.pad)) ? target.pad : [0, 1].find(free);
       if (pad === undefined) {
         refuse("Can't return to a tower: both are holding a vehicle or wrecked");
         return;
       }
-      target = { kind: 'tower', pad };
+      target = swung ? { kind: 'tower', pad, slew: target.slew } : { kind: 'tower', pad };
+      this.turnaround = swung ? { pad, slew: target.slew!, stage: 'wait', t: this.t } : null;
     }
     this.pilot.set({ manual: false });
     m.shipReturn = new ShipReturn(this, ship, target, (text) => this.log(text));
@@ -707,6 +722,17 @@ export class Simulation {
    * Fail an engine now (the player's engine-out key, or a test): of the vehicle's active stage, a
    * running one if any (else any that works), at random unless the ring / number are given.
    */
+  /** The player's deploy key (B): start, hold or resume the Starlink deployment; the answer goes in the log. */
+  requestDeploy(): void {
+    if (!this.bay) {
+      this.log('No Starlinks aboard: this flight carries the payload simulators');
+      return;
+    }
+    const ship = this.find('ship');
+    const alt = ship ? norm(ship.r) - RE : 0;
+    this.log(this.bay.request(ship, alt));
+  }
+
   failEngine(id: string, ring?: number, n?: number): boolean {
     const v = this.find(id);
     if (!v || (v.status !== 'flight' && v.status !== 'held')) return false;
@@ -724,6 +750,78 @@ export class Simulation {
   }
 
   /** A ship that tips over after its splashdown: a few seconds on the water, then the fireball. */
+  /**
+   * A ship coming home to the tower that caught its booster (Flight 15): once the booster has
+   * settled on the arms, the tower sets it back down on the launch mount, opens the arms, takes
+   * them back up to the top and swings them round to the side, where the ship is caught clear of
+   * the booster below.
+   */
+  turnaround: { pad: number; slew: number; stage: 'wait' | 'lower' | 'release' | 'raise' | 'swing' | 'ready'; t: number } | null = null;
+
+  private padTurnaround(): void {
+    const ta = this.turnaround;
+    if (!ta || ta.stage === 'ready') return;
+    const arms = this.towers[ta.pad];
+    if (arms.disabled) {
+      this.turnaround = null;
+      return;
+    }
+    const booster = this.vehicles.find((v) => v.id === 'booster' && v.status === 'caught' && v.caughtPad === ta.pad);
+    const name = `Pad ${ta.pad + 1}`;
+    switch (ta.stage) {
+      case 'wait':
+        // The booster caught and steady on the arms for a minute (or none there: straight to the swing).
+        if (booster) {
+          if (this.t - ta.t < 60 || arms.moving) break;
+          arms.command({ offset: ARMS.minOffset });
+          this.log(`${name} chopsticks lowering Super Heavy back onto the launch mount`);
+          ta.stage = 'lower';
+        } else if (!this.vehicles.some((v) => v.id === 'booster' && v.status === 'flight')) {
+          ta.stage = 'raise';
+          arms.command({ offset: ARMS.maxOffset, angle: ARMS.openDeg });
+        }
+        ta.t = this.t;
+        break;
+      case 'lower':
+        // (The carriage stops with the booster standing on the mount: held still there a few
+        // seconds, its weight on the mount, before the arms open.)
+        if (booster && arms.offset > arms.floor + 0.05) {
+          ta.t = this.t;
+          break;
+        }
+        arms.hold('lift');
+        if (!booster || this.t - ta.t > 4) {
+          arms.command({ angle: ARMS.openDeg });
+          ta.stage = 'release';
+          ta.t = this.t;
+        }
+        break;
+      case 'release':
+        if (!booster && arms.angle >= ARMS.openDeg - 1) {
+          this.log(`Super Heavy back on the ${name} launch mount; chopsticks going up to the top`);
+          arms.command({ offset: ARMS.maxOffset });
+          ta.stage = 'raise';
+          ta.t = this.t;
+        }
+        break;
+      case 'raise':
+        if (arms.offset >= ARMS.maxOffset - 0.05) {
+          arms.command({ slew: ta.slew });
+          this.log(`${name} chopsticks swinging ${Math.abs(ta.slew)} deg round for the ship catch`);
+          ta.stage = 'swing';
+        }
+        break;
+      case 'swing':
+        if (Math.abs(arms.slew - ta.slew) < 0.05) {
+          this.log(`${name} chopsticks ready for the ship`);
+          ta.stage = 'ready';
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
   private watchSplash(): void {
     if (!this.splashFireball) return;
     const ship = this.find('ship');
@@ -745,7 +843,8 @@ export class Simulation {
     if (!ship || ship.status !== 'flight' || this.shield.verdict || this.mission.phase !== 'coast') return;
     if (orbitApsides(ship.r, ship.v).perigee < 120e3) return;
     this.inOrbitSince ??= this.t;
-    if (this.bay ? this.bay.state !== 'done' : this.t - this.inOrbitSince < 600) return;
+    // (A deployment the player starts when they like: ten minutes in, if the bay isn't busy.)
+    if (this.bay?.auto ? this.bay.state !== 'done' : this.bay?.busy || this.t - this.inOrbitSince < 600) return;
     const ret = this.mission.shipReturn;
     const { verdict, text } = this.shield.inspect(!ret || ret.target.kind === 'tower');
     this.log(text);
@@ -757,6 +856,8 @@ export class Simulation {
     if (this.mission.phase === 'countdown' || this.mission.phase === 'ascent' || this.mission.phase === 'hotstaging') return false;
     // (Deploying: the satellites leave one by one at physics speed.)
     if (this.bay?.busy) return false;
+    // (The tower turning round for a ship catch: the arms move at physics speed.)
+    if (this.turnaround && this.turnaround.stage !== 'ready' && (this.turnaround.stage !== 'wait' || this.vehicles.some((v) => v.id === 'booster' && v.status === 'caught'))) return false;
     // A burn coming up: off rails in time to turn to it (on rails the attitude is frozen).
     const until = this.railsUntil();
     if (until !== null && this.t >= until - 0.01) return false;
@@ -788,7 +889,7 @@ export class Simulation {
     if (r && r.phase === 'burn' && r.plan.burns[r.burnIndexNow]?.label === 'entry burn') until = Math.min(until ?? Infinity, this.t);
     // (And at the satellites' deployment, to watch it.)
     const tz = this.mission.tZero;
-    if (this.bay?.state === 'stowed' && tz !== null && this.t < tz + STARLINK_V3.deployAt) until = Math.min(until ?? Infinity, tz + STARLINK_V3.deployAt);
+    if (this.bay?.state === 'stowed' && this.bay.auto && tz !== null && this.t < tz + STARLINK_V3.deployAt) until = Math.min(until ?? Infinity, tz + STARLINK_V3.deployAt);
     return until;
   }
 
@@ -849,6 +950,9 @@ export class Simulation {
     const cyl = this.hull(v, aux, t);
     let push: Contact | null = null;
     this.towerStates().forEach((st, pad) => {
+      // (Arms only opening, not lifting or swinging: they're moving away from the hull, not pushing it.)
+      const arms = this.towers[pad];
+      if (arms.targetAngle > arms.angle + 0.01 && Math.abs(arms.targetOffset - arms.offset) < 0.01 && Math.abs(arms.targetSlew - arms.slew) < 0.01) return;
       const l = armContact(pad, 'L', st, cyl);
       const r = armContact(pad, 'R', st, cyl);
       if (l && r && dot(l.normal, r.normal) < 0) return;
@@ -1310,8 +1414,14 @@ export class Simulation {
       if (v.status !== 'flight') continue;
       const aux = this.aux.get(v.id) ?? currentAux(v, this.t, this.env);
       const ids = v.stages.map((s) => s.def.id);
-      const model: EntryModel =
+      let model: EntryModel =
         ids.length > 1 ? { dragArea: 30 } : ids[0] === 'booster' ? { dragArea: 80 } : SHIP_ENTRY;
+      // A ship on entry guidance: its path as banked now (the lift up that's left after the bank).
+      const bank = v.id === 'ship' ? this.mission.shipReturn?.entryBank : null;
+      if (bank != null && model.liftToDrag) {
+        const ld = model.liftToDrag;
+        model = { ...model, liftToDrag: (sp) => ld(sp) * Math.cos(bank) };
+      }
       out.push(predictTrajectory(v.id, v.r, v.v, this.t, model, aux.mp.mass));
       const rem = this.maneuverRemaining();
       if (this.node && rem && this.node.node.vehicle === v.id) {
@@ -1428,6 +1538,8 @@ export class Simulation {
             door: this.bay.door,
             aboard: this.bay.aboard,
             total: this.bay.total,
+            nextIn: this.bay.nextIn(this.t),
+            since: this.bay.sinceRelease(this.t),
             sats: this.bay.sats.map((s) => ({
               n: s.n,
               pos: mat3Vec(ECEF_TO_ENU, sub(eciToEcef(s.r, this.t), PAD_GROUND_ECEF)),

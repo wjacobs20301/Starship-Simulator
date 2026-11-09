@@ -137,6 +137,11 @@ export class GameMenu {
         return;
       }
       const act = button?.dataset.act;
+      if (act === 'starlink') {
+        updateSettings({ freeStarlink: !settings.freeStarlink });
+        this.render();
+        return;
+      }
       if (act === 'faults' || act === 'tiles') {
         updateSettings(act === 'faults' ? { engineFailures: !settings.engineFailures } : { tileLoss: !settings.tileLoss });
         this.render();
@@ -297,6 +302,9 @@ export class GameMenu {
           `the booster flies itself home to the tower unless you take it over (<kbd>V</kbd> to switch to it, <kbd>L</kbd> for the controls).</p>` +
           this.padPicker() +
           this.weatherPicker() +
+          `<div class="mn-real"><div class="mn-label">Payload</div>` +
+          `<div class="mn-row"><span>Starlink V3 satellites<small>26 in the bay: press <kbd>B</kbd> above 120 km to deploy, again to hold</small></span>` +
+          `<button class="mn-toggle${settings.freeStarlink ? ' on' : ''}" data-act="starlink"><i></i></button></div></div>` +
           this.realism() +
           `<button class="mn-go" data-act="free">Go to the pad <b>›</b></button></div>`
         );

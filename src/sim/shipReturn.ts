@@ -32,7 +32,7 @@ import { atmosphere } from './atmosphere';
 import { airRelativeVelocity, ecefToEci, ecefToEnuMatrix, ecefToGeodetic, eciToEcef, geodeticToEcef, localBasisEci } from './frames';
 import { orbitApsides } from './guidance';
 import { type V3, add, clamp, cross, dot, mat3Transpose, mat3Vec, norm, normalize, qrot, scale, sub } from './math';
-import { MOUNTS, TOWERS, awayFromTower, catchGap } from './padCollision';
+import { MOUNTS, TOWERS, awayFromTower, catchGap, catchPoint } from './padCollision';
 import { eciDirToPad, eciToPad, eciVelToPad, padDirToEci, padToEci } from './padFrame';
 import { entryAlpha, entryAttitude, heatFlux } from './shipReentry';
 import type { Simulation } from './simulation';
@@ -45,7 +45,8 @@ import { workingEngines } from './engineFaults';
 const rslWorking = (ship: Vehicle) => Math.max(1, workingEngines(ship, 0, (ring) => ring === 0));
 
 export type ReturnTarget =
-  | { kind: 'tower'; pad: number }
+  /** slew: the arms swung round this far (deg) to catch it beside the tower, not over the mount (a booster standing there). */
+  | { kind: 'tower'; pad: number; slew?: number }
   | { kind: 'ocean'; lat: number; lon: number }
   /** A patch of open ground by the pads (a diverted tower approach sets down there). */
   | { kind: 'ground'; lat: number; lon: number };
@@ -167,7 +168,7 @@ export function greatCircleKm(a: { lat: number; lon: number }, b: { lat: number;
 export function targetLatLon(target: ReturnTarget): { lat: number; lon: number } {
   if (target.kind !== 'tower') return { lat: target.lat, lon: target.lon };
   // Mount centres are in Pad 1's ENU frame; a few hundred metres apart, flat-Earth is fine.
-  const [e, n] = MOUNTS[target.pad] ?? [0, 0];
+  const [e, n] = MOUNTS[target.pad] ? catchPoint(target.pad, target.slew ?? 0) : [0, 0];
   return { lat: PAD.latDeg + n / 110_800, lon: PAD.lonDeg + e / (111_320 * Math.cos(PAD.latDeg * DEG)) };
 }
 
@@ -812,6 +813,12 @@ export class ShipReturn {
   private bank = 0;
   private bankSign = 1;
   private nextGuide = 0;
+  /** When the bank last reversed (sim time). */
+  private reversedAt = -Infinity;
+  /** The bank the entry guidance is flying (rad, + = left), for the map's predicted path. */
+  get entryBank(): number | null {
+    return this.phase === 'entry' ? this.bank * this.bankSign : null;
+  }
   private heading: V3 | null = null;
   private oneEngine = false;
   /** A burn paused, swung off its direction (it resumes once back on it). */
@@ -879,7 +886,7 @@ export class ShipReturn {
   private frame(): { target: V3; pos: (r: V3) => V3; vel: (r: V3, v: V3) => V3; dir: (d: V3) => V3; dirIn: (d: V3) => V3 } {
     const t = this.sim.t;
     if (this.target.kind === 'tower') {
-      const [e, n] = MOUNTS[this.target.pad];
+      const [e, n] = catchPoint(this.target.pad, this.target.slew ?? 0);
       return { target: [e, n, 0], pos: (r) => eciToPad(r, t), vel: (r, v) => eciVelToPad(r, v, t), dir: (d) => padDirToEci(d, t), dirIn: (d) => eciDirToPad(d, t) };
     }
     const lat = this.target.lat * DEG;
@@ -1050,7 +1057,11 @@ export class ShipReturn {
           break;
         }
         const dir = this.sim.pilot.maneuverDir ?? axis;
-        applyControl(ship, aux, dir, dt);
+        // (Waiting for a burn while the Starlinks go out: the ship holds the deployment attitude
+        // instead, and turns to the burn once they're clear; the burn waits for that.)
+        const hold = this.burning ? null : this.sim.bay?.hold;
+        if (hold) applyControl(ship, aux, hold.nose, dt, undefined, hold.bodyZ);
+        else applyControl(ship, aux, dir, dt);
         const start = node.node.t - snap.burnTime / 2;
         const aligned = dot(axis, dir) > Math.cos(3 * DEG);
         if (!this.burning && t >= start && aligned) {
@@ -1123,7 +1134,7 @@ export class ShipReturn {
             this.log(`Pad ${(this.target as { pad: number }).pad + 1} ship QD arm swinging clear`);
           }
           // And brings its arms round to face the launch mount (they may have been swung aside).
-          arms?.command({ slew: 0 });
+          arms?.command({ slew: (this.target as { slew?: number }).slew ?? 0 });
         }
         break;
       }
@@ -1245,7 +1256,11 @@ export class ShipReturn {
    * One predictor-corrector cycle. Range: how far to bank (the vertical part of the lift, lift x
    * cos(bank), sets the range; predicted with that alone, since reversals cancel the sideways
    * part). Crossrange: the target's distance from the current flight plane; bank toward its
-   * side, reversing when it outgrows a deadband that narrows as the ship slows.
+   * side, reversing when it outgrows a deadband. The sideways part of the lift swings the
+   * crossrange steadily one way then the other, so the deadband is how far it swings: it starts
+   * at ~23 km and narrows smoothly as the ship slows (and the target gets closer), so the track
+   * weaves in shallow S-turns that tighten onto the target. (No sooner than 20 s apart: each
+   * reversal is a roll of the whole ship.)
    */
   private guideEntry(ship: Vehicle, aux: Aux): void {
     const goal = targetLatLon(this.target);
@@ -1288,7 +1303,7 @@ export class ShipReturn {
     const n = normalize(cross(rE, vE));
     const crossKm = Math.asin(clamp(dot(normalize(goalEcef), n), -1, 1)) * 6371;
     const speed = norm(vE);
-    const deadband = 1 + 0.004 * speed; // km: ~30 km at orbital speed, ~2 km at 250 m/s
+    const deadband = 1 + 0.003 * speed; // km: ~23 km at orbital speed, ~2 km at 250 m/s
     const want = crossKm >= 0 ? 1 : -1;
     // Late in the entry the range is often sorted and needs little bank, which leaves no lift to
     // take out a crossrange error with: bank at least enough toward the target to fly it out.
@@ -1302,8 +1317,9 @@ export class ShipReturn {
         }
       }
     }
-    if (want !== this.bankSign && Math.abs(crossKm) > deadband && this.bank > 5 * DEG) {
+    if (want !== this.bankSign && Math.abs(crossKm) > deadband && this.bank > 5 * DEG && t - this.reversedAt > 20) {
       this.bankSign = want;
+      this.reversedAt = t;
       this.log(`Return: bank reversal (${crossKm.toFixed(0)} km crossrange)`);
     }
     const miss = greatCircleKm(at, goal);
@@ -1478,7 +1494,7 @@ export class ShipReturn {
       if (tower && base - stop < 8 && Math.abs(vel[2]) < 3 && Math.hypot(vel[0], vel[1]) < 3 && offDist < APPROACH_OFF && this.phase === 'landing') {
         this.phase = 'terminal';
         // The tower opens its arms wide for the ship's arrival.
-        this.arms?.command({ angle: ARMS.maxOpenDeg, slew: 0 });
+        this.arms?.command({ angle: ARMS.maxOpenDeg, slew: (this.target as { slew?: number }).slew ?? 0 });
         this.log(`Return: hovering by the tower, ${offDist.toFixed(0)} m from the catch point`);
       }
     } else {

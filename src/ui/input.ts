@@ -39,6 +39,8 @@ export interface InputActions {
   toggleSas(): void;
   /** G: cycle the active stage's engine set. */
   cycleEngines(): void;
+  /** B: deploy the Starlinks (or hold / resume a deployment). */
+  deploy(): void;
   /** Z: full throttle, X: cut throttle. */
   throttleFull(): void;
   throttleCut(): void;
@@ -104,6 +106,7 @@ export function bindKeys(a: InputActions): void {
     else if (k === 'l') a.toggleManual();
     else if (k === 't') a.toggleSas();
     else if (k === 'g') a.cycleEngines();
+    else if (k === 'b') a.deploy();
     else if (k === 'z') a.throttleFull();
     else if (k === 'x') a.throttleCut();
     else if (k === 'escape') a.menu();

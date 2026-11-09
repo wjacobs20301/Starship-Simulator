@@ -34,9 +34,11 @@ export interface Settings {
   engineFailures: boolean;
   /** Heat shield tiles can shake loose on the way up (the gaps run hot at entry). */
   tileLoss: boolean;
+  /** Free roam: the ship carries 26 Starlink V3 satellites (deployed with B in orbit). */
+  freeStarlink: boolean;
 }
 
-const DEFAULTS: Settings = { shipSerial: 'SN41', muted: false, renderScale: 'auto', clouds: true, freeWeather: 'starbase', engineFailures: false, tileLoss: false };
+const DEFAULTS: Settings = { shipSerial: 'SN41', muted: false, renderScale: 'auto', clouds: true, freeWeather: 'starbase', engineFailures: false, tileLoss: false, freeStarlink: false };
 const STORAGE_KEY = 'starship-sim.settings';
 
 function load(): Settings {
