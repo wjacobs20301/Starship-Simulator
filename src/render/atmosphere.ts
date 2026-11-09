@@ -681,10 +681,70 @@ const CLOUD_GLSL = /* glsl */ `
     return vec4(col * a, a);
   }
 
+  // The middle layer's patches (tens of km), more of the sky as its cover grows: 0..1 at p.
+  float midPatchy(vec3 p, float cov, float t) {
+    float big = textureLod(tNoise, p / 45000.0 + uDrift * 1.5, noiseLod(t, 45000.0)).g;
+    return smoothstep(0.62 - 0.3 * cov, 0.72 - 0.25 * cov, big + 0.2 * cov);
+  }
+
+  // The middle layer's depth, m: a thin altocumulus a couple of hundred metres, a dense
+  // altostratus most of a kilometre.
+  float midDepth(float cov) { return mix(150.0, 900.0, smoothstep(0.3, 0.9, cov)); }
+
+  // How much sunlight gets down through the middle layer to p, 0..1 (1 above it or where
+  // there's none). t: p's distance from the camera.
+  float midShade(vec3 p, float t) {
+    float rp = length(p);
+    vec3 n = p / rp;
+    float mus = dot(n, uSun);
+    if (mus < 0.02) return 1.0;
+    vec4 c = weatherC(n);
+    float alt = 2000.0 + 6000.0 * c.b;
+    float h = rp - uRc;
+    if (c.g < 0.02 || h > alt) return 1.0;
+    vec3 q = p + uSun * ((alt - h) / mus);
+    c = weatherC(normalize(q));
+    float cov = c.g;
+    if (cov < 0.02) return 1.0;
+    float sheet = smoothstep(0.5, 0.9, cov);
+    float a = midPatchy(q, cov, max(t, 8000.0)) * mix(0.35, 0.8, sheet);
+    // (Light diffuses down through it: under a grey altostratus a soft, sourceless light.)
+    return 1.0 - 0.85 * a;
+  }
+
   // The middle layer (altocumulus, altostratus) where the ray crosses its height there (2.5 to
   // 6 km): thin, it's rows of small rounded cells; dense, a smooth grey sheet. (light, opacity)
-  // and its distance.
+  // and its distance. From inside it (flying up or down through it), a fog as deep as the
+  // layer is along the ray.
   vec4 midDeck(vec3 ro, vec3 rd, float tEnd, float mu, out float tm) {
+    float r0 = length(ro);
+    vec3 n0 = ro / r0;
+    vec4 c0 = weatherC(n0);
+    float h0 = r0 - uRc;
+    float alt0 = 2000.0 + 6000.0 * c0.b;
+    float half0 = 0.5 * midDepth(c0.g);
+    if (c0.g > 0.02 && abs(h0 - alt0) < half0) {
+      // Inside: the way out of the layer along the ray (up or down; level, many km of it).
+      float up = dot(rd, n0);
+      float len = up > 0.002 ? (alt0 + half0 - h0) / up : up < -0.002 ? (h0 - alt0 + half0) / -up : 1e9;
+      len = min(len, min(tEnd, 30000.0));
+      float cov = c0.g;
+      float sheet = smoothstep(0.5, 0.9, cov);
+      // (Drifting through it: thicker and thinner wisps, the cells' size.)
+      vec3 q = vec3(ro.x / 1600.0, ro.y / 1100.0, ro.z / 1300.0) + uDrift * 6.0;
+      float wisp = textureLod(tNoise, q + rd * min(len, 800.0) / 1300.0, 0.0).g;
+      float dens = midPatchy(ro, cov, 0.0) * mix(0.5 + 0.9 * wisp, 1.0, sheet);
+      // Visibility: a few hundred metres in a thin layer, ~100 m in a dense one.
+      float vis = mix(450.0, 110.0, sheet);
+      float a = 1.0 - exp(-dens * len / vis);
+      if (a < 0.005) { tm = -1.0; return vec4(0.0); }
+      float day = smoothstep(-0.15, 0.1, dot(n0, uSun));
+      // (Lit from above: brighter near its top, greyer near its base.)
+      float depthIn = clamp((alt0 + half0 - h0) / (2.0 * half0), 0.0, 1.0);
+      vec3 col = uCloudSun * (sunAt(ro) * (0.45 + 0.5 * cloudPhase(mu, 0.3)) * mix(1.0, mix(0.6, 0.35, sheet), depthIn) + vec3(0.2, 0.26, 0.36) * 0.8 * day);
+      tm = 0.5 * min(len, 2.0 * vis);
+      return vec4(col * a, a);
+    }
     vec4 cw;
     tm = sheetHit(ro, rd, tEnd, 4000.0, 2, 2000.0, 6000.0, cw);
     if (tm <= 0.0 || cw.g < 0.02) return vec4(0.0);
@@ -692,9 +752,7 @@ const CLOUD_GLSL = /* glsl */ `
     vec3 n = normalize(p);
     float cov = cw.g;
     float cosv = max(abs(dot(rd, n)), 0.08);
-    // Patches of it (tens of km), more of the sky as the cover grows.
-    float big = textureLod(tNoise, p / 45000.0 + uDrift * 1.5, noiseLod(tm, 45000.0)).g;
-    float patchy = smoothstep(0.62 - 0.3 * cov, 0.72 - 0.25 * cov, big + 0.2 * cov);
+    float patchy = midPatchy(p, cov, tm);
     // Altocumulus cells (~1 km), along the wind.
     vec3 q = vec3(p.x / 1600.0, p.y / 1100.0, p.z / 1300.0) + uDrift * 6.0;
     float cells = textureLod(tNoise, q, noiseLod(tm, 1100.0)).g;
@@ -709,7 +767,7 @@ const CLOUD_GLSL = /* glsl */ `
     if (a < 0.005) return vec4(0.0);
     float day = smoothstep(-0.15, 0.1, dot(n, uSun));
     // (Seen from below, its sunlit side is above: greyer.)
-    float below = length(ro) < uRc + 2000.0 + 6000.0 * cw.b ? mix(0.75, 0.4, sheet) : 1.0;
+    float below = r0 < uRc + 2000.0 + 6000.0 * cw.b ? mix(0.75, 0.4, sheet) : 1.0;
     vec3 col = uCloudSun * (sunAt(p) * (0.55 + 1.1 * cloudPhase(mu, 0.55)) * below + vec3(0.2, 0.26, 0.36) * 0.8 * day);
     return vec4(col * a, a);
   }
@@ -753,7 +811,7 @@ const CLOUD_GLSL = /* glsl */ `
     // "covered", and thin: a film over the sea, as from orbit, not a white sheet.)
     float alpha = cov * (1.0 - exp(-od)) * (1.0 - (r0 > uRc + mid ? 0.45 : 0.0) * smoothstep(0.6, 0.95, a.w) * (1.0 - thickW(w)));
     vec3 p = ro + rd * t;
-    vec3 sunCol = sunAt(p + n * (w.z - mid));
+    vec3 sunCol = sunAt(p + n * (w.z - mid)) * midShade(p + n * (w.z - mid), t);
     float phase = 0.55 + 1.6 * mix(cloudPhase(mu, 0.55), cloudPhase(mu, -0.25), 0.3);
     float day = smoothstep(-0.15, 0.1, dot(n, uSun));
     // (Seen from below, the sunlit side is above: darker.)
@@ -803,7 +861,7 @@ const CLOUD_GLSL = /* glsl */ `
       od += cloudDensity(q, w, false, t) * dh / mus;
     }
     // (Some light still gets through even a thick cloud's shadow: scattered down through it.)
-    return max(exp(-SIGMA * 2.5 * od), 0.2 * exp(-SIGMA * 0.3 * od));
+    return max(exp(-SIGMA * 2.5 * od), 0.2 * exp(-SIGMA * 0.3 * od)) * midShade(P, t);
   }
 
   // In a thunderstorm's weather, above the cumulus between the cells: how far the march can leap
@@ -1040,6 +1098,7 @@ const CLOUD_GLSL = /* glsl */ `
         // camera cut a crisp edge or a flat base into contour rings, or with a random offset,
         // into grain.)
         float phase = 0.55 + 1.6 * mix(cloudPhase(mu, 0.55), cloudPhase(mu, -0.25), 0.3);
+        float midSh = -1.0;
         float T = 1.0;
         vec3 C = vec3(0.0);
         float tw = 0.0;
@@ -1085,7 +1144,9 @@ const CLOUD_GLSL = /* glsl */ `
             if (clearRun >= 4) inCloud = false;
           }
           if (dens > 0.002) {
-            vec3 sunCol = sunAt(p);
+            // (The middle layer's shade: it varies over tens of km, so once per ray.)
+            if (midSh < 0.0) midSh = midShade(p, t);
+            vec3 sunCol = sunAt(p) * midSh;
             float odSun = 0.0;
             if (sunCol.r + sunCol.g > 0.0) {
               // Through the cloud toward the sun (two samples: one close, with the fine detail,

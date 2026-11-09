@@ -21,7 +21,7 @@
 //
 // All targeting is done in the pad's rotating ENU frame (padFrame.ts).
 
-import { CN_ALPHA, REF_AREA, axialCoefficient } from './aero';
+import { CN_ALPHA, REF_AREA, axialCoefficient, normalCoefficient } from './aero';
 import { atmosphere } from './atmosphere';
 import { DEG, PAD } from './constants';
 import type { Aux } from './dynamics';
@@ -31,7 +31,7 @@ import { gravityJ2 } from './gravity';
 import { applyControl } from './control';
 import { type V3, add, clamp, dot, norm, normalize, qrot, scale, sub } from './math';
 import { eciDirToPad, eciToPad, eciVelToPad, padDirToEci } from './padFrame';
-import { type IgnitionPlan, type Lander, STEER_Q_ALPHA, landingBurn, normalLandingProp, planIgnition, retroCone } from './landingPlan';
+import { type IgnitionPlan, type Lander, STEER_Q_ALPHA, brakeDecel, landingBurn, normalLandingProp, planIgnition, retroCone } from './landingPlan';
 import { MOUNTS, catchGap } from './padCollision';
 import type { Simulation } from './simulation';
 import type { TowerArms } from './tower';
@@ -102,6 +102,11 @@ export type ReturnPhase = 'flip' | 'boostback' | 'coast' | 'entry' | 'landing' |
 
 /** Where the booster aims: base centred over the launch mount, just above the arms. */
 const HOVER_ABOVE = CATCH.finBottom + 10;
+/** Final approach: fastest descent onto the arms, m/s, and how hard it slows from that, m/s^2. */
+const TERMINAL_SPEED = 12;
+const TERMINAL_DECEL = 2;
+/** The most it changes its vertical speed by in the final approach, m/s^2. */
+const TERMINAL_ACCEL = 3;
 /**
  * Descent into the arms is allowed only with the catch fins inside this radius of the catch
  * point, m; outside it the booster's body is kept above the arms' rails (it would sweep through
@@ -118,7 +123,7 @@ const ARMS_CLEARANCE = 5;
  * more than this fraction of the engines' thrust. The rest is margin for the unexpected and for
  * steering.
  */
-const LANDING_MARGIN = 0.8;
+const LANDING_MARGIN = 0.9;
 /** Re-plan the landing burn this often while falling (once a second while it's far off), s. */
 const PLAN_EVERY = 0.25;
 /** Plan the landing only below this height (the fall from here is what the air shapes), m. */
@@ -147,7 +152,7 @@ const ENTRY_BURN_TILT = 10 * DEG;
  * down: a heavy booster can't slow down in time, or hover on its 3 center engines.
  */
 const PROP_NEED_FACTOR = 1.3;
-const PROP_NEED_EXTRA = 20e3;
+const PROP_NEED_EXTRA = 12e3;
 const VENT_RATE = 30e3; // kg/s
 /** Venting starts only for more than this much excess, kg. */
 const VENT_HYSTERESIS = 5e3;
@@ -158,7 +163,7 @@ const LANDING_GAINS = { wn: 1.4, zeta: 0.9, rollDamp: 0.5 };
 /** Steady wind at the tower's top over which the catch is called off, m/s (~23 knots). */
 export const CATCH_WIND_LIMIT = 11.8;
 /** Steady wind anywhere from the tower's top up to ALOFT_TOP (m), where the landing burn flies, over which the catch is called off too, m/s. */
-export const ALOFT_WIND_LIMIT = 14.5;
+export const ALOFT_WIND_LIMIT = 19;
 const ALOFT_TOP = 8000;
 /** The tower's wind limit (CATCH_WIND_LIMIT) holds up to this height too, m. */
 const LOW_TOP = 3000;
@@ -273,6 +278,8 @@ export class BoosterReturn {
   /** Where the landing would end, relative to the mount (pad ENU east, north), m. */
   private miss: V3 | null = null;
   private threeEngines = false;
+  /** The landing burn's gentle last part (on the center engines) has begun. */
+  private finalDescent = false;
   private trimming = false;
   private lastFin: V3 | null = null;
   private finVel: V3 = [0, 0, 0];
@@ -579,16 +586,19 @@ export class BoosterReturn {
           // Retrograde ("gravity turn") landing burn: braking along the velocity slows the
           // horizontal and vertical speeds together, so the booster flies a straight line and
           // stops where its velocity vector points. The vertical plan sets the deceleration
-          // (arrive at the hover point still descending at ~4 m/s); a small horizontal correction
-          // moves that end point onto the mount.
+          // (brakeDecel: hard down to a gate a few hundred metres up, then gently to the hover
+          // point, arriving still descending at ~4 m/s); a small horizontal correction moves that
+          // end point onto the mount.
           const h = Math.max(1, baseHeight - hover[2]);
           const vz = Math.max(1, -velPad[2]);
-          const aDec = Math.max(0, vz * vz - 16) / (2 * h);
+          const brake = brakeDecel(h, vz, this.finalDescent);
+          this.finalDescent = brake.final;
+          const aDec = brake.a;
           // Where the burn, carried on as it is, ends (simulated a few times a second: drag, and
           // the engines' minimum thrust, bend it away from a straight line).
           const vh = Math.hypot(velPad[0], velPad[1]);
           if (!this.landEnd || t >= this.landEnd.t + 0.2) {
-            const run = { throttle: Math.max(0, ...booster.engines.filter((e) => e.place.ring <= 1).map((e) => e.throttle)), few: this.threeEngines };
+            const run = { throttle: Math.max(0, ...booster.engines.filter((e) => e.place.ring <= 1).map((e) => e.throttle)), few: this.threeEngines, final: this.finalDescent };
             const burn = landingBurn({ z: baseHeight, vh, vz: velPad[2], mass }, this.hoverHeight, this.landingEngines(booster), run);
             this.landEnd = { range: burn.range, time: burn.time, t };
           }
@@ -641,21 +651,25 @@ export class BoosterReturn {
           const drift = Math.hypot(finVel[0], finVel[1]);
           const aboveArms = baseHeight - catchBase;
           // Descend while lined up (or still well above the arms); pause if it drifts off.
-          // Over the arms' opening, descend (the last 25 m only when lined up and steady); outside
+          // Over the arms' opening, descend (the last 15 m only when lined up and steady); outside
           // it, stay (or climb back) above the rails so the body can't sweep through an arm.
           const inCorridor = off < ARMS_CORRIDOR;
           const clear = baseHeight - (this.arms.top + ARMS_CLEARANCE);
           // (The arms capture within CAPTURE_RADIUS: lined up well inside that is enough. Waiting for
           // better in gusty air only burns the hover's propellant.)
           // How well lined up: tighter while there's propellant to wait for it (the hover burns
-          // ~1 t/s, and the last 25 m down to the arms takes ~10 t), down to "inside the capture
+          // ~1 t/s, and the last 15 m down to the arms takes ~6 t), down to "inside the capture
           // radius" when there's little to spare.
           const spare = clamp((this.propLeft(booster) - 15e3) / 10e3, 0, 1);
-          const go = inCorridor && (aboveArms > 25 || (off < 1.8 - 1.0 * spare && drift < 0.9 - 0.45 * spare));
+          const go = inCorridor && (aboveArms > 15 || (off < 1.8 - 0.6 * spare && drift < 0.9 - 0.3 * spare));
           // (Quicker while well above them: hovering burns ~1 t/s, more than a windy day leaves.)
-          const vzCmd = go ? -Math.min(6, clamp(0.1 * aboveArms + 1.5, 1.5, 4) + 0.06 * Math.max(0, aboveArms - 30)) : !inCorridor && clear < 0 ? clamp(-0.5 * clear, 0.5, 3) : 0;
+          // (Slowing steadily to the last 12 m, which it takes at ~2-3 m/s while the arms close.)
+          const vDown = aboveArms > 12 ? Math.sqrt(2.7 * 2.7 + 2 * TERMINAL_DECEL * (aboveArms - 12)) : clamp(0.1 * aboveArms + 1.5, 1.5, 4);
+          const vzCmd = go ? -Math.min(TERMINAL_SPEED, vDown) : !inCorridor && clear < 0 ? clamp(-0.5 * clear, 0.5, 3) : 0;
           // Position loop well inside the attitude loop's bandwidth.
-          aCmd = [0, 0, 1.4 * (vzCmd - velPad[2]) + 9.79];
+          // (Speeding up and slowing gently: a sudden change of thrust swings the booster sideways
+          // on its tilt, and the position loop chases that swing round the corridor.)
+          aCmd = [0, 0, clamp(1.4 * (vzCmd - velPad[2]), -TERMINAL_ACCEL, TERMINAL_ACCEL) + 9.79];
           const ref = HOVER_TUNING.byFins ? finPos : posPad;
           const refV = HOVER_TUNING.byFins ? finVel : velPad;
           // (Integral: a steady crosswind would otherwise hold it off-centre, never lined up.)
@@ -695,7 +709,10 @@ export class BoosterReturn {
         if (this.phase === 'landing' && sp > 5 && spAir > 5) {
           const wind = sub(velPad, velAir);
           const cross = sub(wind, scale(velPad, dot(wind, velPad) / (sp * sp)));
-          const push = (aux.q * this.liftPerRad(booster)) / (mass * spAir);
+          // (At the crossflow's own angle: past a few degrees the hull's crossflow drag adds
+          // much more than the slender-body lift alone.)
+          const alphaW = Math.asin(Math.min(1, norm(cross) / spAir));
+          const push = (aux.q * this.liftPerRad(booster, alphaW)) / (mass * spAir);
           aCorr = sub(aCorr, scale(cross, push));
         }
         if (aCmd[2] < 0.5) aCmd[2] = 0.5;
@@ -705,8 +722,13 @@ export class BoosterReturn {
         // in the burn) lift wins and the tilt must go the opposite way.
         const bulk = normalize(aCmd);
         const lateral = sub(aCorr, scale(bulk, dot(aCorr, bulk)));
-        const perRad = (force - aux.q * this.liftPerRad(booster)) / mass;
+        let perRad = (force - aux.q * this.liftPerRad(booster)) / mass;
         let tilt: V3 = Math.abs(perRad) > 3 ? scale(lateral, 1 / perRad) : [0, 0, 0];
+        // (Again with the lift at the angle that tilt makes to the airflow.)
+        if (aux.q > 2e3 && norm(tilt) > 0.03) {
+          perRad = (force - aux.q * this.liftPerRad(booster, Math.atan(norm(tilt)))) / mass;
+          tilt = Math.abs(perRad) > 3 ? scale(lateral, 1 / perRad) : [0, 0, 0];
+        }
         // (And never more than the side load the airframe takes at this dynamic pressure.)
         const qLimit = aux.q > 1e3 ? Math.asin(Math.min(1, STEER_Q_ALPHA / aux.q)) : Math.PI / 2;
         const maxTilt = Math.tan(Math.min(qLimit, this.phase === 'terminal' ? TERMINAL_TILT : 8 * DEG));
@@ -920,9 +942,13 @@ export class BoosterReturn {
   }
 
   /** Sideways aerodynamic force per radian of angle of attack, per unit dynamic pressure, m^2. */
-  private liftPerRad(v: Vehicle): number {
+  private liftPerRad(v: Vehicle, alpha = 0): number {
     const fins = v.stages[0].def.gridFins?.area ?? 0;
-    return REF_AREA * CN_ALPHA + fins * 1.1;
+    if (alpha < 0.01) return REF_AREA * CN_ALPHA + fins * 1.1;
+    // The side force at this angle (as the dynamics model it: slender-body lift plus the hull's
+    // crossflow drag, and the grid fins), per radian of it.
+    const [lo, hi] = v.extent;
+    return (REF_AREA * normalCoefficient(alpha, hi - lo) + fins * 1.1 * Math.sin(alpha) * Math.abs(Math.cos(alpha))) / alpha;
   }
 
   /** Engines-first drag acceleration at this speed and height, m/s^2. */

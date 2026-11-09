@@ -75,7 +75,7 @@ describe('landing burn planning', () => {
     const p = fall(350e3);
     expect(p.ok).toBe(true);
     expect(p.burn.peak).toBeLessThanOrEqual(0.8);
-    expect(p.z).toBeGreaterThan(2e3);
+    expect(p.z).toBeGreaterThan(1e3);
     expect(p.z).toBeLessThan(15e3);
   });
 

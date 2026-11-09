@@ -62,6 +62,33 @@ export function retroCone(q: number): number | null {
   return limit < 20 * (Math.PI / 180) ? 0.8 * limit : null;
 }
 
+/**
+ * The landing burn comes down in two parts, as Super Heavy's does: a hard brake on the full set
+ * of landing engines down to a gate this far above the hover point, then a gentle descent on the
+ * few center engines (slowing at FINAL_DECEL) to the hover point. Braking straight to the hover
+ * point instead lights it kilometres higher for the same peak thrust (it must arrive slow).
+ */
+export const FINAL_HEIGHT = 300;
+export const FINAL_DECEL = 5;
+/** Speed at the hover point, m/s (the final approach takes over). */
+const END_SPEED = 4;
+/** Within this of the gate, the brake hands over to the gentle part. */
+const GATE_BAND = 25;
+
+/**
+ * Braking deceleration (net of gravity and drag), m/s^2, at `h` above the hover point coming
+ * down at `vDown`: constant to the gate (`final` false), or constant from there to the hover
+ * point. Returns the deceleration and whether the gentle part has begun (it stays begun).
+ */
+export function brakeDecel(h: number, vDown: number, final: boolean): { a: number; final: boolean } {
+  const hh = Math.max(1, h);
+  const v2 = vDown * vDown;
+  const gate2 = END_SPEED * END_SPEED + 2 * FINAL_DECEL * FINAL_HEIGHT;
+  if (!final && (h - FINAL_HEIGHT < GATE_BAND || v2 <= gate2)) final = true;
+  if (final) return { a: Math.max(0, v2 - END_SPEED * END_SPEED) / (2 * hh), final };
+  return { a: Math.max(0, v2 - gate2) / (2 * (h - FINAL_HEIGHT)), final };
+}
+
 /** Engines-first drag deceleration, m/s^2, and dynamic pressure, Pa. */
 function drag(z: number, speed: number, mass: number): { a: number; q: number; p: number } {
   const atm = atmosphere(z + PAD.groundAlt);
@@ -89,14 +116,15 @@ export function fall(s: FallState, dt: number, step = 0.05): FallState & { qMax:
 
 /**
  * Fly the landing burn from this state, lit now, with the landing guidance boosterReturn.ts uses:
- * brake along the velocity at the constant deceleration that stops it at the hover height
- * (net of gravity and of the drag it's getting), on the full set of landing engines and then, once
+ * brake along the velocity as brakeDecel plans (net of gravity and of the drag it's getting): hard
+ * to the gate, then gently to the hover point; on the full set of landing engines and then, once
  * they're more than it needs, on the few center ones. The engines take a second to spool up
  * (or, for a burn already `running`, carry on from where they are).
  */
-export function landingBurn(s: FallState, hoverZ: number, eng: Lander, running?: { throttle: number; few: boolean }): BurnResult {
+export function landingBurn(s: FallState, hoverZ: number, eng: Lander, running?: { throttle: number; few: boolean; final?: boolean }): BurnResult {
   let { z, vh, vz, mass } = s;
   let few = running?.few ?? false;
+  let final = running?.final ?? false;
   let thr = running?.throttle ?? 0;
   let peak = 0;
   let prop = 0;
@@ -116,7 +144,9 @@ export function landingBurn(s: FallState, hoverZ: number, eng: Lander, running?:
     // Commanded acceleration (as in the landing phase): the braking, less the drag already there.
     const hh = Math.max(1, h);
     const vzz = Math.max(1, -vz);
-    const aDec = Math.max(0, vz * vz - 16) / (2 * hh);
+    const brake = brakeDecel(hh, vzz, final);
+    final = brake.final;
+    const aDec = brake.a;
     const cx = (-vh * aDec) / vzz + (vh * d.a) / Math.max(1, speed);
     const cz = Math.max(0.5, aDec + 9.8 + (vz * d.a) / Math.max(1, speed));
     const c = Math.hypot(cx, cz);
