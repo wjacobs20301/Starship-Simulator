@@ -752,15 +752,22 @@ const CLOUD_GLSL = /* glsl */ `
     vec3 n = normalize(p);
     float cov = cw.g;
     float cosv = max(abs(dot(rd, n)), 0.08);
-    float patchy = midPatchy(p, cov, tm);
+    // How much of the layer a pixel spans along it (seen obliquely, far more than across).
+    // Seen low over the horizon (from near its height, or from far off) a pixel spans km of it:
+    // its cells and then its patches are drawn as their average there, not sampled (sampled,
+    // they broke up into a row of blocks and specks along the horizon).
+    float tEff = tm / max(abs(dot(rd, n)), 0.004);
+    float foot = tEff * uPixAng;
+    float patchy = midPatchy(p, cov, tEff);
+    patchy = mix(patchy, smoothstep(0.05, 0.85, cov), smoothstep(6000.0, 25000.0, foot));
     // Altocumulus cells (~1 km), along the wind.
     vec3 q = vec3(p.x / 1600.0, p.y / 1100.0, p.z / 1300.0) + uDrift * 6.0;
-    float cells = textureLod(tNoise, q, noiseLod(tm, 1100.0)).g;
+    float cells = textureLod(tNoise, q, noiseLod(tEff, 1100.0)).g;
     float ac = smoothstep(0.47, 0.6, cells + 0.08 * cov);
     float sheet = smoothstep(0.5, 0.9, cov);
     float a = patchy * mix(0.7 * ac, 0.82, sheet);
     // From far off: the average, as a sheet of the same opacity.
-    float farC = smoothstep(1500.0, 3500.0, tm * uPixAng / cosv);
+    float farC = smoothstep(300.0, 1200.0, foot);
     if (farC > 0.0) a = mix(a, patchy * mix(0.3, 0.8, sheet), farC);
     // (Seen edge-on, a thin sheet still hides what's beyond it.)
     a = 1.0 - pow(1.0 - clamp(a, 0.0, 0.97), 0.6 + 0.4 / cosv);
@@ -1712,8 +1719,24 @@ const cloudFragment = /* glsl */ `
       float tC = tgC.x > 0.0 ? (dS < tgC.x * 0.97 - 50.0 ? dS : tgC.x) : dS;
       // (Not from far off, a pixel spanning hundreds of metres: from orbit a cloud's shadow is
       // offset from it by a pixel or two.)
+      // (Nor seen at a slant, low over the horizon: a pixel then spans a long strip of ground or
+      // sea, and the shadows, one per 2x2 block, came out as pale stair-stepped blocks. There,
+      // their average: as much darker as the clouds above cover.)
+      vec3 PC = roC + rdC * tC;
+      vec3 nC = normalize(PC);
+      float slantC = tC * uPixAng / max(abs(dot(rdC, nC)), 0.02);
       float fade = smoothstep(250.0, 500.0, tC * uPixAng);
-      if (tC < 1e29 && fade < 1.0) shadow = mix(cloudShadow(roC + rdC * tC, tC), 1.0, fade);
+      float fadeS = smoothstep(100.0, 300.0, slantC);
+      if (tC < 1e29 && fade < 1.0) {
+        float s = fadeS < 1.0 ? cloudShadow(PC, tC) : 1.0;
+        if (fadeS > 0.0) {
+          vec4 wa;
+          vec4 wb;
+          weatherMap(nC, wa, wb);
+          s = mix(s, 1.0 - 0.5 * smoothstep(0.015, 0.9, wa.x), fadeS);
+        }
+        shadow = mix(s, 1.0, fade);
+      }
       float dN = texture(tNearDepth, uvC).x;
       if (dN > 0.0) {
         vec3 vd = normalize(vec3((uvC * 2.0 - 1.0 + uProjOff) * uTanHalf, -1.0));
