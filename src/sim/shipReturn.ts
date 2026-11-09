@@ -32,7 +32,7 @@ import { atmosphere } from './atmosphere';
 import { airRelativeVelocity, ecefToEci, ecefToEnuMatrix, ecefToGeodetic, eciToEcef, geodeticToEcef, localBasisEci } from './frames';
 import { orbitApsides } from './guidance';
 import { type V3, add, clamp, cross, dot, mat3Transpose, mat3Vec, norm, normalize, qrot, scale, sub } from './math';
-import { MOUNTS, TOWERS, awayFromTower, catchGap, catchPoint } from './padCollision';
+import { MOUNTS, TOWERS, awayFromTower, catchGapSwung, catchPoint } from './padCollision';
 import { eciDirToPad, eciToPad, eciVelToPad, padDirToEci, padToEci } from './padFrame';
 import { entryAlpha, entryAttitude, heatFlux } from './shipReentry';
 import type { Simulation } from './simulation';
@@ -1491,7 +1491,9 @@ export class ShipReturn {
     let rollRef: V3 | null = null;
     let rollErr = 0;
     if (tower) {
-      const gap = catchGap((this.target as { pad: number }).pad);
+      // (The arms' gap as they are: swung round the tower for a catch beside it, it turns with them.)
+      const tgt = this.target as { pad: number; slew?: number };
+      const gap = catchGapSwung(tgt.pad, this.arms?.slew ?? tgt.slew ?? 0);
       const z = fr.dirIn(qrot(ship.q, [0, 0, 1]));
       const zh = Math.hypot(z[0], z[1]);
       const c = zh > 1e-6 ? (z[0] * gap[0] + z[1] * gap[1]) / zh : 0;

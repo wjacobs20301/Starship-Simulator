@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { STARLINK_V3, STARSHIP_V3 } from '../src/sim/config/starshipV3';
 import { orbitApsides } from '../src/sim/guidance';
-import { norm, qrotInv, sub } from '../src/sim/math';
+import { norm, qrot, qrotInv, sub } from '../src/sim/math';
+import { catchGapSwung } from '../src/sim/padCollision';
+import { eciDirToPad } from '../src/sim/padFrame';
 import { Simulation } from '../src/sim/simulation';
 import { massProps, payloadOf } from '../src/sim/vehicle';
 
@@ -62,7 +64,17 @@ describe('Starlink deployment (Flight 15)', () => {
   it('the whole flight: booster caught at Pad 2 and set back on its mount, satellites out, ship caught by the same tower, swung round, about 14 orbits later', { timeout: 400_000 }, () => {
     const sim = flight15();
     const ship = sim.find('ship')!;
-    runUntil(sim, () => ship.status !== 'flight' || !sim.mission.shipReturn);
+    // (How far its catch fittings are turned from the arms' gap, swung round, as they meet.)
+    let misaligned = 0;
+    runUntil(sim, () => {
+      if (ship.status === 'flight' && sim.mission.shipReturn?.phase === 'terminal') {
+        const z = eciDirToPad(qrot(ship.q, [0, 0, 1]), sim.t);
+        const g = catchGapSwung(1, sim.towers[1].slew);
+        const c = (z[0] * g[0] + z[1] * g[1]) / Math.max(1e-9, Math.hypot(z[0], z[1]));
+        misaligned = (Math.acos(Math.min(1, Math.abs(c))) * 180) / Math.PI;
+      }
+      return ship.status !== 'flight' || !sim.mission.shipReturn;
+    });
     const has = (re: RegExp) => sim.events.some((e) => re.test(e.text));
     expect(has(/^Booster caught!/)).toBe(true);
     // The tower turned round for the ship: booster on the mount, arms up and swung aside.
@@ -76,6 +88,8 @@ describe('Starlink deployment (Flight 15)', () => {
     expect(ship.status).toBe('caught');
     expect(ship.caughtPad).toBe(1);
     expect(sim.towers[1].slew).toBeCloseTo(-70, 0);
+    // Lined up with the arms as swung, not snapped round to them as they grab it.
+    expect(misaligned).toBeLessThan(3);
     const hours = (sim.t - sim.mission.tZero!) / 3600;
     expect(hours).toBeGreaterThan(18);
     expect(hours).toBeLessThan(26);

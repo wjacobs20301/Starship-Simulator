@@ -289,6 +289,13 @@ export function catchGap(pad: number): V3 {
   return [-(mn - tn) / l, (me - te) / l, 0];
 }
 
+/** A pad's arms' gap direction (catchGap), turned with the arms when they're swung round the tower (slewDeg, + counter-clockwise from above). */
+export function catchGapSwung(pad: number, slewDeg: number): V3 {
+  const g = catchGap(pad);
+  const a = (slewDeg * Math.PI) / 180;
+  return [g[0] * Math.cos(a) - g[1] * Math.sin(a), g[0] * Math.sin(a) + g[1] * Math.cos(a), 0];
+}
+
 /** Away from a pad's tower, across its mount (pad ENU, horizontal unit). */
 export function awayFromTower(pad: number): V3 {
   const [me, mn] = MOUNTS[pad];
