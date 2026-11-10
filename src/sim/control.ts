@@ -9,10 +9,16 @@ import type { Vehicle } from './vehicle';
 
 /**
  * The flight software plans surface angles for at least this much dynamic pressure (Pa): in thin
- * air (or none) the surfaces still answer the controls as they would low down, though they make
- * almost no force there (RCS does the work). Their real force always comes from the real air.
+ * air the surfaces answer the controls as they would lower down, though they make little force
+ * there (RCS does most of the work). Their real force always comes from the real air.
  */
 const PLAN_Q_FLOOR = 500;
+/**
+ * Below this dynamic pressure (Pa: in space, high up, or standing still) the flaps / grid fins
+ * make no force worth having, so they don't answer the controls: they go back to their default
+ * angles (RCS turns the vehicle) and wait for the air.
+ */
+const SURFACE_MIN_Q = 50;
 
 export interface ControlGains {
   /** Pitch/yaw natural frequency, rad/s. */
@@ -158,6 +164,16 @@ export function allocateSurfaces(veh: Vehicle, aux: Aux, want: V3, dt: number): 
   if (!n) return [0, 0, 0];
   const a = veh.surfaceAngles;
   const xcg = aux.mp.xcg;
+  const stacked = veh.stages.length > 1;
+  if (aux.q < SURFACE_MIN_Q) {
+    for (let i = 0; i < n; i++) {
+      const def = list[i].def;
+      const rest = stacked ? (def.parked ?? def.neutral) : def.neutral;
+      const step = def.rate * dt;
+      a[i] = clamp(a[i] + clamp(rest - a[i], -step, step), def.min, def.max);
+    }
+    return aux.q > 0 && norm(aux.vAir) > 1 ? surfaceLoads(list, a, aux.flow, xcg).t : [0, 0, 0];
+  }
   // Plan in the real flow direction if moving through the air, else a nominal one (belly-first
   // for the ship, engines-first for a booster, nose-first for the stack).
   const moving = norm(aux.vAir) > 1;
@@ -185,7 +201,6 @@ export function allocateSurfaces(veh: Vehicle, aux: Aux, want: V3, dt: number): 
   // Only a light pull to neutral (parked while stacked): it should settle the redundant
   // surfaces, not fight the torque.
   const lambda = 1e-4 * (diag / n) + 1;
-  const stacked = veh.stages.length > 1;
   for (let i = 0; i < n; i++) {
     const def = list[i].def;
     A[i][i] += lambda;

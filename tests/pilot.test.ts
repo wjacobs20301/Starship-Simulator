@@ -55,4 +55,33 @@ describe('manual flight (fly-by-wire + SAS)', () => {
     expect(sim.mission.boosterReturn).not.toBeNull();
     expect(sim.events.some((e) => /^Staging: booster MECO/.test(e.text))).toBe(true);
   });
+
+  it('in space the flaps stay put: rolling and pitching in orbit is the RCS, not the flaps', { timeout: 60_000 }, () => {
+    const sim = new Simulation();
+    sim.launch();
+    while (sim.mission.phase !== 'coast') sim.step();
+    sim.pilot.set({ manual: true, target: 'ship', sas: 'stability', throttle: 0 });
+    run(sim, 30);
+    const ship = sim.find('ship')!;
+    const rest = ship.surfaces.map((s) => s.def.neutral);
+    const off = () => Math.max(...ship.surfaceAngles.map((a, i) => Math.abs(a - rest[i]))) / DEG;
+    expect(sim.aux.get('ship')!.q).toBeLessThan(1);
+    expect(off()).toBeLessThan(0.1);
+    // Hard over in pitch, then roll: the ship turns, the flaps don't move.
+    const before = nose(sim, 'ship');
+    let worst = 0;
+    sim.pilot.set({ pitch: 1 });
+    for (let i = 0; i < 300; i++) {
+      sim.step();
+      worst = Math.max(worst, off());
+    }
+    sim.pilot.set({ pitch: 0, roll: 1 });
+    for (let i = 0; i < 300; i++) {
+      sim.step();
+      worst = Math.max(worst, off());
+    }
+    sim.pilot.set({ roll: 0 });
+    expect(angle(before, nose(sim, 'ship'))).toBeGreaterThan(3);
+    expect(worst).toBeLessThan(0.1);
+  });
 });
