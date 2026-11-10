@@ -12,9 +12,9 @@ import type { SiteWeather } from './weather/model';
 export type FreeWeather = 'starbase' | Exclude<SiteWeather, 'natural'>;
 /** What the weather over Starbase is called (the HUD, the menu). */
 export const WEATHER_NAME: Record<SiteWeather, string> = {
-  natural: 'As it comes', clear: 'Clear', fair: 'Sunny', partly: 'Partly cloudy', overcast: 'Overcast', rain: 'Rain', storm: 'Thunderstorms', fog: 'Sea fog',
+  natural: 'As it comes', clear: 'Clear', fair: 'Mostly sunny', partly: 'Partly cloudy', mostly: 'Mostly cloudy', overcast: 'Overcast', rain: 'Rain', storm: 'Thunderstorms', fog: 'Sea fog',
 };
-export const FREE_WEATHER: readonly FreeWeather[] = ['starbase', 'clear', 'fair', 'partly', 'overcast', 'rain', 'storm', 'fog'];
+export const FREE_WEATHER: readonly FreeWeather[] = ['starbase', 'clear', 'fair', 'partly', 'mostly', 'overcast', 'rain', 'storm', 'fog'];
 
 export interface Settings {
   /** Serial painted on the ship's side, e.g. "SN44". */

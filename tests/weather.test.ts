@@ -65,9 +65,9 @@ describe('global weather model', () => {
       const w = starbaseDay(-1.7, (i + 0.5) / n);
       count[w] = (count[w] ?? 0) + 1;
     }
-    expect(Object.keys(count).sort()).toEqual(['clear', 'fair', 'fog', 'overcast', 'partly', 'rain', 'storm']);
+    expect(Object.keys(count).sort()).toEqual(['clear', 'fair', 'fog', 'mostly', 'overcast', 'partly', 'rain', 'storm']);
     expect((count.fair + count.partly + count.clear) / n).toBeGreaterThan(0.55);
-    for (const w of ['rain', 'storm', 'fog', 'overcast']) expect(count[w] / n).toBeLessThan(0.15);
+    for (const w of ['rain', 'storm', 'fog', 'mostly', 'overcast']) expect(count[w] / n).toBeLessThan(0.15);
     // Thunderstorms in summer, fog in winter.
     const share = (season: number, w: string) => {
       let c = 0;

@@ -192,8 +192,18 @@ const CLOUD_GLSL = /* glsl */ `
   // (And gConvMap: how much of it is deep convection, thunderstorms, 0..1: only looked up where
   // the cloud is deep.)
   float gConvMap = 0.0;
-  void weatherMap(vec3 n, out vec4 a, out vec4 b) {
+  // (The map's latitudes are geodetic: from n, in the march space (the ellipsoid stretched to a
+  // sphere along the axis), the ground normal there.)
+  vec3 wxDir(vec3 n) {
     vec3 e = uWorldToEcef * n;
+    return normalize(vec3(e.xy, e.z * ${(RE / RP).toExponential(10)}));
+  }
+  // (And back: the march-space direction of the ground under a geodetic direction, world axes.)
+  vec3 wxDirToMarch(vec3 g) {
+    return normalize(vec3(g.xy, g.z * ${(RP / RE).toExponential(10)})) * uWorldToEcef;
+  }
+  void weatherMap(vec3 n, out vec4 a, out vec4 b) {
+    vec3 e = wxDir(n);
     vec2 uv = vec2(atan(e.y, e.x) * 0.15915494 + 0.5, asin(clamp(e.z, -1.0, 1.0)) * 0.31830989 + 0.5);
     a = mix(textureLod(tWxA0, uv, 0.0), textureLod(tWxA1, uv, 0.0), uWxBlend);
     b = mix(textureLod(tWxB0, uv, 0.0), textureLod(tWxB1, uv, 0.0), uWxBlend);
@@ -203,7 +213,7 @@ const CLOUD_GLSL = /* glsl */ `
   // The weather map's third image at n: deep convection, the middle layer's cover, its height
   // (2..8 km) and the cirrus's height (6..14 km).
   vec4 weatherC(vec3 n) {
-    vec3 e = uWorldToEcef * n;
+    vec3 e = wxDir(n);
     vec2 uv = vec2(atan(e.y, e.x) * 0.15915494 + 0.5, asin(clamp(e.z, -1.0, 1.0)) * 0.31830989 + 0.5);
     return mix(textureLod(tWxC0, uv, 0.0), textureLod(tWxC1, uv, 0.0), uWxBlend);
   }
@@ -290,9 +300,11 @@ const CLOUD_GLSL = /* glsl */ `
     gCellsValid = false;
     if (conv < 0.02 || top - base < 5000.0) return;
     gCellsValid = true;
-    vec3 e = uWorldToEcef * n;
+    vec3 e = wxDir(n);
     vec2 g;
     int f = stormFace(e, g);
+    // (The cells drift with the storms: where this is on the moved grid.)
+    vec2 gs = g - uStormShift;
     // (Cells from beyond the 3 x 3 around reach no closer than this: their centres at least
     // three quarters of the grid off (less on the ground toward a face's edge), their anvils
     // under ~21 km.)
@@ -300,7 +312,7 @@ const CLOUD_GLSL = /* glsl */ `
     gCellO = n * uRc;
     gCellE = normalize(cross(uPolar, n));
     gCellN = cross(n, gCellE);
-    ivec2 gi = ivec2(floor(g / STORM_GRID));
+    ivec2 gi = ivec2(floor(gs / STORM_GRID));
     float dK[3] = float[3](1e9, 1e9, 1e9);
     for (int dj = -1; dj <= 1; dj++) {
       for (int di = -1; di <= 1; di++) {
@@ -309,8 +321,8 @@ const CLOUD_GLSL = /* glsl */ `
         float h0 = stormRand(f, i, j, 0u);
         float k = smoothstep(h0, h0 + 0.25, conv);
         if (k <= 0.0) continue;
-        vec2 c = (vec2(float(i), float(j)) + 0.5 + (vec2(stormRand(f, i, j, 1u), stormRand(f, i, j, 2u)) - 0.5) * 0.5) * STORM_GRID;
-        vec3 cw = stormFaceDir(f, c) * uWorldToEcef;
+        vec2 c = (vec2(float(i), float(j)) + 0.5 + (vec2(stormRand(f, i, j, 1u), stormRand(f, i, j, 2u)) - 0.5) * 0.5) * STORM_GRID + uStormShift;
+        vec3 cw = wxDirToMarch(stormFaceDir(f, c));
         vec3 dc = cw * uRc - gCellO;
         vec2 rel = vec2(dot(dc, gCellE), dot(dc, gCellN));
         // Its stage: growing (a tower, no anvil yet, still rising) or mature (at the
@@ -1353,6 +1365,7 @@ const ATMO_COMMON = /* glsl */ `
   uniform float uWxBlend;      // between the two bakes
   uniform mat3 uWorldToEcef;   // world -> Earth-fixed directions (the map's axes)
   uniform vec3 uDrift;         // the fine detail's slow drift (noise-space offset)
+  uniform vec2 uStormShift;    // the storm cells' drift on the cube faces, m (weather/storms.ts stormShift)
   uniform float uCloudSun;     // brightness of sunlit cloud
   uniform float uRainAny;      // rain anywhere within ~150 km (else no rain curtains to look for)
   uniform vec4 uFlash;         // lightning in the clouds: where (from the Earth's centre, the march's space), how bright
@@ -1868,6 +1881,7 @@ export class SceneAtmospherePass extends Pass {
     uWxBlend: { value: 0 },
     uWorldToEcef: { value: new THREE.Matrix3() },
     uDrift: { value: new THREE.Vector3() },
+    uStormShift: { value: new THREE.Vector2() },
     uCloudSun: { value: 1.4 },
     uRainAny: { value: 0 },
     uFlash: { value: new THREE.Vector4() },

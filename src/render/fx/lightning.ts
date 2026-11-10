@@ -10,7 +10,7 @@
 import * as THREE from 'three';
 import { toFxLayer } from '../atmosphere';
 import { type Sample, type WeatherModel, newSample } from '../../weather/model';
-import { stormCells } from '../../weather/storms';
+import { centreDir, stormCells, weatherDir } from '../../weather/storms';
 
 const DEG = Math.PI / 180;
 
@@ -147,7 +147,9 @@ export class Lightning {
     }
     // Where the storms are: the weather round the camera now and then (to ~95 km).
     const pr = this.probedAt;
-    if (Math.abs(time - pr.time) > 30 || pr.at.distanceToSquared(camFromCentre) > 5000 ** 2) {
+    // (And at once for new weather: a thunderstorm day picked shouldn't wait half a minute.)
+    if (Math.abs(time - pr.time) > 30 || pr.at.distanceToSquared(camFromCentre) > 5000 ** 2 || model !== this.probedModel) {
+      this.probedModel = model;
       pr.time = time;
       pr.at.copy(camFromCentre);
       this.findCells(model, time, camFromCentre, worldToEcef);
@@ -180,9 +182,11 @@ export class Lightning {
   }
 
   /** The thunderstorm cells round the camera (to ~100 km): the towers the renderer draws. */
+  private probedModel: WeatherModel | null = null;
+
   private findCells(model: WeatherModel, time: number, camFromCentre: THREE.Vector3, worldToEcef: THREE.Matrix3): void {
-    this.v.copy(camFromCentre).applyMatrix3(worldToEcef).normalize();
-    const e = [this.v.x, this.v.y, this.v.z];
+    this.v.copy(camFromCentre).applyMatrix3(worldToEcef);
+    const e = weatherDir(this.v.x, this.v.y, this.v.z);
     const s = this.probe;
     const at = (d: readonly number[]) => model.sample(Math.asin(d[2]) / DEG, Math.atan2(d[1], d[0]) / DEG, time, undefined, s);
     at(e);
@@ -197,7 +201,7 @@ export class Lightning {
     const cells: Cell[] = [];
     if (any) {
       // (Their tops as a share of the weather's depth there: base 0, top 1.)
-      for (const c of stormCells(e, 6378137, 100e3, (d) => at(d).conv, 0, 1)) {
+      for (const c of stormCells(e, 6378137, 100e3, (d) => at(d).conv, 0, 1, time)) {
         at(c.dir);
         const cellTop = s.base + (s.top - s.base) * c.top;
         // (Only the towers that reach high are thunderstorms.)
@@ -216,8 +220,9 @@ export class Lightning {
     for (const c of this.cells) if ((x -= c.score * 0.11) < 0) { cell = c; break; }
     if (this.forced !== null) {
       // (Debug: the nearest.)
-      const ce = this.v.copy(camFromCentre).applyMatrix3(this.worldToEcef).normalize();
-      const camLat = Math.asin(ce.z) / DEG, camLon = Math.atan2(ce.y, ce.x) / DEG;
+      const ce = this.v.copy(camFromCentre).applyMatrix3(this.worldToEcef);
+      const cd = weatherDir(ce.x, ce.y, ce.z);
+      const camLat = Math.asin(cd[2]) / DEG, camLon = Math.atan2(cd[1], cd[0]) / DEG;
       const d = (c: Cell) => (c.lat - camLat) ** 2 + ((c.lon - camLon) * Math.cos(camLat * DEG)) ** 2;
       cell = this.cells.reduce((a, b) => (d(b) < d(a) ? b : a));
     }
@@ -229,9 +234,13 @@ export class Lightning {
     // (Most flashes stay in the cloud; about a third come to the ground.)
     const ground = this.forced ?? Math.random() < 0.35;
     this.forced = null;
-    // Where it is (world): up through (lat, lon), the ground's radius under the camera.
+    // Where it is (world): up through (lat, lon) (geodetic: on the line from the Earth's centre to
+    // the ground there), the ground's radius under the camera.
     const groundR = camFromCentre.length() - camAlt;
-    const up = new THREE.Vector3(Math.cos(lat * DEG) * Math.cos(lon * DEG), Math.cos(lat * DEG) * Math.sin(lon * DEG), Math.sin(lat * DEG)).applyMatrix3(this.ecefToWorld).normalize();
+    const up = new THREE.Vector3()
+      .fromArray(centreDir([Math.cos(lat * DEG) * Math.cos(lon * DEG), Math.cos(lat * DEG) * Math.sin(lon * DEG), Math.sin(lat * DEG)]))
+      .applyMatrix3(this.ecefToWorld)
+      .normalize();
     const centre = [cam[0] - camFromCentre.x, cam[1] - camFromCentre.y, cam[2] - camFromCentre.z];
     const pointAt = (h: number): [number, number, number] => [centre[0] + up.x * (groundR + h), centre[1] + up.y * (groundR + h), centre[2] + up.z * (groundR + h)];
     const flashH = ground ? base + 1500 + 1500 * Math.random() : base + (cell.top - base) * (0.3 + 0.5 * Math.random());

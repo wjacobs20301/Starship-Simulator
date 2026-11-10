@@ -12,9 +12,10 @@ export type MenuKind = 'main' | 'pause';
 /** Free roam's weather picks: name and what it brings. */
 const WEATHER_PICK: Record<FreeWeather, [string, string]> = {
   starbase: ['Starbase', 'Whatever the day brings, as the climate on the Texas Gulf coast deals it out: mostly sunny with a few clouds, sometimes overcast, rain, sea fog or thunderstorms. A new day each time.'],
-  clear: [WEATHER_NAME.clear, 'Blue sky, not a cloud over the coast.'],
-  fair: [WEATHER_NAME.fair, 'Blue sky and sun, a few small cumulus drifting in off the Gulf.'],
-  partly: [WEATHER_NAME.partly, 'A field of fair-weather cumulus, in clusters and streets.'],
+  clear: [WEATHER_NAME.clear, 'Blue sky, hardly a cloud over the coast.'],
+  fair: [WEATHER_NAME.fair, 'Blue sky and sun, a few small cumulus drifting in off the Gulf: a quarter of the sky at most.'],
+  partly: [WEATHER_NAME.partly, 'A field of fair-weather cumulus, in clusters and streets: about half the sky.'],
+  mostly: [WEATHER_NAME.mostly, 'A broken deck of stratocumulus and cumulus over most of the sky, lanes of blue between.'],
   overcast: [WEATHER_NAME.overcast, 'A grey stratus deck from horizon to horizon.'],
   rain: [WEATHER_NAME.rain, 'A cold front coming through: low cloud and steady rain.'],
   storm: [WEATHER_NAME.storm, 'Storms building inland and drifting toward the coast: towering clouds, downpours, lightning and thunder.'],

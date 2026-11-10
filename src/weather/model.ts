@@ -30,7 +30,7 @@ const DEG = Math.PI / 180;
 const DAY = 86400;
 const OMEGA = 7.2921159e-5;
 
-export type SiteWeather = 'natural' | 'clear' | 'fair' | 'partly' | 'overcast' | 'rain' | 'storm' | 'fog';
+export type SiteWeather = 'natural' | 'clear' | 'fair' | 'partly' | 'mostly' | 'overcast' | 'rain' | 'storm' | 'fog';
 
 /**
  * A day's weather at Starbase (Boca Chica, on the Gulf coast of south Texas, 26 N), drawn the way
@@ -47,6 +47,7 @@ export function starbaseDay(season: number, u: number): Exclude<SiteWeather, 'na
   const odds: [Exclude<SiteWeather, 'natural'>, number][] = [
     ['fair', 0.3 + 0.06 * sum],
     ['partly', 0.2 + 0.1 * sum],
+    ['mostly', 0.1 - 0.02 * sum],
     ['clear', 0.12 - 0.07 * sum],
     ['overcast', 0.14 - 0.08 * sum],
     ['rain', 0.09 - 0.02 * sum],
@@ -112,6 +113,7 @@ const SITE_AIR: Record<Exclude<SiteWeather, 'natural'>, { spread: number; mid: n
   clear: { spread: 14, mid: 0 },
   fair: { spread: 8, mid: 0.1 },
   partly: { spread: 6, mid: 0.35 },
+  mostly: { spread: 4.5, mid: 0.5 },
   overcast: { spread: 3, mid: 0.75 },
   rain: { spread: 2, mid: 0.85 },
   storm: { spread: 5, mid: 0.45 },
@@ -219,7 +221,7 @@ export class Land {
 
 // --- Weather systems --------------------------------------------------------------------------
 
-type Kind = 'low' | 'high' | 'tc' | 'deck' | 'fog' | 'cu' | 'storm';
+type Kind = 'low' | 'high' | 'tc' | 'deck' | 'fog' | 'cu' | 'sc' | 'storm';
 
 interface Sys {
   kind: Kind;
@@ -410,18 +412,22 @@ export class WeatherModel {
         // A day of fair-weather cumulus over the coast: a field a few hundred km across, in
         // clusters and streets, drifting inland; the global weather all round it.
         return [sys({ kind: 'cu', R: 320e3, life: 1.5 * DAY, peak: 0.85 + 0.25 * r(), u: -2, v: 0.5, ax: 1.4, ay: 1 }, 0.4, 40e3, -20e3)];
+      case 'mostly':
+        // Mostly cloudy: a broken deck of stratocumulus and cumulus, lanes of blue between.
+        return [sys({ kind: 'sc', R: 380e3, life: 1.5 * DAY, peak: 1, u: -2, v: 0.5, ax: 1.4, ay: 1 }, 0.4, 40e3, -20e3)];
       case 'overcast':
         return [sys({ kind: 'deck', R: 650e3, life: 1.6 * DAY, peak: 1, u: 2.5, v: 0.5, ax: 1.3, ay: 0.75 }, 0.4, -120e3 + 100e3 * r(), 60e3)];
       case 'fog':
         // Sea fog along the coast, offshore: long north-south, a few hundred km.
         return [sys({ kind: 'fog', R: 260e3, life: 1.1 * DAY, peak: 1, u: 1, v: 0.3, ax: 0.75, ay: 1.6 }, 0.35, 60e3, 30e3)];
       case 'storm': {
-        // Thunderstorms: a cluster of them inland, drifting toward the coast at 20-30 km/h, in
-        // a humid day's towering cumulus: some days already overhead, some still building on
-        // the horizon to the west, an hour or a few away.
+        // Thunderstorms: a cluster of them coming off the land, drifting toward the coast at
+        // 20-30 km/h, in a humid day's towering cumulus: over the site already, more building
+        // to the west. (Its cells drift with it: weather/storms.ts puts one coming in over the
+        // site.)
         const ang = (r() - 0.5) * 1.2;
         const R = 55e3 + 20e3 * r();
-        const d = R * (0.3 + 1.3 * r());
+        const d = R * (0.1 + 0.4 * r());
         return [
           sys({ kind: 'storm', R, life: 0.4 * DAY, peak: 0.9 + 0.1 * r(), u: 5.5 + 2.5 * r(), v: 0.5 * (r() - 0.5), ax: 1.3, ay: 1 }, 0.3, -d * Math.cos(ang), d * Math.sin(ang)),
           sys({ kind: 'cu', R: 300e3, life: 1.5 * DAY, peak: 0.6, u: -2, v: 0.5, ax: 1.4, ay: 1 }, 0.4, 40e3, -20e3),
@@ -856,6 +862,15 @@ export class WeatherModel {
         const patchy = 1 - smooth(0.2, 0.55, rho) * (1 - smooth(0.32, 0.62, streets));
         const c = smooth(1, 0.5, rho) * patchy * a;
         add(c * 0.5, this.lcl, 2300 + (this.lcl - 800), 0.92, 0.12);
+        break;
+      }
+      case 'sc': {
+        // A broken deck: lumpy stratocumulus and cumulus covering most of the sky, in rolls
+        // along the wind with lanes of blue between.
+        const rho = Math.hypot(X / st.s.ax, Y / st.s.ay) + 0.25 * (tex - 1);
+        const lanes = 0.5 + 0.5 * nz.fbm(X * 2.6 + st.ox, Y * 6 + st.oy, 4.1, 2);
+        const c = smooth(1, 0.55, rho) * (0.62 + 0.38 * smooth(0.3, 0.6, lanes)) * a;
+        add(c * 0.9, this.lcl, this.lcl + 1300, 0.55, 0.22);
         break;
       }
       case 'storm': {

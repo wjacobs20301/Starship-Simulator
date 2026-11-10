@@ -12,7 +12,7 @@ import { CloudNoise } from './cloudNoise';
 import { Land, type Sample, type SiteWeather, type WeatherConfig, WeatherModel, calmSeed, newSample } from '../weather/model';
 import type { FromBake, ToBake } from '../weather/bake.worker';
 import BakeWorker from '../weather/bake.worker.ts?worker';
-import { underStorms } from '../weather/storms';
+import { setStormDrift, stormShift, underStorms, weatherDir } from '../weather/storms';
 
 /** The weather map's size (~39 km per texel at the equator). */
 export const WX_W = 1024;
@@ -139,6 +139,8 @@ export class Weather {
 
   private start(cfg: WeatherConfig): void {
     this.model = new WeatherModel(cfg, this.land);
+    // The storm cells' drift for the day (a thunderstorm day: one coming in over the site now).
+    setStormDrift(this.siteLat, this.siteLon, cfg.t0, cfg.site === 'storm', cfg.seed);
     const msg: ToBake = { type: 'config', cfg, land: this.landBytes };
     for (const w of this.workers) w.postMessage(msg);
     this.filled = 0;
@@ -262,6 +264,8 @@ export class Weather {
     u.uWorldToEcef.value.copy(this.worldToEcef);
     u.uPolar.value.copy(this.axis);
     u.uDrift.value.copy(this.drift);
+    const [su, sv] = stormShift(this.t);
+    u.uStormShift.value.set(su, sv);
     const mp = this.morph ? this.morphProgress() : 1;
     const ease = (from: number, to: number) => (this.morph ? from + (to - from) * mp : to);
     u.uFog.value = on || this.morph ? ease(this.morph?.fog ?? 0, this.fogHere) : 0;
@@ -293,7 +297,8 @@ export class Weather {
     }
     const l = this.local0;
     if (Math.abs(this.t - l.t) > 20 || l.at.distanceToSquared(camFromCentre) > 2000 ** 2) {
-      this.v.copy(camFromCentre).applyMatrix3(this.worldToEcef).normalize();
+      this.v.copy(camFromCentre).applyMatrix3(this.worldToEcef);
+      this.v.fromArray(weatherDir(this.v.x, this.v.y, this.v.z));
       const lat = (Math.asin(Math.max(-1, Math.min(1, this.v.z))) * 180) / Math.PI;
       const lon = (Math.atan2(this.v.y, this.v.x) * 180) / Math.PI;
       this.model.sample(lat, lon, this.t, this.sunEcef, l.sample);
@@ -306,7 +311,7 @@ export class Weather {
         const t = this.t;
         const probe = this.rainProbe;
         const conv = (d: [number, number, number]) => m.sample((Math.asin(d[2]) * 180) / Math.PI, (Math.atan2(d[1], d[0]) * 180) / Math.PI, t, undefined, probe).conv;
-        l.storm = underStorms([this.v.x, this.v.y, this.v.z], 6378137, conv, l.sample.base, l.sample.top);
+        l.storm = underStorms([this.v.x, this.v.y, this.v.z], 6378137, conv, l.sample.base, l.sample.top, t);
       } else l.storm = null;
     }
     const s: Sample = l.sample;
@@ -315,7 +320,8 @@ export class Weather {
     if (Math.abs(this.t - rn.t) > 60 || rn.at.distanceToSquared(camFromCentre) > 10000 ** 2) {
       rn.t = this.t;
       rn.at.copy(camFromCentre);
-      this.v.copy(camFromCentre).applyMatrix3(this.worldToEcef).normalize();
+      this.v.copy(camFromCentre).applyMatrix3(this.worldToEcef);
+      this.v.fromArray(weatherDir(this.v.x, this.v.y, this.v.z));
       const lat0 = Math.asin(Math.max(-1, Math.min(1, this.v.z)));
       const lon0 = Math.atan2(this.v.y, this.v.x);
       let any = s.precip > 0.1;
