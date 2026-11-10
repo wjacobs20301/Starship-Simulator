@@ -4,6 +4,7 @@
 // NAIP imagery. Water (by height) gets a reflective, animated surface in the shader.
 
 import * as THREE from 'three';
+import { SEA_GLSL, bindSea, sea as seaState } from './ocean';
 import { TRENCHES } from './launchSite';
 import { DEG, PAD } from '../sim/constants';
 import type { V3 } from '../sim/math';
@@ -91,9 +92,10 @@ function makeMaterial(map: THREE.Texture | null, holes: boolean): THREE.MeshStan
     shader.uniforms.uTrenchHalf = uniforms.uTrenchHalf;
     shader.uniforms.uSiteMask = uniforms.uSiteMask;
     shader.uniforms.uSiteRect = uniforms.uSiteRect;
+    bindSea(shader, seaState);
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nattribute float aHeight;\nattribute vec2 aEN;\nattribute float aWaterWeight;\nvarying float vHeight;\nvarying vec2 vEN;\nvarying float vWaterWeight;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvHeight = aHeight;\nvEN = aEN;\nvWaterWeight = aWaterWeight;');
+      .replace('#include <common>', '#include <common>\nattribute float aHeight;\nattribute vec2 aEN;\nattribute float aWaterWeight;\nvarying float vHeight;\nvarying vec2 vEN;\nvarying float vWaterWeight;\nvarying vec3 vSeaRel;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvHeight = aHeight;\nvEN = aEN;\nvWaterWeight = aWaterWeight;\nvSeaRel = (modelMatrix * vec4(transformed, 1.0)).xyz;');
     shader.fragmentShader = shader.fragmentShader
       .replace(
         '#include <common>',
@@ -116,21 +118,8 @@ varying float vWaterWeight;
 // build (their sparse heights can't place the shoreline), so vWaterWeight = 0 turns off only
 // the colour override there; gloss and waves still apply everywhere so all tiles match.
 float waterMask() { return 1.0 - smoothstep(uWaterLevel - 0.12, uWaterLevel + 0.05, vHeight); }
-vec2 waveSlope(vec2 p, float t, float dist) {
-  // Directional swell components (Gulf waves roll in from the east-southeast). Each one fades
-  // out before it gets finer than a pixel, which would otherwise shimmer as moire.
-  vec2 s = vec2(0.0);
-  const int N = 6;
-  vec2 dirs[N] = vec2[N](vec2(0.957, 0.29), vec2(0.8, 0.6), vec2(0.99, -0.14), vec2(0.35, 0.94), vec2(-0.6, 0.8), vec2(0.7, -0.71));
-  float lens[N] = float[N](38.0, 23.0, 14.0, 8.5, 5.1, 3.1);
-  for (int i = 0; i < N; i++) {
-    float k = 6.2832 / lens[i];
-    float fade = 1.0 - smoothstep(lens[i] * 25.0, lens[i] * 80.0, dist);
-    float phase = dot(p, dirs[i]) * k - t * sqrt(9.81 * k);
-    s += fade * 0.09 * cos(phase + float(i) * 1.7) * dirs[i];
-  }
-  return s;
-}`,
+varying vec3 vSeaRel;
+${SEA_GLSL}`,
       )
       .replace(
         '#include <map_fragment>',
@@ -175,27 +164,32 @@ if (siteUv.x > 0.0 && siteUv.y > 0.0 && siteUv.x < 1.0 && siteUv.y < 1.0) {
 // Fade out over the region's outer edge, revealing the streamed globe tiles underneath.
 float edge = smoothstep(uEdge.x, uEdge.y, max(abs(vEN.x), abs(vEN.y)));
 diffuseColor.a *= 1.0 - edge;
-water *= 1.0 - edge;`,
+water *= 1.0 - edge;
+// The sea's surface (ocean.ts): waves for the wind, whitecaps; darker in a gale.
+vec2 seaP = seaPlane(vSeaRel);
+vec4 seaJ = seaPixel(seaP);
+gSeaFoam = 0.0;
+if (water > 0.001) {
+  seaSurface(vSeaRel, seaP, seaJ);
+  diffuseColor.rgb = mix(diffuseColor.rgb, mix(diffuseColor.rgb * gSeaBody, vec3(0.78, 0.8, 0.8), gSeaFoam), water);
+}`,
       )
       .replace(
         '#include <roughnessmap_fragment>',
         `#include <roughnessmap_fragment>
-// Glossy up close; matte like the globe from far away (so the region blends in from orbit).
-roughnessFactor = mix(roughnessFactor, mix(0.07, 0.8, smoothstep(15000.0, 80000.0, length(vViewPosition))), water);`,
+// As rough as the waves too fine to draw make it (ocean.ts), the foam matte.
+if (water > 0.001) roughnessFactor = mix(roughnessFactor, mix(gSeaRough, 0.9, gSeaFoam), water);`,
       )
       .replace(
         '#include <normal_fragment_maps>',
         `#include <normal_fragment_maps>
 if (water > 0.001) {
-  vec2 sl = waveSlope(vEN, uTime, length(vViewPosition));
-  // Perturb in world space (x = east, z = -north), then move to view space.
-  vec3 wn = normalize(vec3(-sl.x, 1.0, sl.y));
-  vec3 vn = normalize((viewMatrix * vec4(wn, 0.0)).xyz);
-  normal = normalize(mix(normal, vn, water));
+  vec3 vn = normalize((viewMatrix * vec4(gSeaNormal, 0.0)).xyz);
+  normal = normalize(mix(normal, vn, water * (1.0 - 0.6 * gSeaFoam)));
 }`,
       );
   };
-  mat.customProgramCacheKey = () => (holes ? 'terrain-v11-holes' : 'terrain-v11');
+  mat.customProgramCacheKey = () => (holes ? 'terrain-v12-holes' : 'terrain-v12');
   return mat;
 }
 

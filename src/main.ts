@@ -18,6 +18,7 @@ import { type PadRig, SUN_AT_DAY0, createWorld } from './render/scene';
 import { PAD, RE, RP } from './sim/constants';
 import { GlobeTiles } from './render/globeTiles';
 import { ecefToWorld, toWorld, worldToGeodetic } from './render/geo';
+import { sea } from './render/ocean';
 import { Terrain } from './render/terrain';
 import { type MapVehicle, MapView } from './render/mapView';
 import type { Trajectory } from './sim/trajectory';
@@ -162,7 +163,7 @@ loadModels(world.renderer, (f) => (loadingBar.style.transform = `scaleX(${f})`))
     loadingBar.style.transform = 'scaleX(1)';
     loading.classList.add('done');
     setTimeout(() => loading.remove(), 1000);
-    if (import.meta.env.DEV) Object.assign(window, { __debug: { models, padRig, world, meshes, terrain, settings, updateSettings, rig, fx, sound, pr: () => pixelRatio, frame, globeTiles, mapView, flightPanel, hud, plot, ambience, audioEngine, lightning, starlink: () => starlink, menu, menuAudio, weather, moon, origin, showScene } });
+    if (import.meta.env.DEV) Object.assign(window, { __debug: { sea, models, padRig, world, meshes, terrain, settings, updateSettings, rig, fx, sound, pr: () => pixelRatio, frame, globeTiles, mapView, flightPanel, hud, plot, ambience, audioEngine, lightning, starlink: () => starlink, menu, menuAudio, weather, moon, origin, showScene } });
   })
   .catch((err) => {
     loadingText.textContent = import.meta.env.DEV
@@ -928,6 +929,8 @@ const camUp = new THREE.Vector3();
 const earthCenterRel = new THREE.Vector3();
 const EARTH_CENTER_WORLD = ecefToWorld([0, 0, 0]);
 const EARTH_AXIS_WORLD = new THREE.Vector3(...ecefToWorld([0, 0, 1e6])).sub(new THREE.Vector3(...EARTH_CENTER_WORLD)).normalize();
+const seaEast = new THREE.Vector3();
+const seaNorth = new THREE.Vector3();
 
 // --- Time of day: the Earth turns once in 24 h of sim time ---------------------------------------
 const DAY_RATE = (2 * Math.PI) / 86400;
@@ -1428,6 +1431,10 @@ function frame(): void {
   // (Fresh: the snapshot is from the latest flight / scene, so its clock can start new weather.)
   weather.update(simTime, world.sunDir, workerSceneId >= scenesSent);
   const wx = weather.local(camFromCentre, camAlt);
+  // The sea: waves for the wind round the camera.
+  seaEast.crossVectors(EARTH_AXIS_WORLD, camUp).normalize();
+  seaNorth.crossVectors(camUp, seaEast);
+  sea.update(paused ? 0 : frameDt, cam, EARTH_CENTER_WORLD, weather.surfaceWind(camFromCentre), seaEast, seaNorth);
   audio.update(heard.level, heard.distance, Math.exp(-Math.max(0, camAlt) / 8500), paused);
   // Everything else you hear: wind, surf, air rush, tower machinery, deluge, venting.
   const mt = snap.missionTime;

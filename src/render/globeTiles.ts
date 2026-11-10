@@ -8,6 +8,7 @@ import { DEG } from '../sim/constants';
 import type { V3 } from '../sim/math';
 import type { FloatingOrigin } from './floatingOrigin';
 import { ecefToWorld, tileXToLon, tileYToLat, toWorld } from './geo';
+import { SEA_GLSL, bindSea, sea } from './ocean';
 
 const BASE = `${import.meta.env.BASE_URL}globe/tiles/`;
 const SINK_M = -40;
@@ -15,6 +16,47 @@ const MAX_TILES = 500;
 const MAX_LOADS = 8;
 const SPLIT_PIXELS = 256 * 1.2;
 const EARTH_CENTER = ecefToWorld([0, 0, 0]);
+
+/**
+ * A tile's material: the Blue Marble, its sea (told by its colour: bluer than it is green or red,
+ * which no land or ice is) with the waves and whitecaps for the wind (ocean.ts).
+ */
+function tileMaterial(map: THREE.Texture): THREE.MeshStandardMaterial {
+  const mat = new THREE.MeshStandardMaterial({ map, roughness: 0.85, metalness: 0 });
+  mat.onBeforeCompile = (shader) => {
+    bindSea(shader, sea);
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vSeaRel;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvSeaRel = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>\nvarying vec3 vSeaRel;\nfloat gWater = 0.0;\n${SEA_GLSL}`)
+      .replace(
+        '#include <map_fragment>',
+        `#include <map_fragment>
+vec3 srgb = pow(max(diffuseColor.rgb, vec3(0.0)), vec3(1.0 / 2.2));
+gWater = smoothstep(0.08, 0.2, (srgb.b - max(srgb.r, srgb.g)) / max(srgb.b, 0.01));
+vec2 seaP = seaPlane(vSeaRel);
+vec4 seaJ = seaPixel(seaP);
+gSeaFoam = 0.0;
+if (gWater > 0.001) {
+  seaSurface(vSeaRel, seaP, seaJ);
+  diffuseColor.rgb = mix(diffuseColor.rgb, mix(diffuseColor.rgb * gSeaBody, vec3(0.78, 0.8, 0.8), gSeaFoam), gWater);
+}`,
+      )
+      .replace(
+        '#include <roughnessmap_fragment>',
+        `#include <roughnessmap_fragment>
+if (gWater > 0.001) roughnessFactor = mix(roughnessFactor, mix(gSeaRough, 0.9, gSeaFoam), gWater);`,
+      )
+      .replace(
+        '#include <normal_fragment_maps>',
+        `#include <normal_fragment_maps>
+if (gWater > 0.001) normal = normalize(mix(normal, normalize((viewMatrix * vec4(gSeaNormal, 0.0)).xyz), gWater * (1.0 - 0.6 * gSeaFoam)));`,
+      );
+  };
+  mat.customProgramCacheKey = () => 'globe-sea-v1';
+  return mat;
+}
 
 class GlobeTile {
   mesh: THREE.Mesh | null = null;
@@ -182,7 +224,7 @@ export class GlobeTiles {
     g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
     g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
     g.setIndex(idx);
-    const mesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85, metalness: 0 }));
+    const mesh = new THREE.Mesh(g, tileMaterial(tex));
     mesh.frustumCulled = false;
     mesh.visible = false;
     mesh.name = `globe ${t.key}`;

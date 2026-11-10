@@ -12,7 +12,8 @@ import { CloudNoise } from './cloudNoise';
 import { Land, type Sample, type SiteWeather, type WeatherConfig, WeatherModel, calmSeed, newSample } from '../weather/model';
 import type { FromBake, ToBake } from '../weather/bake.worker';
 import BakeWorker from '../weather/bake.worker.ts?worker';
-import { setStormDrift, stormShift, underStorms, weatherDir } from '../weather/storms';
+import { setStormDrift, stormCells, stormShift, underStorms, weatherDir } from '../weather/storms';
+import { sea } from './ocean';
 
 /** The weather map's size (~39 km per texel at the equator). */
 export const WX_W = 1024;
@@ -146,6 +147,8 @@ export class Weather {
     this.filled = 0;
     this.pending = null;
     this.local0.t = -Infinity;
+    this.windAt.t = -Infinity;
+    sea.reset();
     this.onConfig?.(cfg, this.landBytes);
   }
 
@@ -287,6 +290,57 @@ export class Weather {
    * ~0.3 under thick overcast), and fog. camFromCentre: the camera relative to the Earth's
    * centre (world, m); height: above the ground.
    */
+  private windAt = { t: -Infinity, at: new THREE.Vector3(), w: [0, 0] as [number, number] };
+  /**
+   * The wind over the sea round the camera (m/s east, north, at 10 m), for the waves: the
+   * strongest of here and ~15 km round (from the shore, the sea's wind, not the land's
+   * slowed by it). null: no weather.
+   */
+  surfaceWind(camFromCentre: THREE.Vector3): readonly number[] | null {
+    if (!this.enabled || !this.model) return null;
+    const c = this.windAt;
+    if (Math.abs(this.t - c.t) > 2 || c.at.distanceToSquared(camFromCentre) > 2000 ** 2) {
+      this.v.copy(camFromCentre).applyMatrix3(this.worldToEcef);
+      const d = weatherDir(this.v.x, this.v.y, this.v.z);
+      const lat = Math.asin(d[2]), lon = Math.atan2(d[1], d[0]);
+      let best = -1;
+      for (let k = 0; k < 5; k++) {
+        const az = (k / 4) * 2 * Math.PI;
+        const r = k === 0 ? 0 : 15e3 / 6.371e6;
+        const la = lat + r * Math.cos(az);
+        const lo = lon + (r * Math.sin(az)) / Math.max(0.2, Math.cos(la));
+        const w = this.model.wind((la * 180) / Math.PI, (lo * 180) / Math.PI, 10, this.t, false);
+        const m = Math.hypot(w[0], w[1]);
+        if (m > best) [best, c.w] = [m, [w[0], w[1]]];
+      }
+      // Thunderstorms: their outflow, the downdraughts' cold air spreading out under them (gust
+      // fronts): strongest round the rain cores, out to ~10 km beyond.
+      const m = this.model;
+      const t = this.t;
+      const probe = this.rainProbe;
+      const conv = (q: readonly number[]) => m.sample((Math.asin(q[2]) * 180) / Math.PI, (Math.atan2(q[1], q[0]) * 180) / Math.PI, t, undefined, probe).conv;
+      if (conv(d) > 0.02) {
+        const sl = Math.sin(lat), cl = Math.cos(lat), so = Math.sin(lon), co = Math.cos(lon);
+        for (const cell of stormCells(d, 6378137, 45e3, conv, 0, 1, t)) {
+          m.sample((Math.asin(cell.dir[2]) * 180) / Math.PI, (Math.atan2(cell.dir[1], cell.dir[0]) * 180) / Math.PI, t, undefined, probe);
+          const deep = (probe.top - probe.base) * cell.top;
+          if (deep < 6000) continue;
+          const score = smooth(6000, 10000, deep) * (cell.rA > 0 ? 1 : 0.4);
+          // (The camera from the cell: east, north, m.)
+          const x = cell.dir;
+          const de = -(x[0] * -so + x[1] * co) * 6.371e6;
+          const dn = -(x[0] * -sl * co + x[1] * -sl * so + x[2] * cl) * 6.371e6;
+          const dist = Math.hypot(de, dn) + 1;
+          const v = 15 * score * (0.4 + 0.6 * smooth(0, cell.rT, dist)) * Math.exp(-Math.max(0, dist - 1.5 * cell.rT) / 10000);
+          c.w = [c.w[0] + (v * de) / dist, c.w[1] + (v * dn) / dist];
+        }
+      }
+      c.t = this.t;
+      c.at.copy(camFromCentre);
+    }
+    return c.w;
+  }
+
   local(camFromCentre: THREE.Vector3, height: number): { rain: number; sun: number; fog: number } {
     if (!this.enabled || !this.model || height > 16000) {
       this.fogHere = 0;
