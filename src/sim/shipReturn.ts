@@ -228,6 +228,8 @@ const SEARCH_WINDOW = 26 * 3600;
 const GLIDE_TILT = 18 * DEG;
 /** Belly-flop: largest nose-up tilt past flat, to brake, rad. */
 const GLIDE_BRAKE = 6 * DEG;
+/** The most it noses down to glide while still far (over ~4 km) from the aim point, rad. */
+const GLIDE_TILT_FAR = 35 * DEG;
 /** Flip and burn starts around here above the target surface (base height), m. */
 const FLIP_HEIGHT = 1300;
 /** Into the belly-flop by this height (m) even if still supersonic: a steep fall gets low fast. */
@@ -1260,11 +1262,18 @@ export class ShipReturn {
         const dist = Math.hypot(toT[0], toT[1]);
         const hAbove = baseHeight - this.surfaceHeight();
         const tGo = Math.max(5, (hAbove - FLIP_HEIGHT) / Math.max(20, -vel[2]));
-        // Horizontal acceleration (both axes) to arrive over the target by the flip, stopped:
-        // the nose points along it and tilts down by as much as it needs (never gliding
-        // backwards: past flat the falling body goes unstable). x1.6: the glide answers slowly.
+        // Horizontal acceleration (both axes) to arrive over the target by the flip: the nose
+        // points along it and tilts down by as much as it needs (never gliding backwards: past
+        // flat the falling body goes unstable). Falling flat, drag takes the horizontal speed
+        // off by itself (decaying with a time constant ~ speed / g): it coasts that far
+        // regardless, and stops; the glide only has to make up the rest. (Taken as a plain
+        // "arrive stopped" law, a fast hand-off a few km out asked for a hard brake, nosed away
+        // from the target, and fell short.) x1.6: the glide answers slowly.
         const aH: V3 = [0, 0, 0];
-        for (const i of [0, 1] as const) aH[i] = (1.6 * (6 * toT[i] - 4 * vel[i] * tGo)) / (tGo * tGo);
+        const tau = clamp(Math.hypot(vel[0], vel[1], vel[2]) / 9.8, 5, 60);
+        const decay = 1 - Math.exp(-tGo / tau);
+        const reach = tau * Math.max(1, tGo - tau * decay);
+        for (const i of [0, 1] as const) aH[i] = (1.6 * (toT[i] - vel[i] * tau * decay)) / reach;
         // Heading: toward the target (turned gradually: a belly-flopping ship yaws slowly).
         // Nose along the acceleration it needs (to arrive over the aim point, stopped, by the
         // flip), not straight at the aim point: a belly-flopping ship pushes itself along its nose, so pointing at
@@ -1286,7 +1295,10 @@ export class ShipReturn {
         const hd = fr.dirIn(this.glideHeading);
         const aAlong = aH[0] * hd[0] + aH[1] * hd[1];
         const level = clamp((hAbove - FLIP_HEIGHT) / 250, 0, 1);
-        const tilt = level * clamp(Math.atan2(aAlong, 9.8), -GLIDE_BRAKE, GLIDE_TILT);
+        // (Steeper while still far off: a hand-off a couple of km to the side, from low and fast,
+        // is more than the gentle glide can make up.)
+        const tiltMax = GLIDE_TILT + (GLIDE_TILT_FAR - GLIDE_TILT) * clamp((dist - 1500) / 2500, 0, 1);
+        const tilt = level * clamp(Math.atan2(aAlong, 9.8), -GLIDE_BRAKE, tiltMax);
         const att = glideAttitude(vHat, this.glideHeading, Math.PI / 2 - ALPHA_BELLYFLOP + tilt);
         applyControl(ship, aux, att.nose, dt, undefined, att.bodyZ);
         this.status = `belly-flop: ${(dist / 1000).toFixed(2)} km to target, ${(hAbove / 1000).toFixed(1)} km up`;
@@ -1417,11 +1429,14 @@ export class ShipReturn {
     const want = crossKm >= 0 ? 1 : -1;
     // Late in the entry the range is often sorted and needs little bank, which leaves no lift to
     // take out a crossrange error with: bank at least enough toward the target to fly it out.
-    if (speed < 3000 && Math.abs(crossKm) > 1) {
-      const minBank = Math.min(30 * DEG, (Math.abs(crossKm) - 1) * 2 * DEG);
+    // (Tighter as it slows: the belly-flop that takes over, falling nearly straight down, can only
+    // make up a few hundred metres sideways, so the hand-off has to be lined up.)
+    const allow = clamp(0.0006 * speed, 0.2, 1);
+    if (speed < 3000 && Math.abs(crossKm) > allow) {
+      const minBank = Math.min(30 * DEG, (Math.abs(crossKm) - allow) * (speed < 1000 ? 8 : 2) * DEG);
       if (this.bank < minBank) {
         this.bank = minBank;
-        if (want !== this.bankSign && Math.abs(crossKm) > 3) {
+        if (want !== this.bankSign && Math.abs(crossKm) > 3 * allow) {
           this.bankSign = want;
           this.log(`Return: bank toward the target (${crossKm.toFixed(0)} km crossrange)`);
         }
