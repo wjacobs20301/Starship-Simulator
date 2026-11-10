@@ -31,7 +31,7 @@ import { engineThrust, throttleForThrust } from './engine';
 import { atmosphere } from './atmosphere';
 import { airRelativeVelocity, ecefToEci, ecefToEnuMatrix, ecefToGeodetic, eciToEcef, geodeticToEcef, localBasisEci } from './frames';
 import { orbitApsides } from './guidance';
-import { type V3, add, clamp, cross, dot, mat3Transpose, mat3Vec, norm, normalize, qrot, scale, sub } from './math';
+import { type V3, add, clamp, cross, dot, interp, mat3Transpose, mat3Vec, norm, normalize, qrot, scale, sub } from './math';
 import { MOUNTS, TOWERS, awayFromTower, catchGapSwung, catchPoint } from './padCollision';
 import { eciDirToPad, eciToPad, eciVelToPad, padDirToEci, padToEci } from './padFrame';
 import { entryAlpha, entryAttitude, heatFlux } from './shipReentry';
@@ -86,8 +86,33 @@ export interface ReturnPlan {
 
 /** Height of the catch fittings' undersides (what rests on the rails) above the ship's base, m. */
 export { SHIP_CATCH_PIN };
-/** The ship's entry as flown (for planning and guidance): measured from the sim, approx. */
-export const SHIP_ENTRY_MODEL: EntryModel = { dragArea: 339, liftToDrag: (speed) => (speed > 1000 ? 0.53 : speed > 700 ? 0.3 : 0.12) };
+/**
+ * The ship's lift-to-drag ratio at its entry attitude (60 deg) against Mach, relative to
+ * hypersonic: the body's own aerodynamics (aero.ts) dip through the transonic, where the axial
+ * drag peaks.
+ */
+const LD_MACH: readonly (readonly [number, number])[] = [
+  [0.8, 0.96],
+  [1, 0.82],
+  [1.2, 0.76],
+  [1.5, 0.8],
+  [2, 0.88],
+  [3, 0.94],
+  [4, 0.96],
+  [6, 1],
+];
+/**
+ * The ship's entry as flown (for planning and guidance): L/D 0.53 hypersonic (measured in the sim),
+ * through the Mach dip and the angle-of-attack schedule's pitch up into the belly-flop (speed to
+ * Mach at ~297 m/s, the sound speed 10-30 km up).
+ */
+export const SHIP_ENTRY_MODEL: EntryModel = {
+  dragArea: 339,
+  liftToDrag: (speed) => {
+    const mach = speed / 297;
+    return 0.53 * interp(LD_MACH, mach) * alphaAero(entryAlpha(mach)).ld;
+  },
+};
 
 /**
  * The ship's lift-to-drag ratio and drag against angle of attack, each relative to 60 deg (its
@@ -205,6 +230,8 @@ const GLIDE_TILT = 18 * DEG;
 const GLIDE_BRAKE = 6 * DEG;
 /** Flip and burn starts around here above the target surface (base height), m. */
 const FLIP_HEIGHT = 1300;
+/** Into the belly-flop by this height (m) even if still supersonic: a steep fall gets low fast. */
+const BELLYFLOP_BY = 15e3;
 /** Handed back below this height (m above the target) upright or burning, it goes straight to the landing burn. */
 const LANDING_TAKEOVER_HEIGHT = 8000;
 /** Tower approach: hover with the ship's base this far above the arms' rails, m. */
@@ -1204,9 +1231,9 @@ export class ShipReturn {
         }
         const att = entryAttitude(vHat, up, heading, entryAlphaFlown(aux.mach, this.alphaUp), this.bank * this.bankSign);
         applyControl(ship, aux, att.nose, dt, undefined, att.bodyZ);
-        if (aux.mach < 1 && aux.geo.h < 30e3) {
+        if ((aux.mach < 1 && aux.geo.h < 30e3) || aux.geo.h < BELLYFLOP_BY) {
           this.phase = 'bellyflop';
-          this.milestone('subsonic', `Subsonic: belly-flop at ${(speed * 3.6).toFixed(0)} km/h`);
+          this.milestone('subsonic', `${aux.mach < 1 ? 'Subsonic: belly-flop' : 'Belly-flop'} at ${(speed * 3.6).toFixed(0)} km/h`);
           this.log(`Return: belly-flop, ${this.distanceToTargetKm(aux).toFixed(1)} km to go`);
           // The tower swings its ship QD arm back out of the way for the catch.
           const arms = this.arms;

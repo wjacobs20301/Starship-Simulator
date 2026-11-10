@@ -29,7 +29,7 @@ describe('ship reentry and splashdown', () => {
   }, 240_000); // (A whole flight: ~20 s alone, several times that with the full suite running in parallel.)
 
   it('flies entry, belly-flop, flip and landing burn in order', () => {
-    const order = [/^SECO/, /^Entry interface/, /^Peak heating/, /^Subsonic: belly-flop/, /^Landing flip/, /^Splashdown/];
+    const order = [/^SECO/, /^Entry interface/, /^Peak heating/, /^(Subsonic: belly-flop|Belly-flop) at/, /^Landing flip/, /^Splashdown/];
     const times = order.map((re) => at(re)?.missionTime ?? NaN);
     for (const t of times) expect(t).not.toBeNaN();
     for (let i = 1; i < times.length; i++) expect(times[i]).toBeGreaterThanOrEqual(times[i - 1]);

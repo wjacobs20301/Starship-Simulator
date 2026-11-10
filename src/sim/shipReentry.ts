@@ -95,12 +95,14 @@ export class ShipReentry {
           this.phase = 'entry';
           this.log('Entry interface (100 km)');
         }
-        if (this.phase === 'entry' && aux.mach < 1 && aux.geo.h < 30e3) {
+        // (By 15 km up even if not yet subsonic: holding its lifting attitude to Mach 1.6, a steep
+        // fall gets low fast.)
+        if (this.phase === 'entry' && ((aux.mach < 1 && aux.geo.h < 30e3) || aux.geo.h < 15e3)) {
           this.phase = 'bellyflop';
-          this.log(`Subsonic: belly-flop at ${(speed * 3.6).toFixed(0)} km/h`);
+          this.log(`${aux.mach < 1 ? 'Subsonic: belly-flop' : 'Belly-flop'} at ${(speed * 3.6).toFixed(0)} km/h`);
         }
         if (this.phase === 'entry' && aux.q > 1e3) this.once('flaps', 'Flaps active');
-        // Angle of attack: 60 deg hypersonic, easing to a flat belly-flop below Mach ~2.
+        // Angle of attack: 60 deg down to Mach 1.6, easing to a flat belly-flop by Mach 0.8.
         const att = entryAttitude(vHat, up, heading, entryAlpha(aux.mach));
         applyControl(ship, aux, att.nose, dt, undefined, att.bodyZ);
         if (this.phase === 'bellyflop' && this.shouldIgnite(ship, aux, baseHeight, vz)) {
@@ -180,7 +182,14 @@ export function entryAttitude(vHat: V3, up: V3, heading: V3, a: number, bank = 0
 }
 
 
-/** Entry angle of attack by Mach: 60 deg hypersonic, easing to a flat belly-flop below Mach ~2. */
+/**
+ * Entry angle of attack by Mach: 60 deg (its lifting attitude, L/D ~0.4-0.5 at any Mach) down to
+ * Mach 1.6, easing to a flat belly-flop by Mach 0.8. (Held that late, it keeps its lift, and so its
+ * ability to turn, into the thick low air where a turn is tightest: a turn's radius is set by the
+ * air's density, ~17 km at 20 km up, not by the speed.)
+ */
+export const ALPHA_HOLD_MACH = 1.6;
+export const ALPHA_FLOP_MACH = 0.8;
 export function entryAlpha(mach: number): number {
-  return ALPHA_HYPERSONIC + (ALPHA_BELLYFLOP - ALPHA_HYPERSONIC) * clamp((3 - mach) / 2.5, 0, 1);
+  return ALPHA_HYPERSONIC + (ALPHA_BELLYFLOP - ALPHA_HYPERSONIC) * clamp((ALPHA_HOLD_MACH - mach) / (ALPHA_HOLD_MACH - ALPHA_FLOP_MACH), 0, 1);
 }
