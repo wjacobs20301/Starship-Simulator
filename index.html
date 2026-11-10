@@ -74,9 +74,20 @@
       .hud .warn { color: var(--warn); }
       .hud .bad { color: var(--bad); font-weight: 600; }
 
+      /* --- Left column: status lines, then the help or the objectives under them (stacked, never overlapping) --- */
+      #hud-left { position: fixed; z-index: 3; top: 14px; left: 18px; bottom: 206px; display: flex; flex-direction: column; align-items: flex-start; gap: 12px;
+        pointer-events: none; }
+      /* (The objectives give way when the maneuver planner needs the room: their list scrolls.) */
+      #hud-left > #objectives { flex: 0 1 auto; min-height: 60px; overflow: hidden auto; }
+      #hud-left > #maneuver { margin-top: auto; }
+      body:has(#webcast.piloting) #hud-left { bottom: 226px; }
+      #hud-left > * { position: relative !important; top: auto !important; left: auto !important; bottom: auto !important; flex: 0 0 auto; }
+      /* (A panel fading out takes no room.) */
+      #hud-left > .hidden, body.mission-on #hud-left > #help, body.map-mode #hud-left > #help, body.menu-open #hud-left > #help { position: absolute !important; }
+
       /* --- Top: status corner, phase line, event log --- */
       #top-left { z-index: 2; top: 14px; left: 18px; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: rgba(255,255,255,0.72);
-        line-height: 1.6; max-width: calc(50% - 160px); text-shadow: 0 1px 4px rgba(0,0,0,0.6); }
+        line-height: 1.6; max-width: min(420px, calc(50vw - 200px)); text-shadow: 0 1px 4px rgba(0,0,0,0.6); }
       #top-left b { color: #fff; font-weight: 600; letter-spacing: .24em; }
       #top-center { z-index: 2; top: 14px; left: 50%; transform: translateX(-50%); text-align: center; text-shadow: 0 1px 6px rgba(0,0,0,0.6); }
       #phase { font-size: 13px; font-weight: 600; letter-spacing: .32em; text-transform: uppercase; color: rgba(255,255,255,0.9);
@@ -139,7 +150,7 @@
       .wc-bar { width: 140px; height: 3px; background: rgba(255,255,255,.16); border-radius: 2px; overflow: hidden; }
       .wc-bar i { display: block; height: 100%; background: #fff; transform-origin: left; transition: transform .4s; }
       .wc-center { display: flex; flex-direction: column; align-items: center; }
-      .wc-timeline svg { width: 640px; height: 90px; overflow: visible; display: block; }
+      .wc-timeline svg { width: 640px; height: 102px; overflow: visible; display: block; }
       .wc-timeline .arc { fill: none; stroke: rgba(255,255,255,.32); stroke-width: 1.4; }
       .wc-timeline .arc.past { stroke: #fff; stroke-width: 2; }
       .wc-timeline .now { fill: #fff; filter: drop-shadow(0 0 3px #fff); }
@@ -152,12 +163,16 @@
       .wc-clock .t { font-size: 28px; font-weight: 500; margin-right: 6px; opacity: .92; }
       .wc-title { font-size: 12px; letter-spacing: .28em; color: rgba(255,255,255,.82); margin-top: 5px; font-weight: 500;
         font-family: "Barlow Semi Condensed", "Arial Narrow", system-ui, sans-serif; }
+      /* Next milestone and the time to it: on a long coast the arc is empty for hours. */
+      .wc-next { margin-top: 3px; min-height: 13px; font-size: 10.5px; letter-spacing: .22em; color: rgba(255,255,255,.55); white-space: nowrap;
+        font-variant-numeric: tabular-nums; }
+      .wc-next b { color: #fff; font-weight: 600; }
       #wc-caption { position: fixed; left: 50%; bottom: 246px; transform: translate(-50%, 10px); pointer-events: none;
         font: 600 16px "Barlow Semi Condensed", "Arial Narrow", system-ui, sans-serif; letter-spacing: .34em; color: #fff;
         opacity: 0; transition: opacity .7s ease, transform .7s ease, bottom .5s ease; text-shadow: 0 0 3px rgba(0,0,0,.9), 0 1px 12px rgba(0,0,0,.8); white-space: nowrap; }
       #wc-caption.show { opacity: 1; transform: translate(-50%, 0); }
       @media (max-width: 1200px) {
-        .wc-timeline svg { width: 440px; height: 62px; }
+        .wc-timeline svg { width: 440px; height: 70px; }
         .wc-attitude { display: none; }
         .wc-gauge { width: 76px; height: 76px; }
         .wc-gvalue { font-size: 20px; }
@@ -288,9 +303,9 @@
       #webcast.piloting .wc-clock { font-size: 22px; margin-top: 0; }
       #webcast.piloting .wc-clock .t { font-size: 15px; margin-right: 3px; }
       /* The arc, title and mode line fold away while piloting; the cockpit takes their place. */
-      .wc-timeline, .wc-title, .wc-mode { max-height: 100px; overflow: hidden;
+      .wc-timeline, .wc-title, .wc-mode, .wc-next { max-height: 110px; overflow: hidden;
         transition: max-height .7s var(--ease), opacity .45s ease, margin .7s var(--ease); }
-      #webcast.piloting .wc-timeline, #webcast.piloting .wc-title, #webcast.piloting .wc-mode { max-height: 0; opacity: 0; margin-top: 0; }
+      #webcast.piloting .wc-timeline, #webcast.piloting .wc-title, #webcast.piloting .wc-mode, #webcast.piloting .wc-next { max-height: 0; min-height: 0; opacity: 0; margin-top: 0; }
       .wc-readout { font-size: 10.5px; letter-spacing: .12em; color: rgba(255,255,255,0.6); padding: 2px 4px 0;
         font-variant-numeric: tabular-nums; white-space: nowrap; animation: fadeUp .6s var(--ease); }
       .wc-readout b { color: #fff; font-weight: 600; margin-right: 4px; }
@@ -367,10 +382,47 @@
       .mn-page.enter > *:nth-child(2) { animation-delay: .07s; }
       @keyframes pageIn { from { opacity: 0; transform: translateX(18px); } to { opacity: 1; transform: none; } }
       .mn-title { font-size: 12px; font-weight: 600; letter-spacing: .34em; text-transform: uppercase; color: rgba(255,255,255,0.7);
-        padding-bottom: 10px; border-bottom: 1px solid var(--line); margin-bottom: 18px; max-width: 620px; }
+        padding-bottom: 10px; border-bottom: 1px solid var(--line); margin-bottom: 18px; max-width: 1080px; }
       .mn-title small { display: block; margin-top: 7px; font-size: 10px; font-weight: 500; letter-spacing: .18em; color: rgba(255,255,255,0.42); }
       .mn-title small kbd { font-size: 9px; padding: 0 4px; }
-      .mn-missions { display: grid; grid-template-columns: minmax(190px, 230px) minmax(0, 1fr); gap: 30px; max-width: 620px; }
+      .mn-missions { display: grid; grid-template-columns: minmax(170px, 210px) minmax(0, 1fr) minmax(240px, 280px); gap: 30px; max-width: 1080px; align-items: start; }
+      /* The mission at a glance: chips under its name. */
+      .mn-facts { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 2px; }
+      .mn-facts span { font-size: 10.5px; font-weight: 600; letter-spacing: .16em; text-transform: uppercase; color: rgba(255,255,255,0.78);
+        padding: 4px 8px 3px; border: 1px solid rgba(255,255,255,0.22); border-radius: 2px; white-space: nowrap; }
+      .mn-more { margin: -6px 0 18px; }
+      .mn-more summary { list-style: none; cursor: pointer; font-size: 10.5px; font-weight: 600; letter-spacing: .26em; text-transform: uppercase;
+        color: rgba(255,255,255,0.55); transition: color .2s; width: max-content; }
+      .mn-more summary::-webkit-details-marker { display: none; }
+      .mn-more summary::before { content: "+"; display: inline-block; width: 14px; }
+      .mn-more[open] summary::before { content: "–"; }
+      .mn-more summary:hover { color: #fff; }
+      .mn-more p { font-size: 13.5px; margin: 8px 0 0; color: rgba(255,255,255,0.68); }
+      .mn-detail ul.mn-obj { columns: 2 220px; column-gap: 24px; font-size: 13px; line-height: 1.8; }
+      .mn-obj li { break-inside: avoid; }
+      /* Right column: the flight plan (the timeline) and what's needed to start. */
+      .mn-aside { min-width: 0; padding: 12px 16px 16px; background: var(--glass); border-top: 1px solid var(--line-strong); border-radius: 2px;
+        backdrop-filter: blur(10px) saturate(1.1); -webkit-backdrop-filter: blur(10px) saturate(1.1); box-shadow: 0 12px 32px rgba(0,0,0,0.28);
+        animation: pageIn .5s var(--ease) .1s both; }
+      .mn-detail .mn-real { margin-top: 6px; }
+      .mn-detail .mn-real .mn-row { font-size: 12px; padding: 8px 0; }
+      .mn-plan { list-style: none; margin: 0 0 14px; padding: 0 6px 0 0; max-height: calc(100vh - 9vh - 400px); min-height: 120px; overflow: auto;
+        mask-image: linear-gradient(#000 calc(100% - 18px), transparent); }
+      .mn-plan li { display: grid; grid-template-columns: 70px 1fr; gap: 8px; font-size: 11.5px; line-height: 1.9; letter-spacing: .12em; }
+      .mn-plan b { font-weight: 500; color: rgba(255,255,255,0.5); font-variant-numeric: tabular-nums; letter-spacing: .04em; }
+      .mn-plan span { color: rgba(255,255,255,0.86); font-weight: 600; }
+      .mn-launch { border-top: 1px solid var(--line); padding-top: 14px; }
+      .mn-launch .mn-real, .mn-launch .mn-pads { margin-bottom: 14px; }
+      .mn-launch .mn-row { font-size: 11.5px; padding: 7px 0; }
+      .mn-launch .mn-hint { font-size: 11px; }
+      .mn-fixed { font-size: 12px; font-weight: 600; letter-spacing: .16em; text-transform: uppercase; color: rgba(255,255,255,0.75); }
+      /* Free roam: one compact column on the left; the pad picked fills the rest of the screen behind. */
+      .mn-free { max-width: 560px; animation: pageIn .5s var(--ease) both; }
+      .mn-free p { font-size: 14px; line-height: 1.55; letter-spacing: .02em; color: rgba(255,255,255,0.75); margin: 0 0 16px; }
+      .mn-free .mn-pads, .mn-free .mn-wx, .mn-free .mn-real { margin-bottom: 16px; }
+      .mn-free .mn-wx-note { min-height: 0; }
+      .mn-free .mn-row { padding: 7px 0; }
+      .mn-foot2 { padding-top: 2px; }
       .mn-list { display: flex; flex-direction: column; }
       .mn-card { position: relative; display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 11px 12px 11px 16px;
         cursor: pointer; font-size: 14px; font-weight: 600; letter-spacing: .16em; text-transform: uppercase; color: rgba(255,255,255,0.62);
@@ -448,8 +500,15 @@
       body.menu-open #maneuver, body.menu-open #return, body.menu-open #log, body.menu-open #map-labels { opacity: 0; }
       body.menu-open #wc-caption { opacity: 0 !important; }
       body.menu-open::after { opacity: 0; }
+      @media (max-width: 1240px) {
+        .mn-missions { grid-template-columns: minmax(160px, 190px) minmax(0, 1fr); }
+        .mn-aside { grid-column: 2; }
+        .mn-plan { max-height: 220px; }
+      }
       @media (max-width: 900px) {
         #menu { grid-template-columns: 1fr; overflow: auto; }
+        .mn-aside { grid-column: auto; }
+        .mn-detail ul.mn-obj { columns: 1; }
         .mn-page { padding: 0 6vw 6vh; }
         .mn-nav { margin-top: 4vh; }
         .mn-missions { grid-template-columns: 1fr; }
@@ -496,6 +555,7 @@
   <body>
     <canvas id="view"></canvas>
     <div id="loading"><div class="ld-name">STARSHIP</div><div class="ld-bar"><i></i></div><div class="ld-text">Loading models</div></div>
+    <div id="hud-left">
     <div id="top-left" class="hud"><b id="site">STARSHIP V3 · STARBASE PAD 1</b><br /><span id="status"></span></div>
     <div id="help" class="hud hidden">
       <div class="group">LAUNCH</div>
@@ -520,6 +580,7 @@
         Buildings and tanks: ©
         <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors (ODbL)<br />
         An independent fan-made simulator, not affiliated with or endorsed by SpaceX.</div>
+    </div>
     </div>
     <div id="log" class="hud hidden"></div>
     <canvas id="plot"></canvas>

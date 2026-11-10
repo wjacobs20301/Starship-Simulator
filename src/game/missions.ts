@@ -119,6 +119,8 @@ export interface MissionDef {
   /** Hand-flown (autopilot off for what you fly) or watched on autopilot (L takes over). */
   group: 'manual' | 'auto' | 'free';
   brief: string;
+  /** The mission page's lead, for a long brief (the brief then folds away under it). */
+  summary?: string;
   setup: MissionSetup;
   target?: MissionTarget;
   objectives: Objective[];
@@ -296,6 +298,9 @@ export const MISSIONS: MissionDef[] = [
     id: 'flight15',
     title: 'Flight 15',
     group: 'auto',
+    summary:
+      'SpaceX\'s plan for the fifteenth flight (November 2026): both stages caught by the same tower. Super Heavy is back on Pad 2\'s chopsticks seven minutes after liftoff; ' +
+      'the ship deploys 26 Starlink V3 satellites, checks its heat shield, and about 14 orbits later comes home to be caught beside the booster.',
     brief:
       "Starship's fifteenth flight, as SpaceX plans it (November 2026): Super Heavy lifts off from Pad 2 and flies home to its tower; " +
       'the ship goes on to orbit, opens its payload door half an hour after liftoff and deploys 26 Starlink V3 satellites, one about every 70 seconds. ' +
@@ -318,6 +323,9 @@ export const MISSIONS: MissionDef[] = [
     id: 'flight14',
     title: 'Flight 14 (replay)',
     group: 'auto',
+    summary:
+      'The first flight to orbit, as it flew on 28 September 2026: an engine out on the ship on the way up, Super Heavy down in the Gulf, ' +
+      '26 Starlink V3 satellites deployed, and a splashdown north of Hawaii that ended in a fireball.',
     brief:
       'Starship\'s fourteenth flight as it flew on 28 September 2026, the first to reach orbit: from Pad 2, Super Heavy comes down on the Gulf ' +
       '(the tower catch was skipped while SpaceX tested changes to make engine relights more reliable, and two engines don\'t relight for its burns home). ' +
@@ -394,6 +402,7 @@ export const MISSIONS: MissionDef[] = [
     id: 'shipcatch',
     title: 'Ship Catch',
     group: 'auto',
+    summary: 'Catch both stages: Super Heavy back to Pad 1\'s chopsticks, then the ship home from orbit to be caught by Pad 2\'s tower nearly a day later.',
     brief:
       'The full catch-both profile: launch, the booster back to Pad 1\'s chopsticks, the ship on to space. At engine cutoff the ship heads home by itself: a burn to orbit, a coast of many hours for the pass over Starbase (warp with 1–8 or , . to speed it up: nothing speeds up on its own), deorbit, a steered entry, belly-flop, flip, and a catch by Pad 2\'s tower. It drops back to normal speed for the flip and catch.',
     setup: { shipReturn: 'tower' },

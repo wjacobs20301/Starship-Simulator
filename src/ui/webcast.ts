@@ -7,6 +7,8 @@
 import { STARSHIP_V3, SUPER_HEAVY_V3 } from '../sim/config/starshipV3';
 import type { Snapshot, VehicleSnapshot } from '../sim/simulation';
 import type { StageDef, StageId } from '../sim/vehicle';
+import { type Milestone, formatT, missionTimeline } from '../game/timelines';
+import type { MissionId } from '../game/missions';
 
 const NS = 'http://www.w3.org/2000/svg';
 const svgEl = <K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string | number> = {}) => {
@@ -217,31 +219,12 @@ export class VehicleBlock {
 
 // --- Mission timeline ------------------------------------------------------------------------
 
-interface Milestone {
-  label: string;
-  /** Nominal mission time, s (until the event happens; then its real time). */
-  at: number;
-  match: RegExp;
-  /** Caption shown when it happens. */
-  caption: string;
-}
-
-const MILESTONES = (): Milestone[] => [
-  { label: 'LIFTOFF', at: 0, match: /^Liftoff/, caption: 'LIFTOFF' },
-  { label: 'MAX Q', at: 62, match: /^Max-Q/, caption: 'MAX Q' },
-  { label: 'STAGE SEP', at: 138, match: /^Stage separation/, caption: 'STAGE SEPARATION' },
-  { label: 'BOOSTBACK', at: 145, match: /^Boostback burn startup/, caption: 'BOOSTBACK BURN' },
-  { label: 'SUPER HEAVY LANDING', at: 420, match: /^Booster caught|^Super Heavy (touchdown|splashdown)/, caption: 'SUPER HEAVY CATCH' },
-  { label: 'SECO', at: 466, match: /^SECO/, caption: 'SHIP ENGINE CUTOFF' },
-  { label: 'ENTRY', at: 2800, match: /^Entry interface/, caption: 'ATMOSPHERIC ENTRY' },
-  { label: 'STARSHIP LANDING', at: 3960, match: /^Splashdown|^Ship caught/, caption: 'STARSHIP LANDING' },
-];
-
 /** The arc: a wide, shallow curve; x across 0..W, rising to the middle. */
 const ARC_W = 640;
 const ARC_H = 64;
-/** Space above the arc's box for the milestone labels (viewBox units). */
-const LABEL_ROOM = 26;
+/** Space above the arc's box for the milestone labels (viewBox units): three rows. */
+const LABEL_ROOM = 38;
+const LABEL_ROWS = [-9, -21, -33];
 const ARC_R = 1400;
 const arcY = (x: number) => ARC_H - 6 - (Math.sqrt(ARC_R * ARC_R - (x - ARC_W / 2) ** 2) - Math.sqrt(ARC_R * ARC_R - (ARC_W / 2) ** 2));
 /** Where "now" sits along the arc, and the stretch of time the arc shows either side, s. */
@@ -249,71 +232,90 @@ const NOW_X = 0.42 * ARC_W;
 const PAST_S = 240;
 const AHEAD_S = 420;
 
+interface ArcItem {
+  m: Milestone;
+  g: SVGGElement;
+  text: SVGTextElement;
+  done: boolean;
+  /** Label width, viewBox units (measured once it's laid out). */
+  w: number;
+}
+
 class Timeline {
   readonly el: HTMLElement;
-  private past: SVGPathElement;
-  private items: { m: Milestone; g: SVGGElement; dot: SVGCircleElement; done: boolean }[] = [];
+  private svg: SVGSVGElement;
+  private items: ArcItem[] = [];
 
   constructor(private onCaption: (text: string) => void) {
     this.el = document.createElement('div');
     this.el.className = 'wc-timeline';
-    // (Room above the arc for the upper row of labels: the timeline's box clips what spills out.)
-    const svg = svgEl('svg', { viewBox: `0 ${-LABEL_ROOM} ${ARC_W} ${ARC_H + LABEL_ROOM}` });
+    // (Room above the arc for the rows of labels: the timeline's box clips what spills out.)
+    this.svg = svgEl('svg', { viewBox: `0 ${-LABEL_ROOM} ${ARC_W} ${ARC_H + LABEL_ROOM}` });
     const path = (x0: number, x1: number) => {
       let d = '';
       for (let x = x0; x <= x1; x += 8) d += `${d ? 'L' : 'M'} ${x.toFixed(1)} ${arcY(x).toFixed(1)} `;
       return d;
     };
-    svg.appendChild(svgEl('path', { d: path(0, ARC_W), class: 'arc' }));
-    this.past = svgEl('path', { d: path(0, NOW_X), class: 'arc past' });
-    svg.appendChild(this.past);
-    svg.appendChild(svgEl('circle', { cx: NOW_X, cy: arcY(NOW_X), r: 4.5, class: 'now' }));
-    MILESTONES().forEach((m, i) => {
-      const g = svgEl('g', { class: 'wc-ms' });
-      const dot = svgEl('circle', { r: 3.2 });
-      // Alternate label heights so neighbours close in time don't overlap.
-      const text = svgEl('text', { y: i % 2 ? -21 : -9 });
-      text.textContent = m.label;
-      g.append(dot, text);
-      svg.appendChild(g);
-      this.items.push({ m, g, dot, done: false });
-    });
-    this.el.appendChild(svg);
+    this.svg.appendChild(svgEl('path', { d: path(0, ARC_W), class: 'arc' }));
+    this.svg.appendChild(svgEl('path', { d: path(0, NOW_X), class: 'arc past' }));
+    this.svg.appendChild(svgEl('circle', { cx: NOW_X, cy: arcY(NOW_X), r: 4.5, class: 'now' }));
+    this.el.appendChild(this.svg);
   }
 
-  reset(): void {
-    const fresh = MILESTONES();
-    this.items.forEach((it, i) => {
-      it.m = fresh[i];
-      it.done = false;
-      it.g.classList.remove('done', 'hit');
+  /** The flight's milestones (a fresh copy: each moves to when it actually happens). */
+  set(list: Milestone[]): void {
+    for (const it of this.items) it.g.remove();
+    this.items = list.map((m) => {
+      const g = svgEl('g', { class: 'wc-ms' });
+      const dot = svgEl('circle', { r: 3.2 });
+      const text = svgEl('text', { y: LABEL_ROWS[0] });
+      text.textContent = m.label;
+      g.append(dot, text);
+      this.svg.appendChild(g);
+      return { m, g, text, done: false, w: 0 };
     });
+  }
+
+  /** The next milestone still to come, if any. */
+  next(): Milestone | null {
+    return this.items.find((it) => !it.done)?.m ?? null;
   }
 
   update(s: Snapshot, now: number | null): void {
-    // New events (each snapshot carries those since the last): milestones reached, at their
-    // real times, with a caption.
+    // New events (each snapshot carries those since the last): each marks the first milestone
+    // still to come that it matches (so the second relight is the deorbit burn), at its real time.
     for (const e of s.events) {
-      for (const it of this.items) {
-        if (it.done || !it.m.match.test(e.text)) continue;
-        it.done = true;
-        if (e.missionTime !== null) it.m.at = e.missionTime;
-        it.g.classList.add('done', 'hit');
-        this.onCaption(it.m.caption);
-      }
+      const it = this.items.find((x) => !x.done && x.m.match.test(e.text));
+      if (!it) continue;
+      it.done = true;
+      if (e.missionTime !== null) it.m.at = e.missionTime;
+      it.g.classList.add('done', 'hit');
+      this.onCaption(it.m.caption);
     }
     const tNow = now ?? -10;
     // Milestones still to come but already overdue slide along with "now" until they happen.
+    const shown: { it: ArcItem; x: number }[] = [];
     for (const it of this.items) {
       const at = it.done ? it.m.at : Math.max(it.m.at, tNow);
       const x = NOW_X + ((at - tNow) / (at >= tNow ? AHEAD_S : PAST_S)) * (at >= tNow ? ARC_W - NOW_X : NOW_X);
-      const visible = x > -20 && x < ARC_W + 20;
+      const visible = x > -40 && x < ARC_W + 40;
       it.g.style.display = visible ? '' : 'none';
       if (!visible) continue;
       it.g.setAttribute('transform', `translate(${x.toFixed(1)} ${arcY(Math.max(0, Math.min(ARC_W, x))).toFixed(1)})`);
       // Fade out toward the arc's ends.
       const edge = Math.min(x, ARC_W - x) / 70;
       it.g.style.opacity = String(Math.max(0, Math.min(1, edge)));
+      shown.push({ it, x });
+    }
+    // Labels on the lowest row where they clear their neighbours (close milestones stack up).
+    const rowEnd = LABEL_ROWS.map(() => -Infinity);
+    for (const { it, x } of shown.sort((a, b) => a.x - b.x)) {
+      if (!it.w) it.w = it.text.getComputedTextLength() || it.m.label.length * 7.4;
+      let row = rowEnd.findIndex((end) => x - it.w / 2 > end + 8);
+      if (row < 0) row = rowEnd.indexOf(Math.min(...rowEnd));
+      rowEnd[row] = x + it.w / 2;
+      const y = String(LABEL_ROWS[row]);
+      if (it.text.getAttribute('y') !== y) it.text.setAttribute('y', y);
     }
   }
 }
@@ -328,6 +330,10 @@ export class Webcast {
   private clock: HTMLElement;
   private title: HTMLElement;
   private mode: HTMLElement;
+  /** The next milestone and the time to it (the long coasts: nothing on the arc for hours). */
+  private next: HTMLElement;
+  private lastNext = '';
+  private missionId: MissionId = 'ift';
   /** Slot for the flight controls (see FlightPanel). */
   readonly cockpit: HTMLElement;
   private caption: HTMLElement;
@@ -341,18 +347,20 @@ export class Webcast {
     this.booster = new VehicleBlock('booster', SUPER_HEAVY_V3, 'SUPER HEAVY', false);
     this.ship = new VehicleBlock('ship', STARSHIP_V3, 'STARSHIP', true);
     this.timeline = new Timeline((text) => this.showCaption(text));
+    this.timeline.set(missionTimeline(this.missionId));
     const center = document.createElement('div');
     center.className = 'wc-center';
     // While the player flies, the timeline arc and the title fold away and the middle becomes the
     // "cockpit" (throttle, navball, SAS) with the clock, small, under the navball.
     center.innerHTML =
       '<div class="wc-cockpit"></div>' +
-      '<div class="wc-clock"><span class="t">T+</span><span class="v">00:00:00</span></div><div class="wc-title"></div><div class="wc-mode"></div>';
+      '<div class="wc-clock"><span class="t">T+</span><span class="v">00:00:00</span></div><div class="wc-title"></div><div class="wc-next"></div><div class="wc-mode"></div>';
     center.prepend(this.timeline.el);
     this.cockpit = center.querySelector('.wc-cockpit')!;
     this.clock = center.querySelector('.wc-clock')!;
     this.title = center.querySelector('.wc-title')!;
     this.mode = center.querySelector('.wc-mode')!;
+    this.next = center.querySelector('.wc-next')!;
     this.root.append(this.booster.el, center, this.ship.el);
     parent.appendChild(this.root);
     this.caption = document.createElement('div');
@@ -379,13 +387,17 @@ export class Webcast {
     this.ship.setTitle(name);
   }
 
-  setMission(title: string): void {
+  setMission(title: string, id: MissionId): void {
     const text = `STARSHIP ${title.toUpperCase()}`;
     if (this.title.textContent !== text) this.title.textContent = text;
+    if (id !== this.missionId) {
+      this.missionId = id;
+      this.timeline.set(missionTimeline(id));
+    }
   }
 
   reset(): void {
-    this.timeline.reset();
+    this.timeline.set(missionTimeline(this.missionId));
     this.wasStack = true;
     this.caption.classList.remove('show');
   }
@@ -407,6 +419,14 @@ export class Webcast {
     }
     this.wasStack = !!stack;
     this.timeline.update(s, tm);
+    // Next up, once it's past the arc's near end (or the clock isn't running yet).
+    const nx = this.timeline.next();
+    const t = tm ?? 0;
+    const text = nx && nx.at - t > 60 ? `NEXT <b>${nx.label}</b> · T−${formatT(nx.at - t)}` : '';
+    if (text !== this.lastNext) {
+      this.lastNext = text;
+      this.next.innerHTML = text;
+    }
   }
 
   private showCaption(text: string): void {

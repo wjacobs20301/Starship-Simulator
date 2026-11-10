@@ -35,7 +35,9 @@ export class MissionUi {
   ) {
     this.tracker = el('div', 'objectives', 'hud hidden');
     this.results = el('div', 'results', 'hidden');
-    parent.append(this.tracker, this.results);
+    // (The objectives go in the left column, under the status lines.)
+    (document.querySelector('#hud-left') ?? parent).append(this.tracker);
+    parent.append(this.results);
     this.results.addEventListener('click', (e) => {
       const act = (e.target as HTMLElement).closest<HTMLElement>('button')?.dataset.act;
       if (act === 'retry') handlers.retry();

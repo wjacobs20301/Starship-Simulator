@@ -5,6 +5,7 @@
 import { MISSIONS, type MissionDef, type MissionId } from '../game/missions';
 import { FREE_WEATHER, type FreeWeather, WEATHER_AVAILABLE, WEATHER_NAME, onSettingsChange, settings, updateSettings } from '../settings';
 import { loadBest } from './missionUi';
+import { formatT, missionTimeline } from '../game/timelines';
 
 export type MenuKind = 'main' | 'pause';
 
@@ -64,6 +65,11 @@ export interface MenuHandlers {
   mainMenu(): void;
   /** Main menu: show the next backdrop. */
   nextScene(): void;
+  /**
+   * Main menu backdrop: the picked pad seen from the ground, in free roam's weather (while the Free
+   * Roam page is up), or null for the rotating backdrops.
+   */
+  backdrop(pad: number | null): void;
 }
 
 export class GameMenu {
@@ -134,6 +140,7 @@ export class GameMenu {
       if (button?.dataset.pad) {
         this.pad = Number(button.dataset.pad);
         this.render();
+        if (this.kind === 'main' && this.current === 'free') handlers.backdrop(this.pad);
         return;
       }
       const act = button?.dataset.act;
@@ -215,6 +222,7 @@ export class GameMenu {
 
   private show(page: Page): void {
     this.current = page;
+    if (this.kind === 'main') this.handlers.backdrop(page === 'free' ? this.pad : null);
     if (this.kind) {
       ITEMS[this.kind].forEach((it, i) => this.nav.children[i]?.classList.toggle('on', it.page === page));
     }
@@ -265,7 +273,8 @@ export class GameMenu {
       case 'missions':
       case 'auto': {
         // Two pages: the hand-flown missions (you fly them, no autopilot) and the autopilot
-        // flights (it flies the profile, you can take over).
+        // flights (it flies the profile, you can take over). Three columns: the list, the
+        // mission, and its flight plan with what's needed to start it.
         const best = loadBest();
         const list = MISSIONS.filter((x) => x.group === (page === 'missions' ? 'manual' : 'auto'));
         const m = list.find((x) => x.id === this.mission) ?? list[0];
@@ -273,40 +282,50 @@ export class GameMenu {
         const card = (x: (typeof list)[number]) =>
           `<div class="mn-card${x.id === m.id ? ' on' : ''}" data-mission="${x.id}"><span>${x.title}</span>` +
           `<em>${best[x.id] !== undefined ? `BEST ${best[x.id]}` : ''}</em></div>`;
-        const cards = list.map(card).join('');
         const objectives = m.objectives.map((o) => `<li>${o.label}</li>`).join('');
         const midFlight = !!m.setup.start && m.setup.start !== 'pad';
+        const lead = m.summary ?? m.brief;
+        const detail =
+          `<div class="mn-detail" data-key="${m.id}">` +
+          `<div class="mn-kind">${m.group === 'manual' ? 'Hand-flown' : 'Autopilot'}${midFlight ? ` · starts ${START_LABEL[m.setup.start!]}` : ''}</div>` +
+          `<div class="mn-dname">${m.title}</div>` +
+          `<div class="mn-facts">${missionFacts(m).map((f) => `<span>${f}</span>`).join('')}</div>` +
+          `<p>${lead}</p>` +
+          (m.summary ? `<details class="mn-more"><summary>About this flight</summary><p>${m.brief}</p></details>` : '') +
+          (objectives ? `<div class="mn-label">Objectives</div><ul class="mn-obj">${objectives}</ul>` : '') +
+          (midFlight ? '' : this.realism(m)) +
+          `</div>`;
+        const plan = missionTimeline(m.id);
+        const start =
+          midFlight
+            ? (m.setup.start === 'boosterLanding' ? this.padPicker() : '') +
+              `<button class="mn-go" data-act="launch">Start mission <b>›</b></button>` +
+              `<div class="mn-hint">Starts ${START_LABEL[m.setup.start!]}${m.group === 'manual' ? ', you at the controls' : ''}.</div>`
+            : (m.setup.pad !== undefined ? `<div class="mn-pads"><div class="mn-label">Launch pad</div><div class="mn-fixed">Pad ${m.setup.pad + 1}, as the real flight</div></div>` : this.padPicker()) +
+              `<button class="mn-go" data-act="launch">Go to the pad <b>›</b></button>` +
+              `<div class="mn-hint">Then <kbd>Space</kbd> starts the countdown.</div>`;
         return (
           (page === 'missions'
             ? `<div class="mn-title">Missions<small>Hand-flown · you fly it, no autopilot</small></div>`
             : `<div class="mn-title">Autopilot<small>It flies the profile · <kbd>L</kbd> to take over</small></div>`) +
-          `<div class="mn-missions"><div class="mn-list">${cards}</div>` +
-          `<div class="mn-detail" data-key="${m.id}"><div class="mn-kind">${m.group === 'manual' ? 'Hand-flown' : 'Autopilot'}${m.setup.start && m.setup.start !== 'pad' ? ` · starts ${START_LABEL[m.setup.start]}` : ''}</div>` +
-          `<div class="mn-dname">${m.title}</div><p>${m.brief}</p>` +
-          (objectives ? `<div class="mn-label">Objectives</div><ul>${objectives}</ul>` : '') +
-          (midFlight
-            ? (m.setup.start === 'boosterLanding' ? this.padPicker() : '') +
-              `<button class="mn-go" data-act="launch">Start mission <b>›</b></button>` +
-              `<div class="mn-hint">Starts ${START_LABEL[m.setup.start!]}${m.group === 'manual' ? ', you at the controls' : ''}.</div></div></div>`
-            : (m.setup.pad !== undefined ? `<div class="mn-pads"><div class="mn-label">Launch pad</div><div class="mn-hint">Pad ${m.setup.pad + 1}, as the real flight</div></div>` : this.padPicker()) +
-              this.realism(m) +
-              `<button class="mn-go" data-act="launch">Go to the pad <b>›</b></button>` +
-              `<div class="mn-hint">Then press <kbd>Space</kbd> to start the countdown.</div></div></div>`)
+          `<div class="mn-missions"><div class="mn-list">${list.map(card).join('')}</div>${detail}` +
+          `<div class="mn-aside"><div class="mn-label">Flight plan</div><ol class="mn-plan">` +
+          plan.map((x) => `<li><b>T+${formatT(x.at)}</b><span>${x.label}</span></li>`).join('') +
+          `</ol><div class="mn-launch">${start}</div></div></div>`
         );
       }
       case 'free':
         return (
-          `<div class="mn-title">Free Roam</div><div class="mn-detail solo">` +
-          `<p>Starship stacked on the pad with nothing to score. Look around, work the tower arms, destack and restack, ` +
-          `launch whenever you like with <kbd>Space</kbd>. You're at the controls from the start (manual). After staging you fly the ship; ` +
-          `the booster flies itself home to the tower unless you take it over (<kbd>V</kbd> to switch to it, <kbd>L</kbd> for the controls).</p>` +
+          `<div class="mn-title">Free Roam<small>No objectives · launch whenever you like</small></div><div class="mn-free">` +
+          `<p>Starship stacked on the pad, nothing to score. Look around, work the tower arms, launch with <kbd>Space</kbd> when you like. ` +
+          `You fly from the start; after staging the booster flies itself home unless you take it over (<kbd>V</kbd>, then <kbd>L</kbd>).</p>` +
           this.padPicker() +
           this.weatherPicker() +
           `<div class="mn-real"><div class="mn-label">Payload</div>` +
-          `<div class="mn-row"><span>Starlink V3 satellites<small>26 in the bay: press <kbd>B</kbd> above 120 km to deploy, again to hold</small></span>` +
+          `<div class="mn-row"><span>Starlink V3 satellites<small>26 in the bay: <kbd>B</kbd> above 120 km to deploy, again to hold</small></span>` +
           `<button class="mn-toggle${settings.freeStarlink ? ' on' : ''}" data-act="starlink"><i></i></button></div></div>` +
           this.realism() +
-          `<button class="mn-go" data-act="free">Go to the pad <b>›</b></button></div>`
+          `<div class="mn-foot2"><button class="mn-go" data-act="free">Go to the pad <b>›</b></button></div></div>`
         );
       case 'settings':
         return (
@@ -335,6 +354,28 @@ export class GameMenu {
         return '';
     }
   }
+}
+
+/** The mission at a glance: where from, what it carries, how long, how each stage comes home. */
+function missionFacts(m: MissionDef): string[] {
+  const f: string[] = [];
+  const st = m.setup;
+  if (st.start === 'separation') f.push('From stage separation');
+  else if (st.start === 'boosterLanding') f.push('From 20 km up');
+  else if (st.start === 'entry') f.push('From entry interface');
+  else f.push(st.pad !== undefined ? `Pad ${st.pad + 1}` : 'Pad 1 or 2');
+  if (st.fly) f.push(`You fly the ${st.fly === 'stack' ? 'stack' : st.fly === 'booster' ? 'booster' : 'ship'}`);
+  if (st.payload === 'starlink') f.push('26 Starlink V3');
+  const plan = missionTimeline(m.id);
+  const span = plan.length > 1 ? plan[plan.length - 1].at - Math.max(0, plan[0].at) : 0;
+  if (span > 0) f.push(span >= 3600 ? `≈ ${Math.floor(span / 3600)} h ${Math.round((span % 3600) / 60)} min` : `≈ ${Math.max(1, Math.round(span / 60))} min`);
+  const labels = plan.map((x) => x.label);
+  if (labels.includes('BOOSTER CATCH')) f.push('Booster: tower catch');
+  else if (labels.includes('BOOSTER SPLASHDOWN')) f.push('Booster: Gulf splashdown');
+  if (labels.includes('SHIP CATCH')) f.push('Ship: tower catch');
+  else if (labels.includes('SPLASHDOWN')) f.push(m.id === 'flight14' ? 'Ship: Pacific splashdown' : 'Ship: ocean splashdown');
+  if (st.faults) f.push('Real engine failures');
+  return f;
 }
 
 /** Full screen on / off (the whole page, so the HUD and menus come along). */

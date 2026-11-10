@@ -3,6 +3,7 @@
 
 import type { Snapshot } from '../sim/simulation';
 import { onSettingsChange } from '../settings';
+import type { MissionId } from '../game/missions';
 import { Webcast, formatClock } from './webcast';
 
 export { formatClock };
@@ -21,8 +22,8 @@ export class Hud {
     onSettingsChange((s) => this.webcast.setShipName(`STARSHIP · ${s.shipSerial.toUpperCase()}`));
   }
 
-  setMission(title: string): void {
-    this.webcast.setMission(title);
+  setMission(title: string, id: MissionId): void {
+    this.webcast.setMission(title, id);
   }
 
   toggleLog(): void {

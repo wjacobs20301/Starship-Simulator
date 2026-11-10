@@ -13,7 +13,7 @@ export type ToWorker =
    */
   | { type: 'reset'; pad?: number; start?: MissionStart; boosterOcean?: [number, number] | null; options?: FlightOptions }
   /** A main-menu backdrop (from a reset). */
-  | { type: 'scene'; kind: MenuScene }
+  | { type: 'scene'; kind: MenuScene; /** The pad the stack stands on ('pad' scene), 0 = Pad 1. */ pad?: number }
   | { type: 'warp'; value: number }
   | { type: 'pause'; value: boolean }
   /** Tower arms: lift +1 up / -1 down / 0 stop; swing +1 open / -1 close / 0 stop. */

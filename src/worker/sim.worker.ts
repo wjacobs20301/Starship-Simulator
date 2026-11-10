@@ -50,7 +50,7 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
     case 'reset':
     case 'scene':
       if (msg.type === 'scene') {
-        sim.scene(msg.kind);
+        sim.scene(msg.kind, msg.pad ?? 0);
         sceneId++;
       }
       else {

@@ -26,6 +26,10 @@ const smooth = (a: number, b: number, x: number) => {
   return t * t * (3 - 2 * t);
 };
 
+/** A weather transition (morph): how long the blend takes, ms, and the hours of drift it shows. */
+const MORPH_MS = 3800;
+const MORPH_LAPSE_H = 3;
+
 interface Slot {
   t: number;
   a: THREE.DataTexture;
@@ -65,6 +69,14 @@ export class Weather {
   private drift = new THREE.Vector3();
   private seedDrift = new THREE.Vector3(Math.random(), Math.random(), Math.random());
   private blend = 0;
+  /**
+   * A weather change shown as a transition (the main menu's picks): the old maps stay up, then
+   * blend into the new ones over MORPH_MS once they're baked, the clouds' fine detail racing
+   * along meanwhile like a time-lapse. start: when the blend began (performance.now; NaN while
+   * the new maps bake); the old local fog / rain / light, to ease from.
+   */
+  private morph: { start: number; fog: number; rain: number; sun: number } | null = null;
+  private prev: Slot = { t: 0, a: mapTexture(), b: mapTexture(), c: mapTexture() };
   private t = 0;
   private sunEcef = [1, 0, 0];
   private local0 = { t: -Infinity, at: new THREE.Vector3(), sample: newSample(), storm: null as { rain: number; shade: number } | null };
@@ -101,9 +113,28 @@ export class Weather {
    * the day brings), a new random world around it. Takes effect at the next fresh snapshot.
    * calm: a world whose wind at the site stays light for the next few hours (missions).
    */
-  configure(site: SiteWeather, season: number, calm = false, seed = Math.floor(Math.random() * 2 ** 31)): void {
+  configure(site: SiteWeather, season: number, calm = false, seed = Math.floor(Math.random() * 2 ** 31), morph = false): void {
     this.want = { seed, site, season, calm };
-    this.seedDrift.set(Math.random(), Math.random(), Math.random());
+    // (Shown as a transition: keep what's up now to blend from. The detail keeps its drift.)
+    if (morph && this.model && this.filled >= 1) {
+      const a = this.slots[0];
+      for (const k of ['a', 'b', 'c'] as const) {
+        (this.prev[k].image.data as Uint8Array).set(a[k].image.data as Uint8Array);
+        this.prev[k].needsUpdate = true;
+      }
+      // (A transition already under way: on from where it had got to.)
+      this.morph = { start: NaN, fog: this.fogHere, rain: this.rainHere, sun: this.sunHere };
+    } else {
+      this.morph = null;
+      this.seedDrift.set(Math.random(), Math.random(), Math.random());
+    }
+  }
+
+  /** The transition's progress, eased (0 until the new maps are in). */
+  private morphProgress(): number {
+    const m = this.morph;
+    if (!m || Number.isNaN(m.start)) return 0;
+    return smooth(0, 1, (performance.now() - m.start) / MORPH_MS);
   }
 
   private start(cfg: WeatherConfig): void {
@@ -166,9 +197,18 @@ export class Weather {
       if (calm) cfg.seed = calmSeed(cfg, this.land);
       this.start(cfg);
     }
-    // Fine detail drifts ~3 m/s (in noise units: Earth radii).
+    // Fine detail drifts ~3 m/s (in noise units: Earth radii); in a transition, hours of it in seconds.
     const k = 1.7e-3 / 3600;
-    this.drift.set(this.seedDrift.x + t * k, this.seedDrift.y, this.seedDrift.z + t * k * 0.35);
+    if (this.morph && Number.isNaN(this.morph.start) && this.filled >= 1 && !this.want) this.morph.start = performance.now();
+    const p = this.morphProgress();
+    const lapse = MORPH_LAPSE_H * 3600 * k * p;
+    this.drift.set(this.seedDrift.x + t * k + lapse, this.seedDrift.y, this.seedDrift.z + (t * k + lapse) * 0.35);
+    if (this.morph && p >= 1) {
+      // (Done: the time-lapse's drift kept, so nothing jumps back.)
+      this.seedDrift.x += lapse;
+      this.seedDrift.z += lapse * 0.35;
+      this.morph = null;
+    }
     if (!this.model) return;
     const [s0, s1, s2] = this.slots;
     // Time jumped (a new flight, back to the pad): start over from now.
@@ -206,13 +246,28 @@ export class Weather {
     u.tWxC0.value = a.c;
     u.tWxC1.value = this.filled >= 2 ? b.c : a.c;
     u.uWxBlend.value = this.filled >= 2 ? this.blend : 0;
+    // A transition: from the old maps to the new (the old alone while the new bake).
+    if (this.morph && this.enabled && this.model) {
+      const p = this.morphProgress();
+      const ready = this.filled >= 1 && !Number.isNaN(this.morph.start);
+      u.uClouds.value = 1;
+      u.tWxA0.value = this.prev.a;
+      u.tWxB0.value = this.prev.b;
+      u.tWxC0.value = this.prev.c;
+      u.tWxA1.value = ready ? a.a : this.prev.a;
+      u.tWxB1.value = ready ? a.b : this.prev.b;
+      u.tWxC1.value = ready ? a.c : this.prev.c;
+      u.uWxBlend.value = ready ? p : 0;
+    }
     u.uWorldToEcef.value.copy(this.worldToEcef);
     u.uPolar.value.copy(this.axis);
     u.uDrift.value.copy(this.drift);
-    u.uFog.value = on ? this.fogHere : 0;
-    u.uRainMist.value = on ? this.rainHere : 0;
+    const mp = this.morph ? this.morphProgress() : 1;
+    const ease = (from: number, to: number) => (this.morph ? from + (to - from) * mp : to);
+    u.uFog.value = on || this.morph ? ease(this.morph?.fog ?? 0, this.fogHere) : 0;
+    u.uRainMist.value = on || this.morph ? ease(this.morph?.rain ?? 0, this.rainHere) : 0;
     u.uRainAny.value = on && this.rainNear ? 1 : 0;
-    u.uLocalSun.value = on ? this.sunHere : 1;
+    u.uLocalSun.value = on || this.morph ? ease(this.morph?.sun ?? 1, this.sunHere) : 1;
   }
 
   private fogHere = 0;

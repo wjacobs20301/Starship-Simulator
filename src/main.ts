@@ -249,7 +249,7 @@ const tracker = new MissionTracker(missionById('ift'));
 const missionUi = new MissionUi(document.body, {
   select: (id) => {
     tracker.reset(missionById(id));
-    hud.setMission(tracker.mission.title);
+    hud.setMission(tracker.mission.title, tracker.mission.id);
   },
   retry: () => {
     // Back on the pad: Space starts the countdown again.
@@ -257,7 +257,7 @@ const missionUi = new MissionUi(document.body, {
   },
   menu: () => openMainMenu(),
 });
-hud.setMission(tracker.mission.title);
+hud.setMission(tracker.mission.title, tracker.mission.id);
 
 // --- Main menu and pause menu ------------------------------------------------------------
 
@@ -296,6 +296,7 @@ const menu = new GameMenu(
     },
     mainMenu: () => openMainMenu(),
     nextScene: () => changeScene(),
+    backdrop: (pad) => menuBackdrop(pad),
   },
   document.querySelector<HTMLElement>('#help')!,
 );
@@ -304,8 +305,8 @@ function openMainMenu(): void {
   if (menuPaused) send({ type: 'pause', value: false });
   menuPaused = false;
   resetFlight();
+  // (Its Free Roam page puts up the backdrop: the pad picked, menuBackdrop.)
   menu.open('main', { mission: missionUi.selected });
-  showScene(randomScene());
 }
 
 // Main menu backdrops: the sim sets each one up (Simulation.scene); the camera frames it and turns
@@ -390,11 +391,23 @@ function showScene(i: number): void {
 
 /** Fade to black, swap the backdrop, fade back in. */
 function changeScene(): void {
-  if (sceneChanging || menu.kind !== 'main') return;
+  fadeTo(() => showScene(randomScene()));
+}
+
+/** Fade to black, put up a backdrop (`show`), and fade back in once the worker has it. */
+function fadeTo(show: () => void): void {
+  if (menu.kind !== 'main') return;
+  if (sceneChanging) {
+    // (Mid-fade: whatever is asked for last goes up.)
+    fadeNext = show;
+    return;
+  }
   sceneChanging = true;
+  fadeNext = show;
   sceneFade.classList.add('on');
   window.setTimeout(() => {
-    if (menu.kind === 'main') showScene(randomScene());
+    if (menu.kind === 'main') fadeNext?.();
+    fadeNext = null;
     // Fade back in once the worker has the new scene up (some take a moment to compute), plus a
     // moment for its first frames to arrive.
     const started = performance.now();
@@ -407,6 +420,88 @@ function changeScene(): void {
     };
     wait();
   }, 900);
+}
+
+let fadeNext: (() => void) | null = null;
+
+// The main menu's Free Roam page: the pad picked, seen from the ground, in the weather picked.
+// Picking the other pad glides the camera over to its tower; picking other weather blends the sky
+// into it (WeatherSystem's transition).
+/** The pad on view (null: the rotating backdrops). */
+let padView: number | null = null;
+const PAD_GLIDE_MS = 2600;
+const padAim = { from: new THREE.Vector3(), to: new THREE.Vector3(), start: 0, sent: true, pad: 0 };
+/** A pad's launch mount, half way up the stack (world). */
+const mountWorld = (pad: number) => {
+  const [e, n] = MOUNTS[pad] ?? [0, 0];
+  return new THREE.Vector3(e, 95, -n);
+};
+/** Where the camera aims now, gliding from one tower to the other. */
+function padAimNow(now: number): THREE.Vector3 {
+  const f = Math.min(1, Math.max(0, (now - padAim.start) / PAD_GLIDE_MS));
+  return padAim.from.clone().lerp(padAim.to, f * f * (3 - 2 * f));
+}
+/** Free roam's weather pick as a day's weather ('Starbase' rolls one). */
+const freeWeatherPick = (): StarbaseWeather => (settings.freeWeather === 'starbase' ? starbaseDay(SEASON, Math.random()) : settings.freeWeather);
+
+function menuBackdrop(pad: number | null): void {
+  if (pad === null) {
+    if (padView === null) return;
+    padView = null;
+    changeScene();
+    return;
+  }
+  if (padView === null) {
+    padView = pad;
+    fadeTo(() => showPadScene(padView ?? pad));
+    return;
+  }
+  if (pad === padView) return;
+  // Over to the other tower: the camera glides; the stack moves there half way.
+  padView = pad;
+  const now = performance.now();
+  padAim.from.copy(padAimNow(now));
+  padAim.to.copy(mountWorld(pad));
+  padAim.start = now;
+  padAim.sent = false;
+  padAim.pad = pad;
+  padCaption();
+}
+
+function showPadScene(pad: number): void {
+  sceneIndex = -1;
+  sceneTime = 0;
+  send({ type: 'scene', kind: 'pad', pad });
+  scenesSent++;
+  sceneWeather = freeWeatherPick();
+  applyWeatherSetting();
+  startDay(null);
+  blasts.clear();
+  send({ type: 'warp', value: 1 });
+  send({ type: 'node', node: null });
+  trackedId = 'stack';
+  setPilot({ manual: false, target: 'stack', throttle: 1, engines: 0, sas: 'stability' });
+  if (rig.map) rig.toggleMap(lastTarget);
+  rig.mode = 'orbit';
+  // (From the ground, ~30 m up, looking up at the tower and the stack against the sky.)
+  rig.azimuth = -2.3 + (Math.random() - 0.5) * 0.6;
+  rig.elevation = -0.072;
+  rig.distance = 900;
+  padAim.from.copy(mountWorld(pad));
+  padAim.to.copy(padAim.from);
+  padAim.start = 0;
+  padAim.sent = true;
+  padAim.pad = pad;
+  plot.reset();
+  hud.clearLog();
+  tracker.reset();
+  missionUi.hideResults();
+  padCaption();
+}
+
+function padCaption(): void {
+  if (padView === null) return;
+  menu.setCaption(`PAD ${padView + 1}${WEATHER_AVAILABLE && settings.clouds ? ` · ${WEATHER_NAME[weatherToday]}` : ''}`.toUpperCase());
 }
 
 function openPauseMenu(): void {
@@ -427,6 +522,7 @@ function setLaunchPad(pad: number): void {
 function resetFlight(): void {
   // (A new weather map for the flight: the Settings' weather, not a menu scene's.)
   sceneWeather = null;
+  padView = null;
   applyWeatherSetting();
   const setup = tracker.mission.setup;
   const start = setup.start ?? 'pad';
@@ -571,7 +667,8 @@ function warpLabel(): string {
 }
 
 const maneuverPanel = new ManeuverPanel(
-  document.body,
+  // (In the left column, at its foot: under the objectives, never over them.)
+  document.querySelector<HTMLElement>('#hud-left') ?? document.body,
   (node) => send({ type: 'node', node }),
   (go) => send(go ? { type: 'warpTo', target: 'node' } : { type: 'warp', value: 1 }),
 );
@@ -936,7 +1033,7 @@ let sceneWeather: StarbaseWeather | null = null;
  */
 /** The weather over Starbase this flight (free roam's 'starbase' rolls one: shown in the HUD). */
 let weatherToday: StarbaseWeather = 'partly';
-const applyWeatherSetting = () => {
+const applyWeatherSetting = (morph = false) => {
   if (!WEATHER_AVAILABLE) {
     weather.enabled = false;
     return;
@@ -945,15 +1042,21 @@ const applyWeatherSetting = () => {
   // (Free roam on 'Starbase': a day as the place's climate deals them out, a new one each time.)
   const free = settings.freeWeather === 'starbase' ? starbaseDay(SEASON, Math.random()) : settings.freeWeather;
   weatherToday = sceneWeather ?? (tracker.mission.id !== 'free' ? 'partly' : free);
-  weather.configure(weatherToday, SEASON, !sceneWeather && tracker.mission.id !== 'free');
+  weather.configure(weatherToday, SEASON, !sceneWeather && tracker.mission.id !== 'free', undefined, morph);
 };
 let weatherSetting = settings.freeWeather;
 onSettingsChange((s) => {
   weather.enabled = WEATHER_AVAILABLE && s.clouds;
   if (s.freeWeather !== weatherSetting) {
     weatherSetting = s.freeWeather;
+    if (menu.kind === 'main' && padView !== null && !sceneChanging) {
+      // The menu's pad view: the sky turns into the weather picked.
+      sceneWeather = freeWeatherPick();
+      applyWeatherSetting(true);
+      padCaption();
+    }
     // (Free roam's: a mission keeps its fair weather.)
-    if (tracker.mission.id === 'free') applyWeatherSetting();
+    else if (tracker.mission.id === 'free') applyWeatherSetting();
   }
 });
 applyWeatherSetting();
@@ -1103,7 +1206,12 @@ function frame(): void {
   }
   // Main menu: the view turns slowly round the pad behind it.
   if (menu.kind === 'main' && !rig.map && rig.mode === 'orbit') rig.azimuth += frameDt * 0.035;
-  if (menu.kind === 'main' && (sceneTime += frameDt) > (MENU_SCENES[sceneIndex]?.seconds ?? SCENE_SECONDS)) changeScene();
+  if (menu.kind === 'main' && padView === null && (sceneTime += frameDt) > (MENU_SCENES[sceneIndex]?.seconds ?? SCENE_SECONDS)) changeScene();
+  if (menu.kind === 'main' && padView !== null && !padAim.sent && now - padAim.start > PAD_GLIDE_MS * 0.45) {
+    padAim.sent = true;
+    send({ type: 'scene', kind: 'pad', pad: padAim.pad });
+    scenesSent++;
+  }
   if (menu.kind === 'main' && now < sceneHold && sceneIndex >= 0) rig.elevation = MENU_SCENES[sceneIndex].elevation;
   // Render between the last two snapshots so motion is smooth at any frame rate.
   const span = prev ? curr.at - prev.at : 0;
@@ -1210,7 +1318,9 @@ function frame(): void {
   const focus0 = satAt ? enuToWorld(satAt.pos) : import.meta.env.DEV ? (window as unknown as { __focus?: V3 }).__focus : undefined;
   // (A satellite picked with V: the cameras that follow something follow it.)
   const picked = satFocus !== null && !['bay', 'baytop', 'hull', 'satellite', 'inspect'].includes(rig.mode) ? satWorld(satFocus) : null;
-  const aim = picked ? { center: picked, axis: [0, 1, 0] as V3, size: 24 } : focus0 ? { center: focus0, axis: [0, 1, 0] as V3, size: 60 } : (target ?? (watching ? { center: watching.at, axis: [0, 1, 0] as V3, size: watching.radius } : null));
+  // (The menu's pad view: on the tower picked, gliding between them.)
+  const padAt = menu.kind === 'main' && padView !== null ? padAimNow(now) : null;
+  const aim = padAt ? { center: [padAt.x, padAt.y, padAt.z] as V3, axis: [0, 1, 0] as V3, size: 140 } : picked ? { center: picked, axis: [0, 1, 0] as V3, size: 24 } : focus0 ? { center: focus0, axis: [0, 1, 0] as V3, size: 60 } : (target ?? (watching ? { center: watching.at, axis: [0, 1, 0] as V3, size: watching.radius } : null));
   // Back off far enough to take in the whole fireball.
   if (watching && rig.mode === 'orbit' && !rig.map) rig.distance += (Math.max(rig.distance, watching.radius * 3.2) - rig.distance) * Math.min(1, frameDt * 1.5);
   if (target) lastTarget = target.center;
@@ -1369,7 +1479,7 @@ function frame(): void {
   if (menuShift > 0.001) {
     const w = window.innerWidth;
     const h = window.innerHeight;
-    const shift = (sceneIndex >= 0 ? MENU_SCENES[sceneIndex].shift : undefined) ?? 0.4;
+    const shift = padView !== null ? 0.26 : ((sceneIndex >= 0 ? MENU_SCENES[sceneIndex].shift : undefined) ?? 0.4);
     world.camera.setViewOffset(w, h, -w * shift * menuShift, 0, w, h);
   } else if (world.camera.view) world.camera.clearViewOffset();
   // (Screen scale for effects sized in metres, e.g. the reentry sparks.)
@@ -1403,4 +1513,3 @@ requestAnimationFrame(frame);
 
 // Start at the main menu (once everything above is set up).
 menu.open('main', { mission: missionUi.selected });
-showScene(randomScene());

@@ -339,8 +339,9 @@ export class Simulation {
    * counting down to launch, a ship in orbit or reentering, a ship in the chopsticks, or the
    * booster coming home to be caught.
    */
-  scene(kind: MenuScene): void {
-    this.launchPad = 0;
+  scene(kind: MenuScene, pad = 0): void {
+    // (The stack on the pad picked: only the 'pad' scene stands anywhere but Pad 1.)
+    this.launchPad = kind === 'pad' ? pad : 0;
     this.configure({});
     this.reset();
     const pad1 = this.towers[0];
