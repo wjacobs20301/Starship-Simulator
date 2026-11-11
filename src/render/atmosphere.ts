@@ -2117,6 +2117,36 @@ export class SceneAtmospherePass extends Pass {
   }
 
   /**
+   * Compile every material ahead, as each pass will draw it (its target's colour space, the
+   * lights it sees), so nothing is built mid-flight. Sorts the layers first (patching the
+   * effects as a frame would). Whatever's hidden should be shown by the caller for the call.
+   */
+  compileAhead(renderer: THREE.WebGLRenderer): Promise<unknown> {
+    this.sortLayers();
+    const cam = this.camera;
+    const layers = cam.layers.mask;
+    const prev = renderer.getRenderTarget();
+    const drawables: THREE.Object3D[] = [];
+    this.scene.traverse((o) => {
+      const d = o as THREE.Mesh;
+      if (d.isMesh || (o as THREE.Points).isPoints || (o as THREE.Line).isLine || (o as THREE.Sprite).isSprite) drawables.push(o);
+    });
+    const waits: Promise<unknown>[] = [];
+    // (The effects draw into the composer's buffer: linear like the scene's target, no lights.)
+    for (const [layer, target] of [[BG_LAYER, this.sceneTarget], [NEAR_LAYER, this.nearTarget], [FX_LAYER, this.sceneTarget]] as const) {
+      const hidden = drawables.filter((o) => o.visible && !(o.layers.mask & (1 << layer)));
+      for (const o of hidden) o.visible = false;
+      cam.layers.set(layer);
+      renderer.setRenderTarget(target);
+      waits.push(renderer.compileAsync(this.scene, cam));
+      for (const o of hidden) o.visible = true;
+    }
+    cam.layers.mask = layers;
+    renderer.setRenderTarget(prev);
+    return Promise.all(waits);
+  }
+
+  /**
    * Each solid onto the background's layer or the near one (by its root: see setBackground),
    * lights onto both; effects patched to fade behind clouds and into fog. Whether any effect is
    * showing (exhaust, smoke, plasma...).

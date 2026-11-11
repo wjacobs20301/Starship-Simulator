@@ -441,7 +441,14 @@ export class WeatherModel {
         const pts = coldFront(occl, 0.5, 1);
         const k = 7; // a point ~45% along the front
         const fx = pts[k * 2], fy = pts[k * 2 + 1];
-        return [sys({ kind: 'low', R, life: 6 * DAY, peak: 0.95, u: 9, v: 1.2, shape: [0, 1, 0.5, 1] }, age, -fx * R - 30e3, -fy * R * hemi)];
+        // And the cold high building in behind the front, to the north-west: squeezed between it
+        // and the low, the north wind that a Gulf front brings (10-15 m/s; without it, the
+        // subtropical ridge's easterlies all but cancelled the low's flow, and rain days were
+        // the calmest of all).
+        return [
+          sys({ kind: 'low', R, life: 6 * DAY, peak: 0.95, u: 9, v: 1.2, shape: [0, 1, 0.5, 1] }, age, -fx * R - 30e3, -fy * R * hemi),
+          sys({ kind: 'high', R: 700e3, life: 5 * DAY, peak: 1, u: 6, v: -1.5 }, 0.35, -700e3, 560e3 * hemi),
+        ];
       }
       default:
         return [];

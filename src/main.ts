@@ -22,6 +22,7 @@ import { sea } from './render/ocean';
 import { AfloatFx } from './render/fx/afloat';
 import { OceanSurface } from './render/oceanSurface';
 import { FarCull } from './render/farCull';
+import { Director } from './render/director';
 import { Terrain, seaColourUniforms } from './render/terrain';
 import { type MapVehicle, MapView } from './render/mapView';
 import type { Trajectory } from './sim/trajectory';
@@ -41,7 +42,9 @@ import { MenuAudio } from './audio/menuAudio';
 import { MOUNTS, TOWERS } from './sim/padCollision';
 import { SoundField, plumePower } from './audio/soundField';
 import { Hud, formatClock } from './ui/hud';
-import { WARP_LEVELS, bindKeys, flightAxes } from './ui/input';
+import { type InputActions, WARP_LEVELS, bindKeys, flightAxes } from './ui/input';
+import { GamepadInput } from './ui/gamepad';
+import { Replay } from './ui/replay';
 import { ManeuverPanel } from './ui/maneuverPanel';
 import { overflight } from './game/places';
 import { ShieldPanel } from './ui/shieldPanel';
@@ -200,12 +203,26 @@ let effectiveWarp = 1;
 let rails = false;
 let paused = false;
 let trackedId = 'stack';
+/** The auto camera (render/director.ts), and the log lines it hasn't seen yet. */
+const director = new Director();
+const directorEvents: string[] = [];
+/** Instant replay (ui/replay.ts): the live snapshots it keeps, and the live ones while it plays. */
+const replay = new Replay();
+let liveHeld: { prev: Received | null; curr: Received | null } | null = null;
+/** Photo mode: time frozen (if it wasn't), the HUD hidden, a field of view of its own. */
+let photo: { paused: boolean } | null = null;
 /** A Starlink the cameras follow instead (V steps on to them after the vehicles), by its number. */
 let satFocus: number | null = null;
 /** Which pad's tower arms the arrow keys drive (0 = Pad 1). */
 let armsPad = 0;
 
 worker.onmessage = (ev: MessageEvent<FromWorker>) => {
+  // Replaying: the live flight waits (paused); its snapshots are kept for the return.
+  if (replay.active && liveHeld) {
+    liveHeld = { prev: liveHeld.curr, curr: { snap: ev.data.snapshot, at: performance.now() } };
+    return;
+  }
+  if (!ev.data.paused) replay.record(ev.data.snapshot);
   prev = curr;
   curr = { snap: ev.data.snapshot, at: performance.now() };
   warp = ev.data.warp;
@@ -226,6 +243,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       towerMotion[i] = m > 4 ? 0 : m;
     });
   }
+  for (const e of curr.snap.events) directorEvents.push(e.text);
   // One-off sounds from what happened.
   for (const e of curr.snap.events) {
     const at = (id: string) => vehicleMid.get(id) ?? null;
@@ -246,7 +264,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
   // Hot staging hands the player a fresh stage: full throttle, all engines.
   if (prev && prev.snap.phase === 'hotstaging' && curr.snap.phase === 'shipburn' && pilot.manual) setPilot({ throttle: 1, engines: 0 });
   const shipOrbit = trajectories.get('ship')?.orbit ?? null;
-  hud.update(curr.snap, { camera: rig.map ? 'Map' : CAMERA_LABELS[rig.mode], tracked: trackedName(), warp: warpLabel(), paused, armsPad, orbit: shipOrbit, weather: weather.enabled ? WEATHER_NAME[weatherToday] : '', payload: payloadLine(curr.snap) });
+  hud.update(curr.snap, { camera: rig.map ? 'Map' : (director.enabled ? 'Auto camera: ' : '') + CAMERA_LABELS[rig.mode], tracked: trackedName(), warp: warpLabel(), paused, armsPad, orbit: shipOrbit, weather: weather.enabled ? WEATHER_NAME[weatherToday] : '', payload: payloadLine(curr.snap) });
   {
     // The heat shield map: in the inspection camera view, and through the entry when there are gaps.
     const sh = curr.snap.shield;
@@ -548,6 +566,10 @@ function resetFlight(): void {
   // Hand-flown missions (and free roam) start with the player at the controls, autopilot off
   // for what they fly: set up for where it starts.
   trackedId = setup.fly ?? 'stack';
+  // Watched flights get the auto camera (K turns it off; touching the camera does too).
+  director.reset();
+  director.enabled = tracker.mission.group === 'auto';
+  directorEvents.length = 0;
   const fly = setup.fly;
   manualVehicles.clear();
   if (fly) manualVehicles.add(fly);
@@ -748,8 +770,9 @@ const flightPanel = new FlightPanel(hud.webcast, document.querySelector('#consol
   setPilot({ sas: mode });
 });
 
-bindKeys({
+const actions: InputActions = {
   spaceBar: () => {
+    if (replay.active) return replay.togglePlay();
     const phase = curr?.snap.phase;
     if (phase === 'prelaunch') startMission();
     else if (pilot.manual) send({ type: 'stage' });
@@ -757,7 +780,11 @@ bindKeys({
   toggleMissions: () => {
     if (curr?.snap.phase === 'prelaunch') menu.open('main', { mission: missionUi.selected });
   },
-  menu: () => (menu.isOpen ? menu.back() : openPauseMenu()),
+  menu: () => {
+    if (replay.active) return endReplay();
+    if (photo) return endPhoto();
+    menu.isOpen ? menu.back() : openPauseMenu();
+  },
   blocked: () => menu.isOpen,
   toggleManual: () => {
     // Taking the controls from the return autopilot pauses it; handing them back resumes it
@@ -771,13 +798,32 @@ bindKeys({
   deploy: () => send({ type: 'deploy' }),
   throttleFull: () => setPilot({ throttle: 1 }),
   throttleCut: () => setPilot({ throttle: 0 }),
+  toggleReplay: () => (replay.active ? endReplay() : startReplay()),
+  togglePhoto: () => (photo ? endPhoto() : startPhoto()),
+  savePhoto: () => {
+    if (!photo) return;
+    // (Drawn now and read at once: the canvas keeps no copy once it's on screen.)
+    world.render();
+    const a = document.createElement('a');
+    a.href = world.renderer.domElement.toDataURL('image/png');
+    a.download = `starship-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.png`;
+    a.click();
+    showToast('Picture saved');
+  },
+  toggleDirector: () => {
+    director.enabled = !director.enabled;
+    director.reset();
+    showToast(director.enabled ? 'Auto camera on · K to turn off' : 'Auto camera off');
+  },
   cycleCamera: () =>
+    (stopDirector(),
     rig.cycle((need) => {
       const ship = curr?.snap.vehicles.find((v) => v.id === trackedId && v.stages.length === 1 && v.stages[0] === 'ship' && v.status !== 'destroyed');
       return !!ship && (need === 'door' ? !!curr?.snap.payload : !!curr?.snap.payload?.sats.length);
-    }),
+    })),
   toggleMap: () => rig.toggleMap(lastTarget),
   cycleTarget: () => {
+    stopDirector();
     const ids = curr?.snap.vehicles.filter((v) => v.status !== 'destroyed').map((v) => v.id) ?? [];
     // After the vehicles, the satellites out (the cameras follow one; the ship stays the one tracked).
     const sats = curr?.snap.payload?.sats.map((s) => s.n) ?? [];
@@ -801,6 +847,7 @@ bindKeys({
   },
   setWarp: (w) => send({ type: 'warp', value: w }),
   stepWarp: (dir) => {
+    if (replay.active) return replay.speed(dir);
     // (From the nearest level at or below: a warp-to runs in between the keyboard's levels.)
     const i = WARP_LEVELS.reduce((best, l, k) => (l <= warp ? k : best), 0);
     const next = WARP_LEVELS[Math.min(WARP_LEVELS.length - 1, Math.max(0, i + dir))];
@@ -812,12 +859,62 @@ bindKeys({
   toggleLog: () => hud.toggleLog(),
   toggleMute: () => updateSettings({ muted: !settings.muted }),
   toggleFullscreen,
-  arms: (lift, swing, slew = null) => send({ type: 'arms', pad: armsPad, lift, swing, slew }),
+  arms: (lift, swing, slew = null) => {
+    // (Replaying, ← → step back and on; in photo mode [ ] change the field of view.)
+    if (replay.active) {
+      if (swing) replay.seek(swing * 5);
+      return;
+    }
+    if (photo) {
+      if (slew) rig.fovOverride = THREE.MathUtils.clamp((rig.fovOverride ?? 50) * (slew > 0 ? 1.15 : 1 / 1.15), 2, 100);
+      return;
+    }
+    send({ type: 'arms', pad: armsPad, lift, swing, slew });
+  },
   cycleArmsPad: () => {
     send({ type: 'arms', pad: armsPad, lift: 0, swing: 0, slew: 0 });
     armsPad = (armsPad + 1) % 2;
   },
-});
+};
+bindKeys(actions);
+// A game controller, alongside the keys (gamepad.ts).
+const toast = document.createElement('div');
+toast.id = 'toast';
+document.body.append(toast);
+let toastTimer = 0;
+function showToast(text: string): void {
+  toast.textContent = text;
+  toast.classList.add('on');
+  clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => toast.classList.remove('on'), 3500);
+}
+/** The player took the camera: the auto camera stands down. */
+function stopDirector(): void {
+  if (!director.enabled) return;
+  director.enabled = false;
+  showToast('Auto camera off · K to turn it back on');
+}
+world.renderer.domElement.addEventListener('pointerdown', stopDirector);
+world.renderer.domElement.addEventListener('wheel', stopDirector, { passive: true });
+const gamepad = new GamepadInput(
+  actions,
+  {
+    orbit: (dAz, dEl, zoom) => {
+      stopDirector();
+      if (rig.map) {
+        rig.mapDistance = THREE.MathUtils.clamp(rig.mapDistance * zoom, 6.5e6, 4e8);
+        rig.mapLon -= dAz;
+        rig.mapLat = THREE.MathUtils.clamp(rig.mapLat - dEl, -1.5, 1.5);
+        return;
+      }
+      if ((dAz || dEl) && rig.mode !== 'orbit') rig.mode = 'orbit';
+      rig.azimuth += dAz;
+      rig.elevation = THREE.MathUtils.clamp(rig.elevation + dEl, -1.4, 1.5);
+      rig.distance = THREE.MathUtils.clamp(rig.distance * zoom, 20, 2e6);
+    },
+  },
+  (name) => showToast(name ? 'Controller connected · H for its buttons' : 'Controller disconnected'),
+);
 
 function trackedName(): string {
   if (satFocus !== null) return `Starlink ${satFocus}`;
@@ -835,6 +932,48 @@ let shownTarget: MissionTarget | null = null;
 const blasts = new Map<string, { at: V3; radius: number; since: number }>();
 /** How long the camera watches a blast before moving to a stage that's still flying, ms. */
 const WATCH_BLAST_MS = 12000;
+
+/**
+ * Compile every shader and upload every texture ahead, once the first scene's vehicles are up
+ * (behind the loading screen): else each is built the first time it's drawn (the plume at
+ * ignition, the plasma, frost, rain, lightning, a fireball, the satellites...), and the frame
+ * it happens in stalls for a moment. Hidden parts are shown just for the compile (it collects
+ * what to build at once; they're hidden again before any frame is drawn).
+ */
+let prewarmed = false;
+function prewarmShaders(): void {
+  if (prewarmed || !models || meshes.size === 0) return;
+  prewarmed = true;
+  const r = world.renderer;
+  const shown: THREE.Object3D[] = [];
+  world.scene.traverse((o) => {
+    if (!o.visible) {
+      o.visible = true;
+      shown.push(o);
+    }
+  });
+  const extra = fx.warmObjects();
+  for (const o of extra) fx.group.add(o);
+
+  const seen = new Set<THREE.Texture>();
+  world.scene.traverse((o) => {
+    const mat = (o as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
+    if (!mat) return;
+    for (const m of Array.isArray(mat) ? mat : [mat]) {
+      for (const v of Object.values(m)) {
+        if (v && (v as THREE.Texture).isTexture && !seen.has(v as THREE.Texture) && (v as THREE.Texture).image) {
+          seen.add(v as THREE.Texture);
+          r.initTexture(v as THREE.Texture);
+        }
+      }
+    }
+  });
+  // (Pass by pass, as the frame draws each: see compileAhead.)
+  world.atmosphere.compileAhead(r).catch(() => {});
+  // (Their material kept, not disposed: that would drop the program just built.)
+  for (const o of extra) fx.group.remove(o);
+  for (const o of shown) o.visible = false;
+}
 
 function syncMeshes(vehicles: VehicleSnapshot[], simTime: number): void {
   if (!models) return;
@@ -1221,6 +1360,81 @@ function updatePilot(dt: number): void {
   }
 }
 
+function startReplay(): void {
+  if (!curr || menu.isOpen || !replay.available) {
+    if (!replay.available) showToast('Nothing to replay yet');
+    return;
+  }
+  if (photo) endPhoto();
+  liveHeld = { prev, curr };
+  replay.start(performance.now());
+  send({ type: 'pause', value: true });
+  stopDirector();
+}
+
+function endReplay(): void {
+  replay.stop();
+  if (liveHeld) {
+    prev = liveHeld.prev;
+    curr = liveHeld.curr;
+    liveHeld = null;
+  }
+  send({ type: 'pause', value: false });
+}
+
+function startPhoto(): void {
+  if (!curr || menu.isOpen) return;
+  photo = { paused: !paused };
+  if (photo.paused && !replay.active) send({ type: 'pause', value: true });
+  if (replay.active) replay.playing = false;
+  rig.fovOverride = world.camera.fov;
+  stopDirector();
+  document.body.classList.add('photo');
+  showToast('Photo mode · drag and scroll to frame · [ ] zoom · Enter saves · I to leave');
+}
+
+function endPhoto(): void {
+  if (!photo) return;
+  if (photo.paused && !replay.active) send({ type: 'pause', value: false });
+  photo = null;
+  rig.fovOverride = null;
+  document.body.classList.remove('photo');
+}
+
+/** The auto camera's cut, if it makes one now: camera, framing and which vehicle it follows. */
+function runDirector(now: number, snap: Snapshot): void {
+  if (!director.enabled || menu.isOpen || rig.map) {
+    directorEvents.length = 0;
+    return;
+  }
+  const shot = director.update(now / 1000, {
+    missionTime: snap.missionTime,
+    vehicles: snap.vehicles.map((v) => ({
+      id: v.id,
+      status: v.status,
+      altitude: v.telemetry.altitude,
+      speed: Math.hypot(...v.telemetry.vAirEnu),
+      nearPad: v.telemetry.downrange < 60e3,
+    })),
+    events: directorEvents.splice(0),
+    door: !!snap.payload && (snap.payload.door ?? 0) > 0.5,
+    sats: !!snap.payload?.sats.length,
+    manual: pilot.manual,
+    tracked: trackedId,
+  });
+  if (!shot) return;
+  if (shot.track && shot.track !== trackedId && snap.vehicles.some((v) => v.id === shot.track && v.status !== 'destroyed')) {
+    trackedId = shot.track;
+    satFocus = null;
+  }
+  rig.mode = shot.mode;
+  if (shot.orbit) {
+    rig.azimuth = shot.orbit.azimuth;
+    rig.elevation = shot.orbit.elevation;
+    rig.distance = shot.orbit.distance;
+  }
+}
+
 function frame(): void {
   requestAnimationFrame(frame);
   if (!curr) return;
@@ -1234,6 +1448,16 @@ function frame(): void {
   }
   governResolution(now - lastFrame, lastCpuMs, now);
   lastFrame = now;
+  // Replaying: the recorded snapshots either side of the playback time, as if just received.
+  if (replay.active) {
+    const r = replay.frame(now);
+    if (r) {
+      const span = 1000 / 30;
+      curr = { snap: r.b, at: now - r.f * span };
+      prev = { snap: r.a, at: curr.at - span };
+    }
+  }
+  gamepad.poll(frameDt);
   updatePilot(frameDt);
   // Behind the main menu: its music, not the world's sounds.
   if ((menu.kind === 'main') !== menuMusic) {
@@ -1256,6 +1480,8 @@ function frame(): void {
   const snap = curr.snap;
   const simTime = prev ? prev.snap.t + (snap.t - prev.snap.t) * alpha : snap.t;
   syncMeshes(snap.vehicles, simTime);
+  prewarmShaders();
+  runDirector(now, snap);
   // The time of day, from this flight's (or menu scene's) first snapshot on.
   if (!dayRef && workerReady()) {
     dayRef = { t: snap.t, missionTime: snap.missionTime ?? 0 };

@@ -159,6 +159,26 @@ export class LaunchFx {
    * orange to dull red, a spray of debris and a smoke column. air: density ratio there (1 at sea
    * level); high up there's no air to feed a fireball, just a brief flash and glowing debris.
    */
+  /** A fireball lobe's material. */
+  private boomMaterial(): THREE.ShaderMaterial {
+    return new THREE.ShaderMaterial({
+      vertexShader: boomVertex,
+      fragmentShader: boomFragment,
+      uniforms: { uColor: { value: new THREE.Color() }, uAlpha: { value: 0 } },
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false,
+    });
+  }
+
+  /** Stand-ins for what's only made when it happens (a fireball), to compile their shaders ahead. */
+  warmObjects(): THREE.Object3D[] {
+    const mesh = new THREE.Mesh(this.boomGeo, this.boomMaterial());
+    toFxLayer(mesh);
+    return [mesh];
+  }
+
   explode(world: V3, vel: THREE.Vector3, time: number, radius: number, air = 1): void {
     const thin = 1 - Math.min(1, air * 20);
     const R = radius * (1 - 0.75 * thin);
@@ -167,15 +187,7 @@ export class LaunchFx {
     // A cluster of glowing lobes: a big core and smaller ones pushed out and rising.
     const lobes = 7;
     for (let i = 0; i < lobes; i++) {
-      const mat = new THREE.ShaderMaterial({
-        vertexShader: boomVertex,
-        fragmentShader: boomFragment,
-        uniforms: { uColor: { value: new THREE.Color() }, uAlpha: { value: 0 } },
-        transparent: true,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-        toneMapped: false,
-      });
+      const mat = this.boomMaterial();
       const mesh = new THREE.Mesh(this.boomGeo, mat);
       const core = i === 0;
       const dir = new THREE.Vector3(rand(-1, 1), rand(-0.2, 1), rand(-1, 1)).normalize();

@@ -160,8 +160,13 @@ const TERMINAL_TILT = 10 * DEG;
 /** Stiffer attitude control while landing on 13 engines; gentler on 3 (less gimbal authority). */
 const LANDING_GAINS = { wn: 1.4, zeta: 0.9, rollDamp: 0.5 };
 /** Final-approach tuning (exported for tests / tuning scripts). */
-/** Steady wind at the tower's top over which the catch is called off, m/s (~23 knots). */
-export const CATCH_WIND_LIMIT = 11.8;
+/**
+ * Steady wind at the tower's top (and up through the bottom few km) over which the catch is
+ * called off, m/s (~19 knots). (11.8 let the gusts of a steady 10-11 m/s north wind, a cold
+ * front's, put a booster into the closing arms one day in four: the same wind caught it or hit
+ * them by the gusts' luck.)
+ */
+export const CATCH_WIND_LIMIT = 10;
 /** Steady wind anywhere from the tower's top up to ALOFT_TOP (m), where the landing burn flies, over which the catch is called off too, m/s. */
 export const ALOFT_WIND_LIMIT = 19;
 const ALOFT_TOP = 8000;

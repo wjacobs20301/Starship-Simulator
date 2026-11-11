@@ -26,7 +26,7 @@ function fly(seed: number, site: SiteWeather) {
 }
 
 describe('booster return in the wind', () => {
-  for (const [seed, site] of [[2, 'natural'], [3, 'rain'], [4, 'clear'], [13, 'rain']] as const) {
+  for (const [seed, site] of [[2, 'natural'], [3, 'rain'], [4, 'clear'], [5, 'rain']] as const) {
     it(`seed ${seed} (${site}): flies through it and is caught`, { timeout: 120_000 }, () => {
       const { sim, booster } = fly(seed, site);
       expect(sim.events.some((e) => /lost|structural/.test(e.text))).toBe(false);
@@ -42,13 +42,22 @@ describe('booster return in the wind', () => {
   });
 
   it('over the limit lower down, or in strong winds aloft: no catch, lands on the Gulf instead', { timeout: 240_000 }, () => {
-    // (Seed 14, overcast: just under the limit at the tower but over it from there up through the
-    // bottom kilometres. Seed 15, rain: ~20 m/s up where the landing burn starts.)
-    for (const [seed, site, why] of [[14, 'overcast', /below 3 km/], [15, 'rain', /winds aloft/]] as const) {
-      const { sim, booster } = fly(seed, site);
-      expect(sim.events.some((e) => /^Catch no-go/.test(e.text) && why.test(e.text))).toBe(true);
-      expect(booster?.status).toBe('landed');
-    }
+    // (Seed 15, rain: just under the limit at the tower but over it higher up in the bottom
+    // kilometres, a cold front's north wind.)
+    const { sim, booster } = fly(15, 'rain');
+    expect(sim.events.some((e) => /^Catch no-go/.test(e.text) && /below 3 km/.test(e.text))).toBe(true);
+    expect(booster?.status).toBe('landed');
+    // Strong winds only aloft (a jet's edge low down: 22 m/s from 4.5 to 8 km, light below).
+    const aloft = new Simulation({ ...DEFAULT_ENV });
+    aloft.env.wind = (g) => {
+      const k = Math.min(1, Math.max(0, (g.h - 3500) / 1000)) * (g.h < 9000 ? 1 : 0);
+      return [4 + 18 * k, 0, 0];
+    };
+    aloft.launch();
+    const done = () => ['caught', 'destroyed', 'landed'].includes(aloft.find('booster')?.status ?? '');
+    while ((aloft.mission.missionTime ?? -99) < 520 && !done()) aloft.step();
+    expect(aloft.events.some((e) => /^Catch no-go: winds aloft/.test(e.text))).toBe(true);
+    expect(aloft.find('booster')?.status).toBe('landed');
   });
 
   it('missions get fair weather: light wind at the tower for hours', () => {

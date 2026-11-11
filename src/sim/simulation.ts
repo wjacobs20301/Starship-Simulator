@@ -11,7 +11,7 @@ import { orbitApsides } from './guidance';
 import {
   type M3, type V3, add, clamp, cross, dot, mat3FromColumns, mat3FromQ, mat3Mul, mat3Vec, norm, qFromMat3, qrot,
   qrotInv, scale, sub, normalize,
-  type Q, qmul,
+  type Q, qmul, qFromAxisAngle,
 } from './math';
 import { CATCH, type CatchGuide } from './boosterReturn';
 import { type Contact, type Cylinder, MOUNTS, TOWERS, type TowerState, armContact, awayFromTower, catchGap, catchPoint, cylinder, deepestContact, surfaceUnder } from './padCollision';
@@ -276,7 +276,6 @@ export class Simulation {
   faults!: EngineFaults;
   /** The ship tips over after its splashdown and breaks up in a fireball; and when it does (sim time). */
   splashFireball = false;
-  private fireballAt: number | null = null;
   /** Heat shield tiles: none lost, some shaken loose at random on the way up, or set ones missing (a test). */
   tileLoss: TileSetting = 'off';
   /** The ship's heat shield (its tiles' gaps and what the entry does to them). */
@@ -319,7 +318,7 @@ export class Simulation {
     this.waitUntil = null;
     this.returnNotice = null;
     this.inOrbitSince = null;
-    this.fireballAt = null;
+    this.seaTips.clear();
     stack.caughtPad = this.launchPad;
     placeOnPad(stack, this.t, PAD.mountHeight, this.launchPad);
     // A stacked vehicle on the launch pad: its arms are parked high up the tower, clear of the launch.
@@ -588,6 +587,7 @@ export class Simulation {
         for (const e of v.engines) e.throttleCmd = 0;
         this.hang(v, this.t + dt);
       } else if (v.status === 'landed') {
+        if (this.seaTip(v, dt)) continue;
         restOnEarth(v, this.t, dt);
       } else {
         const aux = rk4Step(v, this.t, dt, this.env);
@@ -824,11 +824,57 @@ export class Simulation {
   }
 
   private watchSplash(): void {
-    if (!this.splashFireball) return;
-    const ship = this.find('ship');
-    if (!ship || ship.status !== 'landed' || downrange(ship.r, this.t) < 20e3) return;
-    this.fireballAt ??= this.t + 7;
-    if (this.t >= this.fireballAt) this.destroy(ship, 'Starship tipped over after its splashdown and broke apart in a fireball');
+    // (The ship tipping over and breaking up after a splashdown is seaTip's now, for every stage
+    // down in the sea: splashFireball only has it go over sooner, as Flight 14's did.)
+  }
+
+  /** Stages down in the sea, tipping over (id -> how far). */
+  private seaTips = new Map<string, SeaTip>();
+
+  /**
+   * A stage standing in the sea after a splashdown: after a few seconds the waves start it
+   * leaning, and it goes over about its base (gravity, the water slowing it), breaking apart as
+   * it slaps down. Returns true once it has (destroyed: nothing more to do this step).
+   */
+  private seaTip(v: Vehicle, dt: number): boolean {
+    let tip = this.seaTips.get(v.id);
+    // (Down in the sea, however it came down (the ship's return lands it itself): it can't stay
+    // standing; a few seconds and the waves start it going over.)
+    if (!tip) {
+      if (downrange(v.r, this.t) < 4000) return false;
+      tip = { start: this.t + seaTipDelay(v.id, this.t, this.splashFireball), angle: 0, rate: 0, pose: null };
+      this.seaTips.set(v.id, tip);
+    }
+    if (this.t < tip.start) return false;
+    if (!v.rest) v.rest = { rEcef: eciToEcef(v.r, this.t), qEcef: qmul(qSpin(-OMEGA_E * this.t), v.q) };
+    if (!tip.pose) {
+      // Its standing pose, the base it goes over about, which way (downwind-ish: any way the waves push).
+      const mp = massProps(v.stages, v.stages.map((s) => s.prop));
+      const xAxis = qrot(v.rest.qEcef, [1, 0, 0]);
+      const hcg = mp.xcg - v.extent[0];
+      const pivot = sub(v.rest.rEcef, scale(xAxis, hcg));
+      const up = normalize(pivot);
+      const e = normalize(cross([0, 0, 1], up));
+      const n = cross(up, e);
+      const az = hashUnit(v.id, tip.start) * 2 * Math.PI;
+      const dir = add(scale(e, Math.cos(az)), scale(n, Math.sin(az)));
+      tip.pose = { r0: v.rest.rEcef, q0: v.rest.qEcef, pivot, axis: normalize(cross(up, dir)), hcg, length: v.extent[1] - v.extent[0] };
+      tip.angle = 0.04;
+      this.log(`${v.name} is tipping over in the waves`);
+    }
+    const p = tip.pose;
+    // A slender body about its base: weight (part held up by the water) against the water's drag.
+    const inertia = p.hcg * p.hcg + (p.length * p.length) / 12;
+    const alpha = (0.55 * 9.81 * p.hcg * Math.sin(tip.angle)) / inertia - 0.45 * tip.rate;
+    tip.rate += alpha * dt;
+    tip.angle += tip.rate * dt;
+    const qa = qFromAxisAngle(p.axis, tip.angle);
+    v.rest = { rEcef: add(p.pivot, qrot(qa, sub(p.r0, p.pivot))), qEcef: qmul(qa, p.q0) };
+    restOnEarth(v, this.t, dt);
+    if (tip.angle < 1.4) return false;
+    this.seaTips.delete(v.id);
+    this.destroy(v, `${v.name} tipped over after its splashdown and broke apart${v.id === 'booster' ? '' : ' in a fireball'}`);
+    return true;
   }
 
   /** When the ship first reached a stable orbit (sim time), for the heat shield inspection. */
@@ -1674,6 +1720,32 @@ export function placeOnPad(v: Vehicle, t: number, baseHeight = PAD.mountHeight, 
 }
 
 /** A vehicle tipping over the edge of its base (pad ENU). */
+/** A stage in the sea, going over (see seaTip). */
+interface SeaTip {
+  /** When it starts to go (sim time), how far over (rad) and how fast. */
+  start: number;
+  angle: number;
+  rate: number;
+  /** Once going: its standing pose (Earth-fixed), the base point and horizontal axis it turns about, its CG height and length. */
+  pose: { r0: V3; q0: Q; pivot: V3; axis: V3; hcg: number; length: number } | null;
+}
+
+/** A number 0..1 from a vehicle and a time (the same each run). */
+function hashUnit(id: string, t: number): number {
+  let h = Math.floor(t * 10) | 0;
+  for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 0x5bd1e995) + 0x27d4eb2d;
+  h ^= h >>> 15;
+  h = Math.imul(h, 0x2c1b3c6d);
+  h ^= h >>> 12;
+  return (h >>> 0) / 4294967296;
+}
+
+/** Seconds a stage stands in the sea before the waves start it going over (Flight 14's ship: at once). */
+function seaTipDelay(id: string, t: number, quick: boolean): number {
+  if (quick && id === 'ship') return 0.5;
+  return (id === 'ship' ? 3 : 6) + 6 * hashUnit(id, t + 1);
+}
+
 interface Topple {
   pivot: V3;
   /** Horizontal direction it's tipping toward. */

@@ -1,3 +1,5 @@
+import { padAxes } from './gamepad';
+
 /** Time warp levels: up to 50x runs the full physics, beyond that on rails (coasting above the atmosphere). */
 export const WARP_LEVELS = [1, 2, 5, 10, 50, 100, 1000, 10000];
 
@@ -41,6 +43,13 @@ export interface InputActions {
   cycleEngines(): void;
   /** B: deploy the Starlinks (or hold / resume a deployment). */
   deploy(): void;
+  /** K: the auto camera (a broadcast director) on / off. */
+  toggleDirector(): void;
+  /** R: instant replay of the last minutes (or back to live). */
+  toggleReplay(): void;
+  /** I: photo mode (time frozen, no HUD); Enter saves a picture. */
+  togglePhoto(): void;
+  savePhoto(): void;
   /** Z: full throttle, X: cut throttle. */
   throttleFull(): void;
   throttleCut(): void;
@@ -56,14 +65,15 @@ const HELD = new Set(['w', 'a', 's', 'd', 'q', 'e', 'shift', 'control', 'alt']);
 /** Keys currently held (lower-case e.key), for continuous flight inputs. */
 export const held = new Set<string>();
 
-/** Continuous flight inputs from the held keys: attitude -1..1 and throttle direction. */
+/** Continuous flight inputs from the held keys and a controller (gamepad.ts): attitude -1..1 and throttle rate. */
 export function flightAxes(): { pitch: number; yaw: number; roll: number; throttle: number } {
   const ax = (plus: string, minus: string) => (held.has(plus) ? 1 : 0) - (held.has(minus) ? 1 : 0);
+  const mix = (k: number, pad: number) => Math.max(-1, Math.min(1, k + pad));
   return {
-    pitch: ax('w', 's'),
-    yaw: ax('d', 'a'),
-    roll: ax('e', 'q'),
-    throttle: (held.has('shift') ? 1 : 0) - (held.has('control') || held.has('alt') ? 1 : 0),
+    pitch: mix(ax('w', 's'), padAxes.pitch),
+    yaw: mix(ax('d', 'a'), padAxes.yaw),
+    roll: mix(ax('e', 'q'), padAxes.roll),
+    throttle: mix((held.has('shift') ? 1 : 0) - (held.has('control') || held.has('alt') ? 1 : 0), padAxes.throttle),
   };
 }
 
@@ -107,6 +117,10 @@ export function bindKeys(a: InputActions): void {
     else if (k === 't') a.toggleSas();
     else if (k === 'g') a.cycleEngines();
     else if (k === 'b') a.deploy();
+    else if (k === 'k') a.toggleDirector();
+    else if (k === 'r') a.toggleReplay();
+    else if (k === 'i') a.togglePhoto();
+    else if (k === 'enter') a.savePhoto();
     else if (k === 'z') a.throttleFull();
     else if (k === 'x') a.throttleCut();
     else if (k === 'escape') a.menu();

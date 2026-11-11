@@ -70,6 +70,8 @@ export interface CameraTarget {
 
 export class CameraRig {
   mode: CameraMode = 'orbit';
+  /** Photo mode's own field of view (deg), over every camera's; null: each its own. */
+  fovOverride: number | null = null;
   azimuth = -2.3;
   elevation = 0.12;
   distance = 420;
@@ -314,6 +316,7 @@ export class CameraRig {
       this.elevation = Math.max(this.elevation, Math.asin(THREE.MathUtils.clamp(off.dot(this.up), -1, 1)));
     }
     pos = lifted;
+    if (this.fovOverride !== null) fov = this.fovOverride;
     if (Math.abs(camera.fov - fov) > 1e-3) {
       camera.fov = fov;
       camera.updateProjectionMatrix();
@@ -327,6 +330,7 @@ export class CameraRig {
 
   /** Put the camera at pos looking at look (world), with this up and field of view. */
   private aim(camera: THREE.PerspectiveCamera, pos: V3, look: THREE.Vector3, up: THREE.Vector3, fov: number): V3 {
+    if (this.fovOverride !== null) fov = this.fovOverride;
     if (Math.abs(camera.fov - fov) > 1e-3) {
       camera.fov = fov;
       camera.updateProjectionMatrix();

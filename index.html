@@ -550,6 +550,23 @@
       .ld-bar { width: 240px; height: 2px; background: rgba(255,255,255,0.16); overflow: hidden; }
       .ld-bar i { display: block; height: 100%; width: 100%; background: #fff; transform: scaleX(0); transform-origin: left; transition: transform .3s linear; }
       .ld-text { font-size: 11px; letter-spacing: .3em; text-transform: uppercase; color: var(--muted); max-width: 80vw; text-align: center; }
+      /* A controller: a note when one connects, and the button it's on in the menus. */
+      #toast { position: fixed; left: 50%; bottom: 120px; z-index: 60; transform: translate(-50%, 8px); opacity: 0; pointer-events: none;
+        padding: 8px 16px; background: rgba(10, 12, 16, 0.78); border: 1px solid rgba(255, 255, 255, 0.18); font-size: 12px;
+        letter-spacing: 0.14em; text-transform: uppercase; transition: opacity 0.3s, transform 0.3s; }
+      #toast.on { opacity: 1; transform: translate(-50%, 0); }
+      .gp-focus { outline: 1px solid rgba(255, 255, 255, 0.85) !important; outline-offset: 2px; }
+      /* Instant replay: its bar along the bottom. */
+      #replay-bar { position: fixed; left: 50%; bottom: 26px; z-index: 55; transform: translateX(-50%); display: flex; align-items: center; gap: 14px;
+        padding: 9px 16px; background: rgba(10, 12, 16, 0.82); border: 1px solid rgba(255, 255, 255, 0.16); font-size: 12px; letter-spacing: 0.1em;
+        white-space: nowrap; }
+      #replay-bar.hidden { display: none; }
+      #replay-bar b { color: #ff5a4a; letter-spacing: 0.22em; }
+      #replay-bar small { opacity: 0.55; letter-spacing: 0.06em; }
+      #replay-bar .rp-track { display: block; width: 220px; height: 3px; background: rgba(255, 255, 255, 0.18); }
+      #replay-bar .rp-track i { display: block; height: 100%; background: #fff; }
+      /* Photo mode: nothing over the picture but the note that says how. */
+      body.photo > *:not(#view):not(#toast) { visibility: hidden !important; }
     </style>
   </head>
   <body>
@@ -563,7 +580,9 @@
       <div class="group">FLY · <kbd>L</kbd> TO TAKE CONTROL</div>
       <div class="keys"><span><kbd>W</kbd><kbd>S</kbd></span><em>Pitch</em><span><kbd>A</kbd><kbd>D</kbd></span><em>Yaw</em><span><kbd>Q</kbd><kbd>E</kbd></span><em>Roll</em><span><kbd>⇧</kbd><kbd>Ctrl</kbd></span><em>Throttle up / down</em><span><kbd>Z</kbd><kbd>X</kbd></span><em>Full / cut throttle</em><span><kbd>G</kbd></span><em>Engine set</em><span><kbd>B</kbd></span><em>Deploy Starlinks</em><span><kbd>T</kbd></span><em>SAS on / off</em></div>
       <div class="group">VIEW</div>
-      <div class="keys"><span><kbd>Tab</kbd></span><em>Map</em><span><kbd>C</kbd><kbd>V</kbd></span><em>Camera · vehicle</em><span><kbd>1–8</kbd><kbd>,</kbd><kbd>.</kbd></span><em>Time warp</em><span><kbd>N</kbd></span><em>Maneuver node</em><span><kbd>P</kbd><kbd>J</kbd></span><em>Plot · event log</em><span><kbd>M</kbd><kbd>H</kbd></span><em>Sound · hide help</em><span><kbd>F</kbd></span><em>Full screen</em></div>
+      <div class="keys"><span><kbd>Tab</kbd></span><em>Map</em><span><kbd>C</kbd><kbd>V</kbd></span><em>Camera · vehicle</em><span><kbd>K</kbd></span><em>Auto camera (webcast)</em><span><kbd>R</kbd></span><em>Instant replay</em><span><kbd>I</kbd></span><em>Photo mode (Enter: save)</em><span><kbd>1–8</kbd><kbd>,</kbd><kbd>.</kbd></span><em>Time warp</em><span><kbd>N</kbd></span><em>Maneuver node</em><span><kbd>P</kbd><kbd>J</kbd></span><em>Plot · event log</em><span><kbd>M</kbd><kbd>H</kbd></span><em>Sound · hide help</em><span><kbd>F</kbd></span><em>Full screen</em></div>
+      <div class="group">GAMEPAD</div>
+      <div class="keys"><span><kbd>L stick</kbd></span><em>Pitch · yaw</em><span><kbd>LB</kbd><kbd>RB</kbd></span><em>Roll</em><span><kbd>LT</kbd><kbd>RT</kbd></span><em>Throttle down / up</em><span><kbd>R stick</kbd></span><em>Camera (click: zoom)</em><span><kbd>A</kbd></span><em>Launch · stage</em><span><kbd>B</kbd></span><em>SAS</em><span><kbd>X</kbd><kbd>Y</kbd></span><em>Engine set · camera</em><span><kbd>D-pad</kbd></span><em>Warp ↑↓ · vehicle ← · autopilot →</em><span><kbd>View</kbd><kbd>Menu</kbd></span><em>Map · pause</em><span><kbd>L3</kbd></span><em>Deploy Starlinks</em></div>
       <div class="group">TOWER</div>
       <div class="keys"><span><kbd>↑</kbd><kbd>↓</kbd></span><em>Arms up / down</em><span><kbd>←</kbd><kbd>→</kbd></span><em>Close / open</em><span><kbd>[</kbd><kbd>]</kbd></span><em>Swing round tower</em><span><kbd>U</kbd></span><em>Select pad</em></div>
       <div class="credits">
