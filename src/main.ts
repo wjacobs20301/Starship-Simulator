@@ -19,7 +19,9 @@ import { PAD, RE, RP } from './sim/constants';
 import { GlobeTiles } from './render/globeTiles';
 import { ecefToWorld, toWorld, worldToGeodetic } from './render/geo';
 import { sea } from './render/ocean';
+import { AfloatFx } from './render/fx/afloat';
 import { OceanSurface } from './render/oceanSurface';
+import { FarCull } from './render/farCull';
 import { Terrain, seaColourUniforms } from './render/terrain';
 import { type MapVehicle, MapView } from './render/mapView';
 import type { Trajectory } from './sim/trajectory';
@@ -81,7 +83,9 @@ const trajectories = new Map<string, Trajectory>();
 const fx = new LaunchFx(origin);
 world.scene.add(fx.group, ...fx.lights);
 const ventFx = new VentFx(origin);
+const afloatFx = new AfloatFx(origin, ecefToWorld([0, 0, 0]));
 world.scene.add(ventFx.group);
+world.scene.add(afloatFx.group);
 const sound = new SoundField();
 const audioEngine = new AudioEngine();
 const audio = new LaunchAudio(audioEngine);
@@ -107,6 +111,9 @@ const launchSite = createLaunchSite();
 world.scene.add(launchSite);
 world.statics.push(launchSite);
 origin.place(launchSite, [0, 0, 0]);
+// The launch site's parts too small to see from where the camera is: left out (farCull.ts).
+const farCull = new FarCull();
+farCull.add(launchSite, origin.camera);
 // Floodlights and tower beacons, for the night.
 const padLights = new PadLights();
 lampLightAll(launchSite);
@@ -119,6 +126,7 @@ loadSouthPadre()
     world.scene.add(g);
     world.statics.push(g);
     origin.place(g, [0, 0, 0]);
+    farCull.add(g, origin.camera);
   })
   .catch((err) => console.error('South Padre Island failed to load', err));
 const facilitiesLoaded = loadFacilities();
@@ -128,6 +136,7 @@ facilitiesLoaded
     world.scene.add(g);
     world.statics.push(g);
     origin.place(g, [0, 0, 0]);
+    farCull.add(g, origin.camera);
   })
   .catch((err) => console.error('facilities failed to load', err));
 
@@ -145,6 +154,7 @@ loadModels(world.renderer, (f) => (loadingBar.style.transform = `scaleX(${f})`))
     onSettingsChange((s) => applyShipSerial(lib.ship, s.shipSerial));
     lampLightAll(lib.pad);
     padRig = world.addPad(lib.pad);
+    farCull.add(lib.pad, origin.camera);
     // The rocket garden's vehicles, now the models are here.
     facilitiesLoaded
       .then((g) => {
@@ -152,6 +162,7 @@ loadModels(world.renderer, (f) => (loadingBar.style.transform = `scaleX(${f})`))
         world.scene.add(garden);
         world.statics.push(garden);
         origin.place(garden, [0, 0, 0]);
+        farCull.add(garden, origin.camera);
       })
       .catch(() => {});
     // The Starlink satellites (Starlink flights deploy them): their own small model.
@@ -164,7 +175,7 @@ loadModels(world.renderer, (f) => (loadingBar.style.transform = `scaleX(${f})`))
     loadingBar.style.transform = 'scaleX(1)';
     loading.classList.add('done');
     setTimeout(() => loading.remove(), 1000);
-    if (import.meta.env.DEV) Object.assign(window, { __debug: { sea, oceanSurface, models, padRig, world, meshes, terrain, settings, updateSettings, rig, fx, sound, pr: () => pixelRatio, frame, globeTiles, mapView, flightPanel, hud, plot, ambience, audioEngine, lightning, starlink: () => starlink, menu, menuAudio, weather, moon, origin, showScene } });
+    if (import.meta.env.DEV) Object.assign(window, { __debug: { sea, oceanSurface, afloatFx, farCull, models, padRig, world, meshes, terrain, settings, updateSettings, rig, fx, sound, pr: () => pixelRatio, frame, globeTiles, mapView, flightPanel, hud, plot, ambience, audioEngine, lightning, starlink: () => starlink, menu, menuAudio, weather, moon, origin, showScene } });
   })
   .catch((err) => {
     loadingText.textContent = import.meta.env.DEV
@@ -1108,11 +1119,17 @@ let goodWindows = 0;
 let failedPr = Infinity;
 let failedUntil = 0;
 
+/** The clouds' resolution levels (pixels per screen point): the governor's first lever. */
+const CLOUD_LEVELS = [1.25, 1.0, 0.8];
+let cloudLevel = 0;
+
 function governResolution(gapMs: number, cpuMs: number, now: number): void {
   const fixed = settings.renderScale;
   if (fixed !== 'auto') {
     pixelRatio = Math.max(0.5, NATIVE_PR * fixed);
     world.setPixelRatio(pixelRatio);
+    cloudLevel = 0;
+    world.setCloudDensity(CLOUD_LEVELS[0]);
     return;
   }
   if (document.hidden || gapMs > 250) return;
@@ -1125,21 +1142,32 @@ function governResolution(gapMs: number, cpuMs: number, now: number): void {
   frameGaps.length = 0;
   frameCpu.length = 0;
   if (gap > TARGET_MS * 1.2 && cpu < TARGET_MS * 0.75) {
-    // Missing frames and it's not the scripts: fewer pixels.
-    failedPr = pixelRatio;
+    // Missing frames and it's not the scripts: fewer pixels. The clouds' first (soft, they show
+    // a lower resolution least, and they're a third of the frame or more), then the screen's.
     // (Not retried for a minute: every change of resolution resizes the buffers and restarts the
     // clouds' history, a visible hitch, so it shouldn't bounce between two levels.)
     failedUntil = now + 60000;
-    pixelRatio = Math.max(MIN_PR, pixelRatio * 0.85);
+    if (cloudLevel < CLOUD_LEVELS.length - 1) cloudLevel++;
+    else {
+      failedPr = pixelRatio;
+      pixelRatio = Math.max(MIN_PR, pixelRatio * 0.85);
+    }
     goodWindows = 0;
   } else if (gap < TARGET_MS * 1.08) {
+    // Room to spare: the screen's resolution back first, then the clouds'.
     const next = Math.min(NATIVE_PR, pixelRatio * 1.12);
-    if (++goodWindows >= 6 && next > pixelRatio && !(next >= failedPr && now < failedUntil)) {
-      pixelRatio = next;
-      goodWindows = 0;
+    if (++goodWindows >= 6) {
+      if (next > pixelRatio && !(next >= failedPr && now < failedUntil)) {
+        pixelRatio = next;
+        goodWindows = 0;
+      } else if (next <= pixelRatio && cloudLevel > 0 && now >= failedUntil) {
+        cloudLevel--;
+        goodWindows = 0;
+      }
     }
   } else goodWindows = 0;
   world.setPixelRatio(pixelRatio);
+  world.setCloudDensity(CLOUD_LEVELS[cloudLevel]);
 }
 world.setPixelRatio(pixelRatio);
 
@@ -1360,10 +1388,11 @@ function frame(): void {
   mapView.update(origin, world.camera, simTime, mapVehicles, trackedId, returnMarks);
   origin.apply(world.statics);
   moon.update(simTime, world.skyRotation, world.sunDir, origin, PAD_UP, buildingUniforms.uNight.value);
-  for (const pl of placements) {
-    origin.place(pl.mesh.root, pl.world);
-    pl.mesh.afterPlace();
-  }
+  for (const pl of placements) origin.place(pl.mesh.root, pl.world);
+  farCull.update(cam, world.renderer.domElement.height / (2 * Math.tan(THREE.MathUtils.degToRad(world.camera.fov) / 2)));
+  // Stages down in the sea: afloat on the waves, the spray off them.
+  afloatFx.update(simTime, placements, fx.particles);
+  for (const pl of placements) pl.mesh.afterPlace();
   // The satellites out of the bay, between snapshots as the vehicles are (they move as fast).
   if (starlink) {
     const cur = snap.payload;
@@ -1453,7 +1482,7 @@ function frame(): void {
     sg.east.set(eastP[0] - ground[0], eastP[1] - ground[1], eastP[2] - ground[2]);
     sg.east.addScaledVector(sg.up, -sg.east.dot(sg.up)).normalize();
     sg.north.crossVectors(sg.up, sg.east);
-    oceanSurface.update(world.renderer, cam, g.h - wl, sg.up, sg.east, sg.north, ground, !rig.map && terrain.ready, terrain, globeTiles.group);
+    oceanSurface.update(world.renderer, cam, g.h - wl, sg.up, sg.east, sg.north, ground, !rig.map && terrain.ready, terrain, globeTiles.group, afloatFx.hulls);
   }
   audio.update(heard.level, heard.distance, Math.exp(-Math.max(0, camAlt) / 8500), paused);
   // Everything else you hear: wind, surf, air rush, tower machinery, deluge, venting.

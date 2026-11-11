@@ -157,6 +157,8 @@ export const seaMeshUniforms = {
   uToLocal: { value: new THREE.Matrix3() },
   /** The camera (world: pad east, up, -north; float). */
   uCamW: { value: new THREE.Vector3() },
+  /** Hulls afloat (fx/afloat.ts): from the camera (world), radius (0: none). */
+  uHull: { value: [new THREE.Vector4(), new THREE.Vector4()] },
 };
 
 export class OceanSurface {
@@ -271,6 +273,7 @@ uniform sampler2D uGlobe;
 uniform vec3 uWater;
 uniform mat3 uWorldToEcef;
 uniform vec3 uCamW;
+uniform vec4 uHull[2];
 varying vec3 vSeaRel;
 varying vec2 vSeaP;
 varying vec3 vShore;
@@ -323,6 +326,21 @@ if (vShore.x < surfW + 30.0) {
   surf = clamp(max(max(brk, zone), swash * 0.85) * (0.6 + 0.4 * smoothstep(0.3, 1.2, uSea3.x + uSea3.y * vShore.z)), 0.0, 1.0);
 }
 gSeaFoam = max(gSeaFoam, surf);
+// Round a hull afloat: the water churned white where the waves break on it, thinning outward,
+// streaked downwind.
+for (int i = 0; i < 2; i++) {
+  if (uHull[i].w <= 0.0) continue;
+  vec3 dh = vSeaRel - uHull[i].xyz;
+  vec3 hu = normalize(vSeaRel - uSeaCentre);
+  vec3 side = dh - hu * dot(dh, hu);
+  float rr = length(side) - uHull[i].w;
+  if (rr > 40.0) continue;
+  vec2 q = vec2(dot(vSeaP, uSea2.xy), dot(vSeaP, vec2(-uSea2.y, uSea2.x)));
+  float lee = 0.5 + 0.5 * dot(normalize(vec2(dot(side, uSeaE), dot(side, uSeaN)) + 1e-5), uSea2.xy);
+  float ring = (1.0 - smoothstep(0.0, 2.5 + 10.0 * lee, rr)) * (0.55 + 0.45 * seaNoise(q / 1.2 + float(i) * 7.0));
+  float trail = (1.0 - smoothstep(0.0, 35.0, rr)) * lee * smoothstep(0.55, 0.8, seaNoise(vec2(q.x / 6.0, q.y / 1.5)));
+  gSeaFoam = max(gSeaFoam, max(ring * 0.9, trail * 0.5) * step(-0.5, rr));
+}
 diffuseColor.rgb = mix(col * gSeaBody, vec3(0.78, 0.8, 0.8), gSeaFoam);
 diffuseColor.a = 1.0;`,
         )
@@ -337,7 +355,7 @@ roughnessFactor = mix(gSeaRough, 0.9, gSeaFoam);`,
 normal = normalize((viewMatrix * vec4(mix(gSeaNormal, normalize(vSeaRel - uSeaCentre), 0.6 * gSeaFoam), 0.0)).xyz);`,
         );
     };
-    mat.customProgramCacheKey = () => 'sea-mesh-v1';
+    mat.customProgramCacheKey = () => 'sea-mesh-v2';
     this.mesh = new THREE.Mesh(g, mat);
     this.mesh.name = 'Sea';
     this.mesh.frustumCulled = false;
@@ -362,9 +380,15 @@ normal = normalize((viewMatrix * vec4(mix(gSeaNormal, normalize(vSeaRel - uSeaCe
     on: boolean,
     terrain: { group: THREE.Group; waterLevelWorld: number } | null,
     globe: THREE.Group,
+    hulls: readonly { at: V3; r: number }[] = [],
   ): void {
     this.frame++;
     const u = this.uniforms;
+    u.uHull.value.forEach((h, i) => {
+      const hl = hulls[i];
+      if (hl) h.set(hl.at[0] - cam[0], hl.at[1] - cam[1], hl.at[2] - cam[2], hl.r);
+      else h.set(0, 0, 0, 0);
+    });
     const show = on && alt < MAX_ALT;
     this.mesh.visible = show;
     u.uCamW.value.set(cam[0], cam[1], cam[2]);

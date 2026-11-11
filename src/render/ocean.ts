@@ -92,6 +92,40 @@ const smooth = (a: number, b: number, x: number) => {
   return t * t * (3 - 2 * t);
 };
 
+// The shader's noise and warp (SEA_COMMON), for the CPU.
+const fract = (x: number) => x - Math.floor(x);
+function seaHash(x: number, y: number): number {
+  let a = fract(x * 0.1031), b = fract(y * 0.1031), c = fract(x * 0.1031);
+  const d = a * (b + 33.33) + b * (c + 33.33) + c * (a + 33.33);
+  a += d;
+  b += d;
+  c += d;
+  return fract((a + b) * c);
+}
+function seaNoise(x: number, y: number): number {
+  const ix = Math.floor(x), iy = Math.floor(y);
+  const fx = x - ix, fy = y - iy;
+  const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
+  const a = seaHash(ix, iy), b = seaHash(ix + 1, iy), c = seaHash(ix, iy + 1), d = seaHash(ix + 1, iy + 1);
+  return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+}
+function seaWarp(x: number, y: number): [number, number] {
+  return [
+    x + 7 * (seaNoise(x / 43, y / 43) - 0.5) + 2.5 * (seaNoise(x / 13 + 5.1, y / 13 + 5.1) - 0.5),
+    y + 7 * (seaNoise(x / 37 + 11.3, y / 37 + 11.3) - 0.5) + 2.5 * (seaNoise(x / 11 + 2.7, y / 11 + 2.7) - 0.5),
+  ];
+}
+
+/** The sea's surface at a point (SeaState.surfaceAt). */
+export interface SeaPoint {
+  /** Height above the still sea, m. */
+  h: number;
+  /** Its slope (rise per m), world axes (a horizontal vector). */
+  slope: THREE.Vector3;
+  /** How fast it rises, m/s. */
+  rate: number;
+}
+
 export class SeaState {
   readonly uniforms = {
     /** Per train: heading (x, y on the plane), k, amplitude (m). */
@@ -233,6 +267,55 @@ export class SeaState {
     this.state.lambdaPeak = (2 * Math.PI * G) / ((0.877 * G) / Math.max(0.5, Us)) ** 2;
   }
 
+  /**
+   * The sea's surface at a world point (float64), as the sea mesh draws it (oceanSurface.ts, open
+   * water): its height, slope and rise rate, from the trains longer than minLambda (m).
+   */
+  surfaceAt(world: V3, minLambda = 3, out: SeaPoint = { h: 0, slope: new THREE.Vector3(), rate: 0 }): SeaPoint {
+    const u = this.uniforms;
+    const dx = world[0] - this.origin[0], dy = world[1] - this.origin[1], dz = world[2] - this.origin[2];
+    const px = dx * this.E.x + dy * this.E.y + dz * this.E.z - this.shift[0];
+    const py = dx * this.N.x + dy * this.N.y + dz * this.N.z - this.shift[1];
+    const W = u.uSeaW.value;
+    const P = u.uSeaPh.value;
+    const fade = (k: number) => smooth(minLambda, 2 * minLambda, (2 * Math.PI) / k);
+    // (The mesh moves each point sideways too, sharpening the crests: find the point that ends up
+    // here, then its height.)
+    let qx = px, qy = py;
+    for (let it = 0; it < 3; it++) {
+      const [wx, wy] = seaWarp(qx, qy);
+      let cx = 0, cy = 0;
+      for (let i = 0; i < SEA_N; i++) {
+        const w = W[i];
+        const f = fade(w.z);
+        if (f <= 0) continue;
+        const c = Math.cos((wx * w.x + wy * w.y) * w.z + P[i]);
+        cx += f * 0.65 * w.w * c * w.x;
+        cy += f * 0.65 * w.w * c * w.y;
+      }
+      qx = px - cx;
+      qy = py - cy;
+    }
+    const [wx, wy] = seaWarp(qx, qy);
+    let h = 0, se = 0, sn = 0, rate = 0;
+    for (let i = 0; i < SEA_N; i++) {
+      const w = W[i];
+      const f = fade(w.z);
+      if (f <= 0) continue;
+      const ph = (wx * w.x + wy * w.y) * w.z + P[i];
+      const sn0 = Math.sin(ph), cs = Math.cos(ph);
+      h += f * w.w * sn0;
+      se += f * w.w * w.z * cs * w.x;
+      sn += f * w.w * w.z * cs * w.y;
+      // (Phase falls at the train's frequency: d/dt sin = -omega cos.)
+      rate -= f * w.w * Math.sqrt(G * w.z) * cs;
+    }
+    out.h = h;
+    out.slope.copy(this.E).multiplyScalar(se).addScaledVector(this.N, sn);
+    out.rate = rate;
+    return out;
+  }
+
   /** The swell for the place: some long waves from far-off storms, its own heading and height. */
   private setSwell(cam: V3, centre: V3): void {
     const r = Math.hypot(cam[0] - centre[0], cam[1] - centre[1], cam[2] - centre[2]);
@@ -262,7 +345,12 @@ uniform vec3 uSeaOff;
 uniform vec3 uSeaE;
 uniform vec3 uSeaN;
 uniform vec3 uSeaCentre;
-float seaHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+// (A hash without sin(), so the CPU's copy, SeaState.surfaceAt, gets the same numbers.)
+float seaHash(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
 float seaNoise(vec2 p) {
   vec2 i = floor(p), f = fract(p);
   vec2 u = f * f * (3.0 - 2.0 * f);

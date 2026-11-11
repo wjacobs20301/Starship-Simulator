@@ -1989,8 +1989,19 @@ export class SceneAtmospherePass extends Pass {
    * high-density screen, the soft clouds don't need every pixel; the upscale is invisible, and it
    * saves a third or more of their cost). Before setSize.
    */
+  /** The clouds' pixels per point of the screen (lowered under load: see main's resolution governor). */
+  cloudDensity = 1.25;
+
   setPixelRatio(ratio: number): void {
-    this.cloudRes = Math.min(1, 1.25 / ratio);
+    this.cloudRes = Math.min(1, this.cloudDensity / ratio);
+    // The near solids' multisampling: at a high pixel density the pixels are already small enough
+    // that 2 samples smooth their edges as well as 4 (a 4x multisampled HDR target at 2x density
+    // is a lot to clear and resolve every frame).
+    const samples = ratio >= 1.5 ? 2 : 4;
+    if (this.nearTarget.samples !== samples) {
+      this.nearTarget.samples = samples;
+      this.nearTarget.dispose();
+    }
   }
 
   setSize(width: number, height: number): void {

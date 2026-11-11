@@ -11,13 +11,18 @@ import { MeshoptSimplifier } from 'three/examples/jsm/libs/meshopt_simplifier.mo
  * The source models are ~0.9 M triangles for a full stack: far more than a few hundred metres
  * away can show.
  */
-export const DETAIL_LEVELS = new WeakMap<THREE.BufferGeometry, { distance: number; geometry: THREE.BufferGeometry }[]>();
+export const DETAIL_LEVELS = new WeakMap<THREE.BufferGeometry, { distance: number; error: number; geometry: THREE.BufferGeometry }[]>();
 
 /** Simplification steps: allowed geometric error (m) and from what distance it's used. */
-// (Far enough that the error is a fraction of a pixel even on a Retina display: no visible change.)
+// (Each a quarter of a pixel or less where it starts, even on a Retina display (~1600 pixels
+// per radian): no visible change. The first already halves the triangles of a stage seen from a
+// few hundred metres, as the cameras mostly see one.)
 const LOD_STEPS = [
-  { distance: 800, error: 0.04 },
-  { distance: 2500, error: 0.2 },
+  { distance: 120, error: 0.015 },
+  { distance: 350, error: 0.045 },
+  { distance: 900, error: 0.13 },
+  { distance: 2500, error: 0.35 },
+  { distance: 8000, error: 1.2 },
 ];
 
 function buildDetailLevels(root: THREE.Object3D): void {
@@ -41,18 +46,22 @@ function buildDetailLevels(root: THREE.Object3D): void {
     const scale = o.getWorldScale(new THREE.Vector3());
     const unitsPerMetre = 1 / Math.max(1e-6, Math.max(scale.x, scale.y, scale.z));
     const indices = new Uint32Array(g.index.array as ArrayLike<number>);
-    const levels: { distance: number; geometry: THREE.BufferGeometry }[] = [];
+    const levels: { distance: number; error: number; geometry: THREE.BufferGeometry }[] = [];
     let last = indices.length;
+    // (Each level from the last one: far fewer triangles to work through than the full mesh, and
+    // the errors add up to no more than the coarser level's own allowance.)
+    let from: Uint32Array = indices;
     for (const step of LOD_STEPS) {
-      const [out] = MeshoptSimplifier.simplify(indices, flat, 3, 0, (step.error * unitsPerMetre) / extent, ['LockBorder']);
+      const [out] = MeshoptSimplifier.simplify(from, flat, 3, 0, (step.error * unitsPerMetre) / extent, ['LockBorder']);
       if (out.length > last * 0.7) continue; // not worth a level
       last = out.length;
+      from = out;
       const lod = new THREE.BufferGeometry();
       for (const [name, attr] of Object.entries(g.attributes)) lod.setAttribute(name, attr);
       lod.setIndex(new THREE.BufferAttribute(pos.count < 65536 ? new Uint16Array(out) : out, 1));
       lod.boundingSphere = g.boundingSphere;
       lod.boundingBox = g.boundingBox;
-      levels.push({ distance: step.distance, geometry: lod });
+      levels.push({ distance: step.distance, error: step.error, geometry: lod });
     }
     if (levels.length) DETAIL_LEVELS.set(g, levels);
   });

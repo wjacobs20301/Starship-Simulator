@@ -67,6 +67,8 @@ export interface World {
   setSize(width: number, height: number): void;
   /** Render resolution: device pixels per CSS pixel (below the display's = rendered smaller and scaled up). */
   setPixelRatio(ratio: number): void;
+  /** The clouds' resolution, pixels per point of the screen (1.25 normally; less under load). */
+  setCloudDensity(px: number): void;
   /** Redraw the shadow map this frame (it's only redrawn when something that casts shadows moved). */
   shadowsDirty(): void;
   /** The post-processing chain (for tuning / debugging). */
@@ -246,7 +248,9 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
   // 0 at the far one) keeps precision everywhere. (A logarithmic depth buffer does too, but it
   // writes every fragment's depth from the shader, which switches off the GPU's early depth
   // test and hidden-surface removal: far slower.)
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, reversedDepthBuffer: true, logarithmicDepthBuffer: false });
+  // (No multisampling on the canvas itself: everything is drawn into the passes' own targets, the
+  // solids multisampled there, and only a full-screen copy reaches the canvas.)
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, reversedDepthBuffer: true, logarithmicDepthBuffer: false });
   if (!renderer.capabilities.reversedDepthBuffer) console.warn('EXT_clip_control unavailable: depth precision will suffer far from the camera');
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   // The shadow map is redrawn only when asked (shadowsDirty): the pad mostly stands still.
@@ -361,6 +365,13 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
       composer.setPixelRatio(renderer.getPixelRatio());
       composer.setSize(w, h);
     },
+    setCloudDensity(px: number) {
+      if (Math.abs(atmosphere.cloudDensity - px) < 1e-3) return;
+      atmosphere.cloudDensity = px;
+      atmosphere.setPixelRatio(renderer.getPixelRatio());
+      const size = renderer.getSize(new THREE.Vector2());
+      composer.setSize(size.x, size.y);
+    },
     setPixelRatio(ratio: number) {
       const size = renderer.getSize(new THREE.Vector2());
       if (Math.abs(renderer.getPixelRatio() - ratio) < 1e-3) return;
@@ -428,6 +439,16 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
     updateShadow(focus: THREE.Vector3, radius: number, reach = 0) {
       const cam = sun.shadow.camera;
       const r = THREE.MathUtils.clamp(radius, 60, 700);
+      // The map's resolution: 4096 texels for the whole launch site (~0.3 m each), 2048 for a
+      // vehicle alone (its few hundred metres: ~0.15 m), a quarter of the cost each time it's
+      // redrawn (every frame while something moves).
+      const size = r > 250 ? 4096 : 2048;
+      if (sun.shadow.mapSize.x !== size) {
+        sun.shadow.mapSize.set(size, size);
+        sun.shadow.map?.dispose();
+        sun.shadow.map = null;
+        renderer.shadowMap.needsUpdate = true;
+      }
       // The light sits above everything that can cast onto this patch (the tall towers, a
       // climbing rocket up to `reach`), and the frustum runs down to below the ground.
       const up = Math.max(2 * r + 200, reach + 200);
