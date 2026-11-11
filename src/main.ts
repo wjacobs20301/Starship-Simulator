@@ -19,7 +19,8 @@ import { PAD, RE, RP } from './sim/constants';
 import { GlobeTiles } from './render/globeTiles';
 import { ecefToWorld, toWorld, worldToGeodetic } from './render/geo';
 import { sea } from './render/ocean';
-import { Terrain } from './render/terrain';
+import { OceanSurface } from './render/oceanSurface';
+import { Terrain, seaColourUniforms } from './render/terrain';
 import { type MapVehicle, MapView } from './render/mapView';
 import type { Trajectory } from './sim/trajectory';
 import { VehicleMesh } from './render/vehicleMesh';
@@ -163,7 +164,7 @@ loadModels(world.renderer, (f) => (loadingBar.style.transform = `scaleX(${f})`))
     loadingBar.style.transform = 'scaleX(1)';
     loading.classList.add('done');
     setTimeout(() => loading.remove(), 1000);
-    if (import.meta.env.DEV) Object.assign(window, { __debug: { sea, models, padRig, world, meshes, terrain, settings, updateSettings, rig, fx, sound, pr: () => pixelRatio, frame, globeTiles, mapView, flightPanel, hud, plot, ambience, audioEngine, lightning, starlink: () => starlink, menu, menuAudio, weather, moon, origin, showScene } });
+    if (import.meta.env.DEV) Object.assign(window, { __debug: { sea, oceanSurface, models, padRig, world, meshes, terrain, settings, updateSettings, rig, fx, sound, pr: () => pixelRatio, frame, globeTiles, mapView, flightPanel, hud, plot, ambience, audioEngine, lightning, starlink: () => starlink, menu, menuAudio, weather, moon, origin, showScene } });
   })
   .catch((err) => {
     loadingText.textContent = import.meta.env.DEV
@@ -1019,6 +1020,11 @@ const WORLD_TO_ECEF = (() => {
   return new THREE.Matrix3().set(ex.x, ex.y, ex.z, ey.x, ey.y, ey.z, ez.x, ez.y, ez.z);
 })();
 const weather = new Weather(EARTH_AXIS_WORLD.clone(), WORLD_TO_ECEF, PAD.latDeg, PAD.lonDeg);
+// The sea near the camera: a mesh rising and falling with the waves, at sea level.
+const oceanSurface = new OceanSurface({ ...seaColourUniforms, uWorldToEcef: { value: WORLD_TO_ECEF } });
+world.scene.add(oceanSurface.mesh);
+world.atmosphere.setBackground(oceanSurface.mesh);
+const seaGround = { up: new THREE.Vector3(), east: new THREE.Vector3(), north: new THREE.Vector3(), v: new THREE.Vector3() };
 // (The physics flies through the same weather: its wind.)
 weather.onConfig = (cfg, land) => send({ type: 'weather', cfg, land });
 /** The season: the sun's latitude (it stays put through a flight's days), degrees. */
@@ -1435,6 +1441,20 @@ function frame(): void {
   seaEast.crossVectors(EARTH_AXIS_WORLD, camUp).normalize();
   seaNorth.crossVectors(camUp, seaEast);
   sea.update(paused ? 0 : frameDt, cam, EARTH_CENTER_WORLD, weather.surfaceWind(camFromCentre), seaEast, seaNorth);
+  {
+    // (Under the camera, at sea level: the local vertical and east / north there.)
+    const g = worldToGeodetic(cam);
+    const wl = terrain.waterLevelWorld + PAD.groundAlt;
+    const ground = toWorld(g.lat, g.lon, wl);
+    const above = toWorld(g.lat, g.lon, wl + 1000);
+    const eastP = toWorld(g.lat, g.lon + 0.01, wl);
+    const sg = seaGround;
+    sg.up.set(above[0] - ground[0], above[1] - ground[1], above[2] - ground[2]).normalize();
+    sg.east.set(eastP[0] - ground[0], eastP[1] - ground[1], eastP[2] - ground[2]);
+    sg.east.addScaledVector(sg.up, -sg.east.dot(sg.up)).normalize();
+    sg.north.crossVectors(sg.up, sg.east);
+    oceanSurface.update(world.renderer, cam, g.h - wl, sg.up, sg.east, sg.north, ground, !rig.map && terrain.ready, terrain, globeTiles.group);
+  }
   audio.update(heard.level, heard.distance, Math.exp(-Math.max(0, camAlt) / 8500), paused);
   // Everything else you hear: wind, surf, air rush, tower machinery, deluge, venting.
   const mt = snap.missionTime;

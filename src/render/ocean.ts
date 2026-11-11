@@ -107,6 +107,8 @@ export class SeaState {
     uSeaN: { value: new THREE.Vector3(0, 0, -1) },
     /** The Earth's centre from the camera (world). */
     uSeaCentre: { value: new THREE.Vector3() },
+    /** The wind sea's height (Hs, m), the swell's, its wavenumber, its phase now (for the surf). */
+    uSea3: { value: new THREE.Vector4() },
   };
   /** The wind the sea is up to (m/s, on the plane: east, north), eased. */
   private wind = new THREE.Vector2(-5, 2);
@@ -218,6 +220,13 @@ export class SeaState {
     const W = Math.min(0.3, 3.84e-6 * U ** 3.41);
     u.uSea.value.set(U, W, W > 1e-5 ? upperQuantile(W) : 6, Math.max(0.0015, cm - mss));
     u.uSea2.value.set(Math.cos(thW), Math.sin(thW), smooth(14, 24, U), 0.4 * smooth(7, 22, U));
+    {
+      let vw = 0;
+      for (let i = 0; i < BANDS * PER_BAND; i++) vw += 0.5 * u.uSeaW.value[i].w ** 2;
+      const sw = TRAINS[SEA_N - 2];
+      const ph = -sw.omega * this.clock;
+      u.uSea3.value.set(4 * Math.sqrt(vw), this.swellH, sw.k, ph - Math.floor(ph / (2 * Math.PI)) * 2 * Math.PI);
+    }
     this.state.U = U;
     this.state.Hs = 4 * Math.sqrt(var0);
     this.state.whitecaps = W;
@@ -236,18 +245,64 @@ export class SeaState {
 }
 
 /**
- * The shader side. seaSurface(rel, p, J): rel is the point from the camera (world), p its
- * seaPlane, J seaPixel(p). Returns the normal (world), roughness and foam (0..1) in gSea*.
+ * The shader side, in two parts. SEA_COMMON (vertex or fragment): the uniforms, seaPlane(rel)
+ * (rel: the point from the camera, world) and seaHeight (the surface's rise and sideways shift,
+ * for a mesh). SEA_FRAG (fragment): seaSurface(rel, p, J, wpLim, swellK): p its seaPlane, J
+ * seaPixel(p); wpLim: the waves' peak frequency the local fetch allows (0: open sea), swellK:
+ * how much swell gets in (1: open sea). Returns the normal (world), roughness, foam (0..1) and
+ * the water's darkening in gSea*.
  */
-export const SEA_GLSL = /* glsl */ `
+export const SEA_COMMON = /* glsl */ `
 uniform vec4 uSeaW[${SEA_N}];
 uniform float uSeaPh[${SEA_N}];
 uniform vec4 uSea;
 uniform vec4 uSea2;
+uniform vec4 uSea3;
 uniform vec3 uSeaOff;
 uniform vec3 uSeaE;
 uniform vec3 uSeaN;
 uniform vec3 uSeaCentre;
+float seaHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float seaNoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(seaHash(i), seaHash(i + vec2(1.0, 0.0)), u.x), mix(seaHash(i + vec2(0.0, 1.0)), seaHash(i + vec2(1.0, 1.0)), u.x), u.y);
+}
+vec2 seaPlane(vec3 rel) {
+  vec3 w = rel + uSeaOff;
+  return vec2(dot(w, uSeaE), dot(w, uSeaN));
+}
+// (Where the waves are reckoned from: the plane warped a few metres, slowly, so the shorter
+// crests wander and break up as a real chop's do instead of running in straight parallel rows;
+// the long waves hardly move.)
+vec2 seaWarp(vec2 p) {
+  return p + 7.0 * vec2(seaNoise(p / 43.0) - 0.5, seaNoise(p / 37.0 + 11.3) - 0.5) + 2.5 * vec2(seaNoise(p / 13.0 + 5.1) - 0.5, seaNoise(p / 11.0 + 2.7) - 0.5);
+}
+// (Train i's share here: the swell as much as gets in; the wind sea's longer waves only as far as
+// the fetch lets the wind raise them.)
+float seaScale(int i, float k, float wpLim, float swellK) {
+  if (i >= ${SEA_N - 2}) return swellK;
+  return wpLim > 0.0 ? smoothstep(0.75, 1.2, sqrt(9.81 * k) / wpLim) : 1.0;
+}
+// The surface's rise (m) and its sideways shift on the plane (m: the crests drawn sharp, the
+// troughs wide, as Gerstner's waves), from the trains a mesh 'spacing' apart can hold.
+float seaHeight(vec2 p, float spacing, float wpLim, float swellK, out vec2 chop) {
+  float h = 0.0;
+  chop = vec2(0.0);
+  vec2 pw = seaWarp(p);
+  for (int i = 0; i < ${SEA_N}; i++) {
+    vec4 W = uSeaW[i];
+    float f = smoothstep(2.5 * spacing, 6.0 * spacing, 6.2832 / W.z) * seaScale(i, W.z, wpLim, swellK);
+    if (f <= 0.0) continue;
+    float ph = dot(pw, W.xy) * W.z + uSeaPh[i];
+    h += f * W.w * sin(ph);
+    chop += f * 0.65 * W.w * cos(ph) * W.xy;
+  }
+  return h;
+}
+`;
+
+export const SEA_FRAG = /* glsl */ `
 vec3 gSeaNormal;
 float gSeaRough;
 float gSeaFoam;
@@ -255,35 +310,27 @@ float gSeaFoam;
 // reflects, which is what shows the waves: up close, darker than the photo (lit by a hazy sky
 // from far off, and from orbit), which it's back to some tens of km off.)
 float gSeaBody;
-float seaHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float seaNoise(vec2 p) {
-  vec2 i = floor(p), f = fract(p);
-  vec2 u = f * f * (3.0 - 2.0 * f);
-  return mix(mix(seaHash(i), seaHash(i + vec2(1.0, 0.0)), u.x), mix(seaHash(i + vec2(0.0, 1.0)), seaHash(i + vec2(1.0, 1.0)), u.x), u.y);
-}
-// The point on the sea's plane (m), and its change across a pixel (x, y: dp/dx; z, w: dp/dy):
-// call for every fragment (it takes derivatives), then seaSurface only where there's water.
-vec2 seaPlane(vec3 rel) {
-  vec3 w = rel + uSeaOff;
-  return vec2(dot(w, uSeaE), dot(w, uSeaN));
-}
+// The point's change across a pixel (x, y: dp/dx; z, w: dp/dy): take it for every fragment (a
+// derivative), then call seaSurface only where there's water.
 vec4 seaPixel(vec2 p) {
   return vec4(dFdx(p), dFdy(p));
 }
 // (A pixel's reach along heading d, m.)
 float seaReach(vec4 J, vec2 d) { return abs(dot(J.xy, d)) + abs(dot(J.zw, d)) + 1e-4; }
-void seaSurface(vec3 rel, vec2 p, vec4 J) {
+void seaSurface(vec3 rel, vec2 p, vec4 J, float wpLim, float swellK) {
+  vec2 pw = seaWarp(p);
   vec2 slope = vec2(0.0);
   float h = 0.0, v = 0.0, vAll = 0.0, lost = 0.0;
   for (int i = 0; i < ${SEA_N}; i++) {
     vec4 W = uSeaW[i];
+    W.w *= seaScale(i, W.z, wpLim, swellK);
     float ak = W.w * W.z;
     vAll += 0.5 * W.w * W.w;
     // (Faded out once finer than a few pixels along its heading: its tilt goes into the roughness.)
-    float f = smoothstep(2.5, 7.0, 6.2832 / (W.z * seaReach(J, W.xy)));
+    float f = smoothstep(3.5, 9.0, 6.2832 / (W.z * seaReach(J, W.xy)));
     lost += 0.5 * ak * ak * (1.0 - f);
     if (f <= 0.0) continue;
-    float ph = dot(p, W.xy) * W.z + uSeaPh[i];
+    float ph = dot(pw, W.xy) * W.z + uSeaPh[i];
     float s = sin(ph);
     slope += f * ak * cos(ph) * W.xy;
     h += f * W.w * s;
@@ -317,15 +364,19 @@ void seaSurface(vec3 rel, vec2 p, vec4 J) {
   float on = smoothstep(0.0003, 0.003, uSea.y);
   float foam = mix(uSea.y * 1.2, foamNear, okP) * on;
   if (uSea2.z > 0.0) {
-    float okS = 1.0 - smoothstep(0.6, 2.5, dq.y);
-    float st = seaNoise(vec2(q.x / 90.0, q.y / 7.0)) * 0.6 + 0.4 * seaNoise(vec2(q.x / 35.0 + 5.0, q.y / 3.0));
-    float streak = smoothstep(0.7, 0.8, st) * lace;
-    foam = max(foam, uSea2.z * mix(0.05, 0.45 * streak, okS));
+    float okS = 1.0 - smoothstep(0.3, 1.2, dq.y);
+    float st = seaNoise(vec2(q.x / 70.0, q.y / 2.2)) * 0.6 + 0.4 * seaNoise(vec2(q.x / 23.0 + 5.0, q.y / 1.1));
+    float streak = smoothstep(0.74, 0.86, st) * lace * smoothstep(0.3, 0.7, seaNoise(vec2(q.x / 150.0, q.y / 40.0) + 3.0));
+    foam = max(foam, uSea2.z * mix(0.04, 0.4 * streak, okS));
   }
   gSeaFoam = clamp(foam, 0.0, 1.0);
   gSeaBody = mix(0.3, 1.0, smoothstep(2000.0, 40000.0, length(rel))) * (1.0 - uSea2.w);
 }
 `;
+
+
+/** Both parts, for a fragment shader. */
+export const SEA_GLSL = SEA_COMMON + SEA_FRAG;
 
 /** The same uniforms, for a material's shader (onBeforeCompile). */
 export function bindSea(shader: { uniforms: Record<string, THREE.IUniform> }, sea: SeaState): void {

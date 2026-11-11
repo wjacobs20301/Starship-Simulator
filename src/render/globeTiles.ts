@@ -39,7 +39,7 @@ vec2 seaP = seaPlane(vSeaRel);
 vec4 seaJ = seaPixel(seaP);
 gSeaFoam = 0.0;
 if (gWater > 0.001) {
-  seaSurface(vSeaRel, seaP, seaJ);
+  seaSurface(vSeaRel, seaP, seaJ, 0.0, 1.0);
   diffuseColor.rgb = mix(diffuseColor.rgb, mix(diffuseColor.rgb * gSeaBody, vec3(0.78, 0.8, 0.8), gSeaFoam), gWater);
 }`,
       )
@@ -182,6 +182,8 @@ export class GlobeTiles {
       const mat = m.material as THREE.MeshStandardMaterial;
       mat.map?.dispose();
       mat.dispose();
+      (m.userData.seaMask as THREE.Material | undefined)?.dispose();
+      m.userData.seaMask = undefined;
       t.mesh = null;
       t.state = 'idle';
     }

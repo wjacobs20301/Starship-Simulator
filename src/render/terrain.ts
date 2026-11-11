@@ -5,6 +5,7 @@
 
 import * as THREE from 'three';
 import { SEA_GLSL, bindSea, sea as seaState } from './ocean';
+import { SEA_MESH_GLSL, seaMeshUniforms } from './oceanSurface';
 import { TRENCHES } from './launchSite';
 import { DEG, PAD } from '../sim/constants';
 import type { V3 } from '../sim/math';
@@ -59,6 +60,9 @@ const uniforms = {
   uSiteRect: { value: new THREE.Vector4(0, 0, 0, 0) },
 };
 
+/** The sea's colour, for the sea mesh (oceanSurface.ts) to match. */
+export const seaColourUniforms = { uGlobe: uniforms.uGlobe, uWater: uniforms.uWater };
+
 /**
  * Where the 3D buildings stand, the aerial photo shows them too (flat, leaning, with their
  * shadows, and some since rebuilt or gone): a mask of that ground, drawn as concrete or lawn
@@ -93,6 +97,11 @@ function makeMaterial(map: THREE.Texture | null, holes: boolean): THREE.MeshStan
     shader.uniforms.uSiteMask = uniforms.uSiteMask;
     shader.uniforms.uSiteRect = uniforms.uSiteRect;
     bindSea(shader, seaState);
+    shader.uniforms.uMaskN = seaMeshUniforms.uMaskN;
+    shader.uniforms.uMaskNC = seaMeshUniforms.uMaskNC;
+    shader.uniforms.uMaskNE = seaMeshUniforms.uMaskNE;
+    shader.uniforms.uMaskNN = seaMeshUniforms.uMaskNN;
+    shader.uniforms.uMaskNI = seaMeshUniforms.uMaskNI;
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nattribute float aHeight;\nattribute vec2 aEN;\nattribute float aWaterWeight;\nvarying float vHeight;\nvarying vec2 vEN;\nvarying float vWaterWeight;\nvarying vec3 vSeaRel;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvHeight = aHeight;\nvEN = aEN;\nvWaterWeight = aWaterWeight;\nvSeaRel = (modelMatrix * vec4(transformed, 1.0)).xyz;');
@@ -119,7 +128,8 @@ varying float vWaterWeight;
 // the colour override there; gloss and waves still apply everywhere so all tiles match.
 float waterMask() { return 1.0 - smoothstep(uWaterLevel - 0.12, uWaterLevel + 0.05, vHeight); }
 varying vec3 vSeaRel;
-${SEA_GLSL}`,
+${SEA_GLSL}
+${SEA_MESH_GLSL}`,
       )
       .replace(
         '#include <map_fragment>',
@@ -165,12 +175,14 @@ if (siteUv.x > 0.0 && siteUv.y > 0.0 && siteUv.x < 1.0 && siteUv.y < 1.0) {
 float edge = smoothstep(uEdge.x, uEdge.y, max(abs(vEN.x), abs(vEN.y)));
 diffuseColor.a *= 1.0 - edge;
 water *= 1.0 - edge;
+// (Near the camera the sea mesh has the water, its waves rising and falling: oceanSurface.ts.)
+if (water > 0.5 && seaMeshHere(vSeaRel)) discard;
 // The sea's surface (ocean.ts): waves for the wind, whitecaps; darker in a gale.
 vec2 seaP = seaPlane(vSeaRel);
 vec4 seaJ = seaPixel(seaP);
 gSeaFoam = 0.0;
 if (water > 0.001) {
-  seaSurface(vSeaRel, seaP, seaJ);
+  seaSurface(vSeaRel, seaP, seaJ, 0.0, 1.0);
   diffuseColor.rgb = mix(diffuseColor.rgb, mix(diffuseColor.rgb * gSeaBody, vec3(0.78, 0.8, 0.8), gSeaFoam), water);
 }`,
       )
@@ -189,7 +201,7 @@ if (water > 0.001) {
 }`,
       );
   };
-  mat.customProgramCacheKey = () => (holes ? 'terrain-v12-holes' : 'terrain-v12');
+  mat.customProgramCacheKey = () => (holes ? 'terrain-v13-holes' : 'terrain-v13');
   return mat;
 }
 
@@ -280,6 +292,11 @@ export class Terrain {
       this.tiles.set(key, t);
     }
     return t;
+  }
+
+  /** The sea's level (world height near the pad, m). */
+  get waterLevelWorld(): number {
+    return uniforms.uWaterLevel.value;
   }
 
   /** Per-frame: choose tiles for this camera, place them with the floating origin, stream. */

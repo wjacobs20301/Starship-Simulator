@@ -1,0 +1,471 @@
+// The sea's surface near the camera, as a mesh that rises and falls with the waves (ocean.ts's),
+// at sea level: a disc of rings round the point under the camera, fine at the middle and
+// coarser outward, out past the horizon. Drawn while the camera's low enough to see waves.
+//
+// Where the water is comes from a map of the sea drawn from above round the camera: the
+// detailed ground's own water (terrain.ts: by height) and, beyond it, the Blue Marble's (by its
+// colour). Two of them: a sharp one ~16 km across (the shore to a few metres), and a coarse one
+// out to the mesh's edge. From the sharp one's mipmaps, the distance to the shore (the waves
+// break into surf there and die out up the beach) and, looking upwind, how far the wind has
+// blown over water (fetch: a lagoon gets a short chop, not the open sea's long waves, and no
+// swell gets in). In the detailed region round Starbase the mesh is drawn only within the sharp
+// map, the terrain giving up its water there to it (and keeping it beyond, flat); elsewhere out
+// to its edge. With the mesh at sea level, the open sea isn't the globe tiles' (drawn sunk
+// 40 m, under the detailed ground) any more near the camera.
+
+import * as THREE from 'three';
+import type { V3 } from '../sim/math';
+import { SEA_COMMON, SEA_FRAG, SEA_N, bindSea, sea } from './ocean';
+
+/** Rings and segments of the disc. */
+const RINGS = 160;
+const SEGS = 320;
+/** The sharp map: its half size (m) and texels. */
+const NEAR_HALF = 8000;
+const NEAR_SIZE = 2048;
+const FAR_SIZE = 1024;
+/** Drawn below this camera height (m). */
+const MAX_ALT = 6000;
+/** The detailed region (terrain.ts): its water is the terrain's out here (pad east / north, m). */
+const REGION_INNER = 80_000;
+
+/** A map of the sea from above: 1 = water, 0 = land (R), mipmapped. */
+class SeaMask {
+  readonly rt: THREE.WebGLRenderTarget;
+  readonly cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 4e5);
+  /** Its centre (world, float64), axes (world), half size (m). */
+  centre: V3 = [0, 0, 0];
+  readonly E = new THREE.Vector3(1, 0, 0);
+  readonly N = new THREE.Vector3(0, 0, -1);
+  half = 1;
+  at = -Infinity;
+  valid = false;
+
+  constructor(size: number) {
+    this.rt = new THREE.WebGLRenderTarget(size, size, {
+      format: THREE.RedFormat,
+      type: THREE.UnsignedByteType,
+      minFilter: THREE.LinearMipmapLinearFilter,
+      magFilter: THREE.LinearFilter,
+      generateMipmaps: true,
+      depthBuffer: false,
+    });
+    this.rt.texture.wrapS = this.rt.texture.wrapT = THREE.ClampToEdgeWrapping;
+  }
+}
+
+const TERRAIN_MASK = new THREE.ShaderMaterial({
+  uniforms: { uWL: { value: -1.25 } },
+  vertexShader: /* glsl */ `
+    attribute float aHeight;
+    varying float vH;
+    void main() { vH = aHeight; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: /* glsl */ `
+    uniform float uWL;
+    varying float vH;
+    void main() { gl_FragColor = vec4(1.0 - smoothstep(uWL - 0.12, uWL + 0.05, vH), 0.0, 0.0, 1.0); }`,
+  depthTest: false,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+});
+
+/** A globe tile's sea, by colour (as globeTiles.ts tells it). */
+function globeMask(map: THREE.Texture): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: { map: { value: map } },
+    vertexShader: /* glsl */ `
+      varying vec2 vUv;
+      void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: /* glsl */ `
+      uniform sampler2D map;
+      varying vec2 vUv;
+      void main() {
+        vec3 s = pow(max(texture2D(map, vUv).rgb, vec3(0.0)), vec3(1.0 / 2.2));
+        gl_FragColor = vec4(smoothstep(0.08, 0.2, (s.b - max(s.r, s.g)) / max(s.b, 0.01)), 0.0, 0.0, 1.0);
+      }`,
+    depthTest: false,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+}
+
+/** Sampling the maps (vertex or fragment). */
+const MASK_GLSL = /* glsl */ `
+uniform sampler2D uMaskN;
+uniform sampler2D uMaskF;
+// Each map: centre (from the camera, world), axes (world), 1 / its half size; .w of C: on.
+uniform vec4 uMaskNC;
+uniform vec3 uMaskNE;
+uniform vec3 uMaskNN;
+uniform float uMaskNI;
+uniform vec4 uMaskFC;
+uniform vec3 uMaskFE;
+uniform vec3 uMaskFN;
+uniform float uMaskFI;
+vec2 maskUvN(vec3 rel) { vec3 d = rel - uMaskNC.xyz; return vec2(dot(d, uMaskNE), dot(d, uMaskNN)) * uMaskNI * 0.5 + 0.5; }
+vec2 maskUvF(vec3 rel) { vec3 d = rel - uMaskFC.xyz; return vec2(dot(d, uMaskFE), dot(d, uMaskFN)) * uMaskFI * 0.5 + 0.5; }
+// (How far inside the sharp map, 0 at its middle, 1 at its edge.)
+float maskEdgeN(vec2 uv) { vec2 a = abs(uv - 0.5) * 2.0; return max(a.x, a.y); }
+// Water here (1) or land (0): the sharp map, else the coarse one, else (no map) water.
+float seaWater(vec3 rel) {
+  if (uMaskNC.w > 0.0) {
+    vec2 uv = maskUvN(rel);
+    if (maskEdgeN(uv) < 0.985) return textureLod(uMaskN, uv, 0.0).r;
+  }
+  if (uMaskFC.w > 0.0) {
+    vec2 uv = maskUvF(rel);
+    if (maskEdgeN(uv) < 0.995) return textureLod(uMaskF, uv, 0.0).r;
+  }
+  return 1.0;
+}
+`;
+
+/** The terrain's side (terrain.ts): whether the mesh has the water here instead. */
+export const SEA_MESH_GLSL = /* glsl */ `
+uniform sampler2D uMaskN;
+uniform vec4 uMaskNC;
+uniform vec3 uMaskNE;
+uniform vec3 uMaskNN;
+uniform float uMaskNI;
+bool seaMeshHere(vec3 rel) {
+  if (uMaskNC.w <= 0.0) return false;
+  vec3 d = rel - uMaskNC.xyz;
+  vec2 uv = vec2(dot(d, uMaskNE), dot(d, uMaskNN)) * uMaskNI * 0.5 + 0.5;
+  vec2 a = abs(uv - 0.5) * 2.0;
+  return max(a.x, a.y) < 0.985 && textureLod(uMaskN, uv, 0.0).r > 0.35;
+}
+`;
+
+const nearMask = new SeaMask(NEAR_SIZE);
+const farMask = new SeaMask(FAR_SIZE);
+
+/** The maps and the disc's placing: shared with the terrain's material (terrain.ts) and the mesh's. */
+export const seaMeshUniforms = {
+  uMaskN: { value: nearMask.rt.texture as THREE.Texture },
+  uMaskF: { value: farMask.rt.texture as THREE.Texture },
+  uMaskNC: { value: new THREE.Vector4() },
+  uMaskNE: { value: new THREE.Vector3() },
+  uMaskNN: { value: new THREE.Vector3() },
+  uMaskNI: { value: 1 },
+  uMaskFC: { value: new THREE.Vector4() },
+  uMaskFE: { value: new THREE.Vector3() },
+  uMaskFN: { value: new THREE.Vector3() },
+  uMaskFI: { value: 1 },
+  /** The disc: inner radius, outer radius, curvature (1 / 2R), the camera's height (m). */
+  uRing: { value: new THREE.Vector4(1, 1000, 1 / (2 * 6.371e6), 10) },
+  /** World -> the disc's own axes. */
+  uToLocal: { value: new THREE.Matrix3() },
+  /** The camera (world: pad east, up, -north; float). */
+  uCamW: { value: new THREE.Vector3() },
+};
+
+export class OceanSurface {
+  readonly mesh: THREE.Mesh;
+  private near = nearMask;
+  private far = farMask;
+  private frame = 0;
+  private v = new THREE.Vector3();
+  private m = new THREE.Matrix4();
+  readonly uniforms = seaMeshUniforms;
+
+  constructor(
+    seaColour: { uGlobe: THREE.IUniform; uWater: THREE.IUniform; uWorldToEcef: THREE.IUniform },
+  ) {
+    // The disc: a middle point, then rings (s = 0..1 out along them, the angle).
+    const n = 1 + RINGS * SEGS;
+    const polar = new Float32Array(n * 2);
+    polar[0] = -1;
+    for (let i = 0; i < RINGS; i++) for (let j = 0; j < SEGS; j++) polar.set([i / (RINGS - 1), (j / SEGS) * 2 * Math.PI], (1 + i * SEGS + j) * 2);
+    const idx: number[] = [];
+    // (Counter-clockwise seen from above: the angle runs east to north.)
+    for (let j = 0; j < SEGS; j++) idx.push(0, 1 + j, 1 + ((j + 1) % SEGS));
+    for (let i = 0; i < RINGS - 1; i++) {
+      for (let j = 0; j < SEGS; j++) {
+        const a = 1 + i * SEGS + j, b = 1 + i * SEGS + ((j + 1) % SEGS);
+        const c = a + SEGS, d = b + SEGS;
+        idx.push(a, c, d, a, d, b);
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
+    g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(n * 3).map((_, k) => (k % 3 === 1 ? 1 : 0)), 3));
+    g.setAttribute('aPolar', new THREE.BufferAttribute(polar, 2));
+    g.setIndex(idx);
+    const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.3, metalness: 0 });
+    mat.onBeforeCompile = (shader) => {
+      bindSea(shader, sea);
+      Object.assign(shader.uniforms, this.uniforms, seaColour);
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          '#include <common>',
+          `#include <common>
+attribute vec2 aPolar;
+uniform vec4 uRing;
+uniform mat3 uToLocal;
+uniform vec3 uCamW;
+varying vec3 vSeaRel;
+varying vec2 vSeaP;
+// (x: distance to the shore (m, 1e4: none near), y: the fetch's peak frequency limit, z: swell's share.)
+varying vec3 vShore;
+${SEA_COMMON}
+${MASK_GLSL}
+// How far over water upwind (m: 3e4 = open), from here along dir (world).
+float seaFetch(vec3 rel, vec3 dir) {
+  float f = 3e4;
+  for (int k = 4; k >= 0; k--) {
+    float d = 300.0 * pow(2.6, float(k));
+    if (seaWater(rel + dir * d) < 0.5) f = d;
+  }
+  return f;
+}`,
+        )
+        .replace(
+          '#include <begin_vertex>',
+          `float r = aPolar.x < 0.0 ? 0.0 : uRing.x * pow(uRing.y / uRing.x, aPolar.x);
+vec3 transformed = vec3(r * cos(aPolar.y), -r * r * uRing.z, -r * sin(aPolar.y));
+vec3 rel0 = (modelMatrix * vec4(transformed, 1.0)).xyz;
+vec2 p = seaPlane(rel0);
+// (The mesh's spacing here: the waves finer than it are left to the shading.)
+float spacing = max(0.25, max(r * ${((2 * Math.PI) / SEGS).toFixed(6)}, r * log(uRing.y / uRing.x) / ${RINGS - 1}.0));
+// The shore: how far (from the sharp map's mipmaps: the share of water round about), and the
+// fetch up the wind and the swell.
+float shore = 1e4;
+float wpLim = 0.0;
+float swellK = 1.0;
+float edgeFade = 1.0;
+if (uMaskNC.w > 0.0) {
+  vec2 muv = maskUvN(rel0);
+  float e = maskEdgeN(muv);
+  if (e < 0.985) {
+    float b3 = textureLod(uMaskN, muv, 3.0).r;
+    float b6 = textureLod(uMaskN, muv, 6.0).r;
+    float dFar = (b6 - 0.5) * ${((NEAR_HALF * 2) / NEAR_SIZE * 64).toFixed(1)};
+    float dNear = (b3 - 0.5) * ${((NEAR_HALF * 2) / NEAR_SIZE * 8).toFixed(1)};
+    shore = b6 > 0.999 ? 1e4 : mix(dNear, dFar, smoothstep(15.0, 45.0, dFar));
+  }
+  // (In the detailed region the terrain has the water past the sharp map: flat there.)
+  vec2 en = vec2(rel0.x + uCamW.x, -(rel0.z + uCamW.z));
+  if (max(abs(en.x), abs(en.y)) < ${REGION_INNER}.0) edgeFade = 1.0 - smoothstep(0.8, 0.95, e);
+}
+vec3 wdir = -(uSeaE * uSea2.x + uSeaN * uSea2.y);
+float fetch = seaFetch(rel0, wdir);
+if (fetch < 2.9e4) wpLim = 22.0 * pow(96.2 / (max(uSea.x, 0.5) * fetch), 1.0 / 3.0);
+vec4 sw = uSeaW[${SEA_N - 2}];
+swellK = smoothstep(1500.0, 9000.0, seaFetch(rel0, -(uSeaE * sw.x + uSeaN * sw.y)));
+vShore = vec3(shore, wpLim, swellK);
+// Waves die out into the surf and up the beach; flat right under the camera (no crest over it).
+float surfW = clamp(40.0 * uSea3.x + 30.0 * uSea3.y * swellK, 20.0, 250.0);
+float k = smoothstep(0.0, surfW, shore) * edgeFade * mix(1.0, smoothstep(0.5 * uRing.w, 3.0 * uRing.w, r), 1.0 - smoothstep(5.0, 30.0, uRing.w));
+vec2 chop;
+float h = seaHeight(p, spacing, wpLim, swellK, chop) * k;
+vec3 dw = (uSeaE * chop.x + uSeaN * chop.y) * k;
+transformed += vec3(0.0, h, 0.0) + uToLocal * dw;
+vSeaRel = (modelMatrix * vec4(transformed, 1.0)).xyz;
+vSeaP = p;`,
+        );
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          '#include <common>',
+          `#include <common>
+uniform sampler2D uGlobe;
+uniform vec3 uWater;
+uniform mat3 uWorldToEcef;
+uniform vec3 uCamW;
+varying vec3 vSeaRel;
+varying vec2 vSeaP;
+varying vec3 vShore;
+${SEA_COMMON}
+${SEA_FRAG}
+${MASK_GLSL}`,
+        )
+        .replace(
+          '#include <map_fragment>',
+          `#include <map_fragment>
+vec4 seaJ = seaPixel(vSeaP);
+// Only on water; in the detailed region only within the sharp map (the terrain has the rest).
+vec2 en = vec2(vSeaRel.x + uCamW.x, -(vSeaRel.z + uCamW.z));
+bool region = max(abs(en.x), abs(en.y)) < ${REGION_INNER}.0;
+float water = 1.0;
+if (uMaskNC.w > 0.0 && maskEdgeN(maskUvN(vSeaRel)) < 0.985) water = textureLod(uMaskN, maskUvN(vSeaRel), 0.0).r;
+else if (region) water = 0.0;
+else water = seaWater(vSeaRel);
+if (water < 0.35) discard;
+seaSurface(vSeaRel, vSeaP, seaJ, vShore.y, vShore.z);
+// The water's colour: the Blue Marble's sea (as the terrain mixes it, near Starbase; as the
+// globe tiles draw it elsewhere).
+vec3 ec = normalize(uWorldToEcef * (vSeaRel - uSeaCentre));
+vec3 globe = texture2D(uGlobe, vec2(atan(ec.y, ec.x) / 6.2832 + 0.5, asin(clamp(ec.z, -1.0, 1.0)) / 3.1416 + 0.5)).rgb;
+vec3 terr = pow(mix(pow(uWater, vec3(1.0 / 2.2)), pow(globe, vec3(1.0 / 2.2)), 0.75), vec3(2.2));
+vec3 col = mix(globe, terr, 1.0 - smoothstep(60000.0, 100000.0, max(abs(en.x), abs(en.y))));
+// Surf: the waves breaking in lines toward the beach, white water at its edge.
+float surf = 0.0;
+float surfW = clamp(40.0 * uSea3.x + 30.0 * uSea3.y * vShore.z, 20.0, 250.0);
+if (vShore.x < surfW + 30.0) {
+  float d = max(vShore.x, 0.0);
+  float ks = uSea3.z * 1.6;
+  vec2 q = vec2(dot(vSeaP, uSea2.xy), dot(vSeaP, vec2(-uSea2.y, uSea2.x)));
+  float wob = 8.0 * (seaNoise(q / 40.0) - 0.5) + 3.0 * (seaNoise(q / 9.0) - 0.5);
+  float phs = (d + wob) * ks - uSea3.w;
+  float line = sin(phs);
+  // (Each breaker breaks in stretches along the shore (its own: they come in with it), a bright
+  // crest and lacy foam behind it.)
+  float wave = floor((phs + 1.5708) / 6.2832);
+  float along = seaNoise(vec2(q.y / 35.0, wave * 7.3)) * 0.7 + 0.3 * seaNoise(vec2(q.y / 9.0, wave * 3.1 + 3.0));
+  // (Faded to its average where finer than the pixels.)
+  float pxs = max(length(seaJ.xy), length(seaJ.zw));
+  float lace = mix(0.5, smoothstep(0.25, 0.75, seaNoise(q / 1.3 + 9.0) * 0.6 + 0.4 * seaNoise(q / 4.0)), 1.0 - smoothstep(0.3, 1.2, pxs));
+  float inZone = 1.0 - smoothstep(surfW * 0.6, surfW + 30.0, d);
+  float crest = smoothstep(0.93 - 0.1 * along, 0.99, line) * smoothstep(0.25, 0.6, along);
+  float trail = smoothstep(0.1, 0.9, line) * (0.15 + 0.4 * along) * lace;
+  float brk = max(crest, trail) * inZone;
+  float swash = (1.0 - smoothstep(2.0, 10.0 + 0.1 * surfW, d)) * (0.6 + 0.4 * lace);
+  float zone = 0.22 * (1.0 - smoothstep(surfW * 0.3, surfW, d)) * lace;
+  surf = clamp(max(max(brk, zone), swash * 0.85) * (0.6 + 0.4 * smoothstep(0.3, 1.2, uSea3.x + uSea3.y * vShore.z)), 0.0, 1.0);
+}
+gSeaFoam = max(gSeaFoam, surf);
+diffuseColor.rgb = mix(col * gSeaBody, vec3(0.78, 0.8, 0.8), gSeaFoam);
+diffuseColor.a = 1.0;`,
+        )
+        .replace(
+          '#include <roughnessmap_fragment>',
+          `#include <roughnessmap_fragment>
+roughnessFactor = mix(gSeaRough, 0.9, gSeaFoam);`,
+        )
+        .replace(
+          '#include <normal_fragment_maps>',
+          `#include <normal_fragment_maps>
+normal = normalize((viewMatrix * vec4(mix(gSeaNormal, normalize(vSeaRel - uSeaCentre), 0.6 * gSeaFoam), 0.0)).xyz);`,
+        );
+    };
+    mat.customProgramCacheKey = () => 'sea-mesh-v1';
+    this.mesh = new THREE.Mesh(g, mat);
+    this.mesh.name = 'Sea';
+    this.mesh.frustumCulled = false;
+    this.mesh.receiveShadow = true;
+    this.mesh.visible = false;
+  }
+
+  /**
+   * Each frame, before rendering. cam: the camera (world, float64); centre: the Earth's centre
+   * (world); up / east / north: the local axes under the camera; alt: the camera's height over
+   * the sea (m); waterLevel: the sea's height above the ellipsoid (m); groundAt(h): the point
+   * under the camera at that height (world); groups: what the maps are drawn from.
+   */
+  update(
+    renderer: THREE.WebGLRenderer,
+    cam: V3,
+    alt: number,
+    up: THREE.Vector3,
+    east: THREE.Vector3,
+    north: THREE.Vector3,
+    ground: V3,
+    on: boolean,
+    terrain: { group: THREE.Group; waterLevelWorld: number } | null,
+    globe: THREE.Group,
+  ): void {
+    this.frame++;
+    const u = this.uniforms;
+    const show = on && alt < MAX_ALT;
+    this.mesh.visible = show;
+    u.uCamW.value.set(cam[0], cam[1], cam[2]);
+    if (!show) {
+      u.uMaskNC.value.w = 0;
+      u.uMaskFC.value.w = 0;
+      this.near.valid = this.far.valid = false;
+      return;
+    }
+    // The disc: under the camera, at sea level, out past the horizon.
+    const h = Math.max(1, alt);
+    const horizon = Math.sqrt(2 * 6.371e6 * h + h * h);
+    const outer = Math.min(400e3, Math.max(12e3, 1.4 * horizon));
+    u.uRing.value.set(Math.max(0.3, 0.004 * h), outer, 1 / (2 * 6.371e6), h);
+    this.mesh.position.set(ground[0] - cam[0], ground[1] - cam[1], ground[2] - cam[2]);
+    this.m.makeBasis(east, up, this.v.copy(north).negate());
+    this.mesh.quaternion.setFromRotationMatrix(this.m);
+    this.mesh.updateMatrixWorld();
+    u.uToLocal.value.setFromMatrix4(this.m).transpose();
+
+    // The maps: redrawn now and then (tiles stream in), and when the camera's moved on.
+    if (terrain) TERRAIN_MASK.uniforms.uWL.value = terrain.waterLevelWorld;
+    const moved = (mk: SeaMask, frac: number) => Math.hypot(ground[0] - mk.centre[0], ground[1] - mk.centre[1], ground[2] - mk.centre[2]) > mk.half * frac;
+    if (!this.near.valid || this.frame - this.near.at > 15 || moved(this.near, 0.15)) this.draw(renderer, this.near, NEAR_HALF, cam, ground, up, east, north, terrain, globe);
+    else if (!this.far.valid || this.frame - this.far.at > 90 || moved(this.far, 0.1) || Math.abs(this.far.half - outer) > 0.3 * outer) {
+      this.draw(renderer, this.far, outer, cam, ground, up, east, north, terrain, globe);
+    }
+    for (const [mk, C, E, N, I] of [
+      [this.near, u.uMaskNC, u.uMaskNE, u.uMaskNN, u.uMaskNI],
+      [this.far, u.uMaskFC, u.uMaskFE, u.uMaskFN, u.uMaskFI],
+    ] as const) {
+      C.value.set(mk.centre[0] - cam[0], mk.centre[1] - cam[1], mk.centre[2] - cam[2], mk.valid ? 1 : 0);
+      E.value.copy(mk.E);
+      N.value.copy(mk.N);
+      I.value = 1 / mk.half;
+    }
+  }
+
+  private draw(
+    renderer: THREE.WebGLRenderer,
+    mk: SeaMask,
+    half: number,
+    cam: V3,
+    ground: V3,
+    up: THREE.Vector3,
+    east: THREE.Vector3,
+    north: THREE.Vector3,
+    terrain: { group: THREE.Group } | null,
+    globe: THREE.Group,
+  ): void {
+    mk.centre = [...ground] as V3;
+    mk.E.copy(east);
+    mk.N.copy(north);
+    mk.half = half;
+    mk.at = this.frame;
+    mk.valid = true;
+    const c = mk.cam;
+    c.left = -half;
+    c.right = half;
+    c.top = half;
+    c.bottom = -half;
+    c.near = 1;
+    c.far = 4e5;
+    c.position.set(ground[0] - cam[0] + up.x * 2e5, ground[1] - cam[1] + up.y * 2e5, ground[2] - cam[2] + up.z * 2e5);
+    c.up.copy(north);
+    c.lookAt(ground[0] - cam[0], ground[1] - cam[1], ground[2] - cam[2]);
+    c.updateProjectionMatrix();
+    c.updateMatrixWorld();
+
+    const prevTarget = renderer.getRenderTarget();
+    const prevAuto = renderer.autoClear;
+    const prevShadows = renderer.shadowMap.enabled;
+    const prevColor = renderer.getClearColor(new THREE.Color());
+    const prevAlpha = renderer.getClearAlpha();
+    renderer.shadowMap.enabled = false;
+    renderer.autoClear = false;
+    renderer.setRenderTarget(mk.rt);
+    // (Nothing drawn: taken as sea.)
+    renderer.setClearColor(0xffffff, 1);
+    renderer.clear(true, false, false);
+    const swap = (grp: THREE.Group, pick: (m: THREE.Mesh) => THREE.Material) => {
+      const saved: [THREE.Mesh, THREE.Material | THREE.Material[]][] = [];
+      for (const o of grp.children) {
+        const m = o as THREE.Mesh;
+        if (!m.isMesh || !m.visible) continue;
+        saved.push([m, m.material]);
+        m.material = pick(m);
+      }
+      renderer.render(grp, c);
+      for (const [m, mat] of saved) m.material = mat;
+    };
+    swap(globe, (m) => {
+      const ud = m.userData as { seaMask?: THREE.ShaderMaterial };
+      const map = (m.material as THREE.MeshStandardMaterial).map;
+      if (!ud.seaMask && map) ud.seaMask = globeMask(map);
+      return ud.seaMask ?? TERRAIN_MASK;
+    });
+    if (terrain) swap(terrain.group, () => TERRAIN_MASK);
+    renderer.setRenderTarget(prevTarget);
+    renderer.autoClear = prevAuto;
+    renderer.shadowMap.enabled = prevShadows;
+    renderer.setClearColor(prevColor, prevAlpha);
+  }
+}
