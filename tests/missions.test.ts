@@ -142,3 +142,12 @@ describe('missions and scoring', () => {
     expect(result!.total).toBeGreaterThan(850);
   });
 });
+
+describe('missions by name', () => {
+  it('knows which names it has (a saved flight from another version may name one that is gone)', async () => {
+    const { hasMission, MISSIONS } = await import('../src/game/missions');
+    for (const m of MISSIONS) expect(hasMission(m.id), m.id).toBe(true);
+    expect(hasMission('moonbase')).toBe(false);
+    expect(hasMission('')).toBe(false);
+  });
+});

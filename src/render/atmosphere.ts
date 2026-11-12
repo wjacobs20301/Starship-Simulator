@@ -486,9 +486,10 @@ const CLOUD_GLSL = /* glsl */ `
     // (Cumulus only a quarter: at half and more, the clusters filled in solid, kilometres of
     // merged cloud with clear sky between, a broken overcast rather than a field of cumulus.)
     float maskK = detail * mix(0.85, 0.25, smoothstep(0.6, 0.95, a.w));
-    // (Half as much with the whole Earth in view: all cloud or none in pieces a few pixels
-    // across, the planet was camouflage, worst toward the poles and the terminator.)
-    maskK *= mix(1.0, 0.5, smoothstep(1.0, 2.2, lodM));
+    // (A fifth as much with the whole Earth in view: all cloud or none in pieces a few pixels
+    // across, the planet was camouflage, worst toward the poles and the terminator. (At half,
+    // still: a cold sector's cumulus behind a front, grey and white jigsaw pieces.))
+    maskK *= mix(1.0, 0.22, smoothstep(0.9, 1.9, lodM));
     // (Edges crisp close up, softer once the finest breakup is below a pixel: from far off a
     // cloud field's edge frays over many pixels, not a cut line.)
     // (Softer again once the cells themselves are only a few pixels across, the whole Earth in
@@ -1201,6 +1202,12 @@ const CLOUD_GLSL = /* glsl */ `
           gDetT = dIn / uPixAng;
           float skip;
           float dens = marchDensity(ro, rd, t, w, pw, skip);
+          // (Half steps within ~75 m of a cloud's surface, either side of it, and counted as
+          // half: a cloud's thin edge, seen at a slant, is shallower than a whole step, which
+          // landed in it from one pixel and stepped over it from the next (each pixel starts at
+          // its own offset), each hit drawn as a step's worth of cloud: a fringe of dots and
+          // hatching round every cumulus a few km off.)
+          float dS = abs(gMargin) < 0.06 ? 0.5 * dIn : dIn;
           if (dens > 0.002 && !inCloud) {
             // Into cloud: its surface, between the last (clear) sample and this one.
             float lo2 = tS;
@@ -1215,7 +1222,7 @@ const CLOUD_GLSL = /* glsl */ `
             sunHave = false;
             clearRun = 0;
             tS = lo2;
-            t = lo2 + 0.5 * dIn;
+            t = lo2 + 0.25 * dIn;
             continue;
           }
           if (inCloud) {
@@ -1343,7 +1350,7 @@ const CLOUD_GLSL = /* glsl */ `
             // (Only the last couple of hundred metres: a cloud just under or beside the camera
             // stays crisp.)
             float nearK = smoothstep(20.0, 250.0, t);
-            float a = 1.0 - exp(-SIGMA * 2.5 * dens * dIn * nearK);
+            float a = 1.0 - exp(-SIGMA * 2.5 * dens * dS * nearK);
             C += T * a * S;
             tw += t * T * a;
             sw += T * a;
@@ -1356,7 +1363,7 @@ const CLOUD_GLSL = /* glsl */ `
           // (Two bands: within ~150 m of a surface, a quarter step; within ~300 m, half: a cloud's
           // thin edge seen at a slant was caught by every other pixel along a long step, in
           // diagonal hatching.)
-          t += inCloud || gMargin > -0.12 ? dIn : gMargin > -0.25 ? 2.0 * dIn : max(clearStep(t, muv), skip);
+          t += inCloud || gMargin > -0.12 ? dS : gMargin > -0.25 ? 2.0 * dIn : max(clearStep(t, muv), skip);
           tMarch = min(t, tB);
         }
         low = vec4(C, T);

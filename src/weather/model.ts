@@ -191,6 +191,28 @@ export class Land {
         this.coast[j * CW + i] = best * (1 - coarse[j * CW + i]);
       }
     }
+    // (Each row was searched along itself only: where one row's search ran through a strait and
+    // its neighbours' met land (25 N through the Florida Straits, 27 N and 23 N meeting Florida
+    // and Cuba), that row came out empty between two full ones, and the decks this makes had a
+    // dead straight clear lane a thousand km long down the middle of the Gulf. Spread over the
+    // rows either side, and a little along each.)
+    const raw = this.coast.slice();
+    const KJ = [1, 2, 3, 2, 1];
+    for (let j = 0; j < CH; j++) for (let i = 0; i < CW; i++) {
+      let v = 0;
+      let n = 0;
+      for (let b = -2; b <= 2; b++) {
+        const jj = j + b;
+        if (jj < 0 || jj >= CH) continue;
+        for (let a = -1; a <= 1; a++) {
+          const w = KJ[b + 2] * (a === 0 ? 2 : 1);
+          v += w * raw[jj * CW + ((i + a + CW) % CW)];
+          n += w;
+        }
+      }
+      // (Still none of it over land.)
+      this.coast[j * CW + i] = (v / n) * (1 - coarse[j * CW + i]);
+    }
   }
 
   /** Land fraction 0..1 (bilinear). */
@@ -216,6 +238,67 @@ export class Land {
     const a = f[y0 * 180 + i0] + (f[y0 * 180 + i1] - f[y0 * 180 + i0]) * fx;
     const b = f[(y0 + 1) * 180 + i0] + (f[(y0 + 1) * 180 + i1] - f[(y0 + 1) * 180 + i0]) * fx;
     return a + (b - a) * fy;
+  }
+
+  /**
+   * Land fraction smoothed over ~150 km (the same in km at every latitude), for the clouds'
+   * climate: the sea's cumulus and the land's don't change over at the shoreline's own grid cell.
+   * (At the grid's own sharpness a slanting coast was a staircase of 50 km steps in the cloud,
+   * plain on the map.)
+   */
+  soft(lat: number, lon: number): number {
+    const f = (this.softened ??= this.soften());
+    const W = Land.W, H = Land.H;
+    const x = ((lon + 180) / 360) * W - 0.5;
+    const y = ((90 - lat) / 180) * H - 0.5;
+    const x0 = Math.floor(x), y0 = Math.max(0, Math.min(H - 2, Math.floor(y)));
+    const fx = x - x0, fy = Math.min(1, Math.max(0, y - y0));
+    const i0 = ((x0 % W) + W) % W, i1 = (i0 + 1) % W;
+    const a = f[y0 * W + i0] + (f[y0 * W + i1] - f[y0 * W + i0]) * fx;
+    const b = f[(y0 + 1) * W + i0] + (f[(y0 + 1) * W + i1] - f[(y0 + 1) * W + i0]) * fx;
+    return a + (b - a) * fy;
+  }
+
+  private softened: Float32Array | null = null;
+  /** (Made when first asked for: 1 2 3 2 1 across five rows, the same reach in km along each.) */
+  private soften(): Float32Array {
+    const W = Land.W, H = Land.H;
+    const d = this.data;
+    const rows = new Float32Array(W * H);
+    for (let j = 0; j < H; j++) {
+      const lat = 90 - ((j + 0.5) * 180) / H;
+      // (Cells of longitude to reach as far as two of latitude; near the poles, the whole row.)
+      const r = Math.min(W / 2 - 1, Math.max(2, Math.round(2 / Math.max(0.01, Math.cos(lat * DEG)))));
+      // (A triangle of weights r + 1 wide each side, as a box blurred twice: running sums.)
+      const box = new Float32Array(W);
+      const half = Math.floor(r / 2), other = r - half;
+      let sum = 0;
+      for (let a = -half; a <= other; a++) sum += d[j * W + ((a + W) % W)];
+      for (let i = 0; i < W; i++) {
+        box[i] = sum / (r + 1);
+        sum += d[j * W + ((i + other + 1) % W)] - d[j * W + ((i - half + W) % W)];
+      }
+      sum = 0;
+      for (let a = -other; a <= half; a++) sum += box[(a + W) % W];
+      for (let i = 0; i < W; i++) {
+        rows[j * W + i] = sum / (r + 1) / 255;
+        sum += box[(i + half + 1) % W] - box[(i - other + W) % W];
+      }
+    }
+    const out = new Float32Array(W * H);
+    const K = [1, 2, 3, 2, 1];
+    for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
+      let v = 0;
+      let n = 0;
+      for (let b = -2; b <= 2; b++) {
+        const jj = j + b;
+        if (jj < 0 || jj >= H) continue;
+        v += K[b + 2] * rows[jj * W + i];
+        n += K[b + 2];
+      }
+      out[j * W + i] = v / n;
+    }
+    return out;
   }
 
   /** Land fraction smoothed over ~1000 km. */
@@ -623,7 +706,8 @@ export class WeatherModel {
     const add = this.add;
 
     const n = unit(lat, lon);
-    const L = this.landFrac(lat, lon);
+    // (The land softened over ~150 km, not the grid's own cell: see Land.soft.)
+    const L = this.land ? this.land.soft(lat, lon) : 0;
     const al = Math.abs(lat);
     const sF = this.summer(lat);
     const season = this.cfg.season;
@@ -813,8 +897,11 @@ export class WeatherModel {
     if (kind === 'low' ? r0 > 4.1 : kind === 'tc' ? r0 > 1.05 : r0 > 2.1 * Math.max(st.s.ax, st.s.ay)) return;
     const nz = this.noise2;
     // Each system its own shape: the frame warped a little.
-    const wx = 0.16 * nz.get(X0 * 1.3 + st.ox, Y0 * 1.3, st.oy);
-    const wy = 0.16 * nz.get(X0 * 1.3, Y0 * 1.3 + st.oy, st.ox);
+    // (And again, finer: on the one broad warp alone, a front's shield and bands kept edges
+    // straight for a thousand km, a box of cloud from orbit. Not a cyclone's: its eye stays round.)
+    const fineW = kind === 'tc' ? 0 : 0.075;
+    const wx = 0.16 * nz.get(X0 * 1.3 + st.ox, Y0 * 1.3, st.oy) + fineW * nz.get(X0 * 3.7 + st.oy, Y0 * 3.7, st.ox + 11.3);
+    const wy = 0.16 * nz.get(X0 * 1.3, Y0 * 1.3 + st.oy, st.ox) + fineW * nz.get(X0 * 3.7, Y0 * 3.7 + st.ox, st.oy + 5.9);
     // (Turned and stretched: no two alike.)
     const X = ((X0 + wx) * st.rc + (Y0 + wy) * st.rs) / st.sx;
     const Y = -(X0 + wx) * st.rs + (Y0 + wy) * st.rc;
@@ -832,7 +919,10 @@ export class WeatherModel {
         const tp = (((th + 0.35) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
         const thMax = 3.2 + 1.5 * oc;
         const rs = 0.9 * Math.exp(-0.2 * tp);
-        const head = smooth(rs + 0.14, rs - 0.1, r) * smooth(thMax + 0.2, thMax - 0.45, tp) + smooth(0.16, 0.05, r) * 0.8;
+        // (Its start, where the angle wraps, faded in over half a radian, raggedly: cut there, the
+        // head began at a ruler-straight edge from the centre out, a notch plain from orbit.)
+        const begin = smooth(0, 0.5, tp + 0.9 * (tex - 1));
+        const head = smooth(rs + 0.14, rs - 0.1, r) * smooth(thMax + 0.2, thMax - 0.45, tp) * begin + smooth(0.16, 0.05, r) * 0.8;
         // Warm front: from the triple point east-southeast; the cloud shield poleward of it.
         const yW = ty - 0.22 * (X - tx);
         const shield = smooth(yW - 0.06, yW + 0.2, Y) * smooth(1.2, 0.7, Y - 0.15 * X) * smooth(2.5 + 0.3 * a, 1.6, X) * smooth(-0.15, 0.3, X);
@@ -860,7 +950,8 @@ export class WeatherModel {
         const behind = !ahead;
         const dry = behind ? smooth(1.6, 0.9, r) * (1 - head) : 0;
         // Warm sector: ahead of the cold front, south of the warm front.
-        const warmSec = ahead && Y < yW ? smooth(2.6, 1.8, r) * smooth(3.9, 3.0, r0) * smooth(0.1, 0.35, d) : 0;
+        // (Thinning out toward the warm front, where the shield takes over: not cut off at it.)
+        const warmSec = ahead ? smooth(2.6, 1.8, r) * smooth(3.9, 3.0, r0) * smooth(0.1, 0.35, d) * smooth(yW + 0.04, yW - 0.18, Y) : 0;
         // Cold air behind the front, over the ocean: open-cell cumulus.
         const coldSec = behind ? smooth(0.15, 0.45, d) * smooth(3.3, 2.3, r) * smooth(3.9, 3.0, r0) * smooth(0.6, 1.2, r) * (1 - 0.75 * L) : 0;
         add(head * 0.97 * a * tex, 650, 7500 - 2500 * smooth(0, thMax, tp), 0.12, 0.5, head * 0.55 * a, head * 0.6 * a);

@@ -428,6 +428,9 @@ export const MISSIONS: MissionDef[] = [
 
 export const missionById = (id: MissionId): MissionDef => MISSIONS.find((m) => m.id === id) ?? MISSIONS[MISSIONS.length - 1];
 
+/** Whether this version of the game has a mission by that name (a saved flight's may be gone). */
+export const hasMission = (id: string): id is MissionId => MISSIONS.some((m) => m.id === id);
+
 export function grade(score: number): string {
   return score >= 900 ? 'S' : score >= 750 ? 'A' : score >= 550 ? 'B' : score >= 350 ? 'C' : 'D';
 }

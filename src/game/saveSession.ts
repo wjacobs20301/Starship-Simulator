@@ -5,7 +5,7 @@
 
 import type { SaveReply, ToWorker } from '../worker/protocol';
 import { type FlightSave, type FlightSaveContent, type SaveEntry, browserStore, deleteSave, listSaves, markUnusable, readSave, writeAutosave, writeManualSave } from './savedFlight';
-import { type MissionDef, missionById } from './missions';
+import { type MissionDef, hasMission, missionById } from './missions';
 
 /** The page's side of a save: everything but the flight itself and its clock. */
 export type SaveMeta = Omit<FlightSaveContent, 'missionTime' | 'flight'>;
@@ -118,6 +118,8 @@ export function createSaveSession(deps: SaveSessionDeps): SaveSession {
       if (loadingSave) markUnusable(saveStore, loadingSave, m.reason.replace(/^Can't load the flight: /, ''));
       loadingSave = null;
       deps.showToast('That saved flight can’t be continued in this version');
+      // (Off only for the menu's own save on the way out, which would put this half-taken-up
+      // flight over the autosave: the menu's new flight turns it on again, newFlight.)
       saveOff = true;
       adoptPilot = false;
       deps.openMainMenu('saves');
@@ -133,15 +135,15 @@ export function createSaveSession(deps: SaveSessionDeps): SaveSession {
       return;
     }
     const s = r.save;
-    let mission;
-    try {
-      mission = missionById(s.mission);
-    } catch {
+    // (missionById answers an unknown name with another mission: the flight would come up scored
+    // as something it never was.)
+    if (!hasMission(s.mission)) {
       markUnusable(saveStore, id, 'its mission isn’t in this version of the game');
       deps.showToast('That saved flight can’t be continued');
       deps.savesChanged();
       return;
     }
+    const mission = missionById(s.mission);
     // (The world set up for it, and the flight sent to the worker: main.ts.)
     deps.takeUp(s, mission);
     loadingSave = id;

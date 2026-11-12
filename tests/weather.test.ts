@@ -165,3 +165,50 @@ describe('global weather model', () => {
     expect(Math.hypot(...m.wind(SITE.lat, SITE.lon, 120e3, 0))).toBe(0);
   });
 });
+
+describe('the land, softened for the clouds', () => {
+  it('is the land fraction far from a shore, and crosses a shore over a few cells, not one', () => {
+    // Mid-Pacific, mid-Sahara: as the grid has them.
+    expect(land.soft(0, -140)).toBeCloseTo(0, 3);
+    expect(land.soft(23, 10)).toBeCloseTo(1, 3);
+    // Across the Gulf coast of Mexico (sea to land, east to west at 22 N): the grid steps by half
+    // the way in one cell; softened, by a good deal less in any one.
+    let sharp = 0;
+    let soft = 0;
+    for (let lon = -94; lon > -101; lon -= 0.5) {
+      sharp = Math.max(sharp, Math.abs(land.frac(22, lon) - land.frac(22, lon - 0.5)));
+      soft = Math.max(soft, Math.abs(land.soft(22, lon) - land.soft(22, lon - 0.5)));
+    }
+    expect(sharp).toBeGreaterThan(0.4);
+    expect(soft).toBeLessThan(0.6 * sharp);
+    // The same reach in km near the pole as at the equator: no streaks along the meridians.
+    let jump = 0;
+    for (let lon = -180; lon < 180; lon += 0.5) jump = Math.max(jump, Math.abs(land.soft(84, lon) - land.soft(84, lon + 0.5)));
+    expect(jump).toBeLessThan(0.1);
+    // And as much land as there was (to a percent, along a parallel).
+    let a = 0;
+    let b = 0;
+    for (let lon = -180; lon < 180; lon += 0.5) {
+      a += land.frac(40, lon);
+      b += land.soft(40, lon);
+    }
+    expect(b / a).toBeGreaterThan(0.93);
+    expect(b / a).toBeLessThan(1.07);
+  });
+});
+
+describe('the cold-ocean index', () => {
+  it('has no empty row between two full ones (the Gulf at 25 N, between 27 N and 23 N)', () => {
+    for (const lon of [-94, -92, -90, -88]) {
+      const a = land.coldOcean(27, lon);
+      const b = land.coldOcean(25, lon);
+      const c = land.coldOcean(23, lon);
+      expect(Math.min(a, c), `lon ${lon}`).toBeGreaterThan(0.05);
+      expect(b, `lon ${lon}`).toBeGreaterThan(0.6 * Math.min(a, c));
+    }
+    // Still where it belongs: off California and Peru, not in mid-ocean.
+    expect(land.coldOcean(30, -120)).toBeGreaterThan(0.3);
+    expect(land.coldOcean(-15, -80)).toBeGreaterThan(0.3);
+    expect(land.coldOcean(0, -150)).toBeLessThan(0.02);
+  });
+});
