@@ -1439,6 +1439,7 @@ const fragment = /* glsl */ `
   uniform sampler2D tCloudTex;   // the cloud pass: light and transmittance
   uniform sampler2D tCloudDist;  // and the clouds' distance, km
   uniform vec2 uCloudTexel;      // the half-resolution pass's texel, uv
+  uniform vec2 uFullSize;        // the clouds' own resolution (the screen's or less)
   uniform float uLocalSun;       // the scene's sunlight already dimmed by cloud over the camera, 0..1
   uniform float uHazeMin;        // the fewest steps the haze takes along a ray (the shortest)
   uniform sampler2D tNear;       // the near solids (vehicles, the pad, buildings): premultiplied, alpha = coverage
@@ -1523,6 +1524,31 @@ const fragment = /* glsl */ `
     z.sumMN += att * hm * behind * fN;
   }
 
+  // The clouds at uv, scaled up to the screen's resolution from their own (often 1.6 to 2.5
+  // times coarser) with a Catmull-Rom filter (five bilinear taps), not bilinear alone: that blurs
+  // every edge over two of the clouds' pixels, four or five of the screen's.
+  vec4 cloudTexAt(vec2 uv) {
+    vec2 sp = uv * uFullSize;
+    vec2 tc = floor(sp - 0.5) + 0.5;
+    vec2 f = sp - tc;
+    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    vec2 w3 = f * f * (-0.5 + 0.5 * f);
+    vec2 w12 = w1 + w2;
+    vec2 t0 = (tc - 1.0) / uFullSize;
+    vec2 t3 = (tc + 2.0) / uFullSize;
+    vec2 t12 = (tc + w2 / w12) / uFullSize;
+    vec4 mid = texture2D(tCloudTex, t12);
+    vec4 r = texture2D(tCloudTex, vec2(t12.x, t0.y)) * (w12.x * w0.y) + texture2D(tCloudTex, vec2(t0.x, t12.y)) * (w0.x * w12.y)
+           + mid * (w12.x * w12.y) + texture2D(tCloudTex, vec2(t3.x, t12.y)) * (w3.x * w12.y)
+           + texture2D(tCloudTex, vec2(t12.x, t3.y)) * (w12.x * w3.y);
+    r /= w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+    // (The filter overshoots at an edge: held to no brighter than half again of what's there,
+    // nor under nothing, so a cloud's edge gets no bright or dark line drawn along it.)
+    return vec4(clamp(r.rgb, vec3(0.0), mid.rgb * 1.5 + 0.02), clamp(r.a, 0.0, 1.0));
+  }
+
   void main() {
     vec4 col = texture2D(tColor, vUv);
     vec3 ro;
@@ -1572,7 +1598,7 @@ const fragment = /* glsl */ `
     float tCloud = 1e30;
     vec4 cl = vec4(0.0, 0.0, 0.0, 1.0);
     if (uClouds > 0.5) {
-      vec4 c4 = texture2D(tCloudTex, vUv);
+      vec4 c4 = cloudTexAt(vUv);
       // (The clouds' distance from the half-resolution pass: the nearest of the four around, so
       // at a cloud's edge it's the cloud's, not a blend with the sky's "none" behind it that
       // changes from frame to frame, and the haze in front of the edge with it.)
@@ -1824,13 +1850,19 @@ const resolveFragment = /* glsl */ `
         hi = max(hi, c);
       }
     }
-    vec2 uvHalf = ((vec2(px) - uSub) * 0.5 + 0.5) / uHalfSize;
+    vec2 hp = (vec2(px) - uSub) * 0.5;
+    vec2 uvHalf = (hp + 0.5) / uHalfSize;
     vec4 cur = texture(tCur, uvHalf);
     // Where this pixel's clouds were on screen last frame.
     vec2 uv = (vec2(px) + 0.5) / uFullSize;
     vec3 viewDir = normalize(vec3((uv * 2.0 - 1.0 + uProjOff) * uTanHalf, -1.0));
     vec3 rd = normalize((uCamWorld * vec4(viewDir, 0.0)).xyz);
-    float d = texture(tCurDist, uvHalf).r * 1000.0;
+    // (By the nearest of the four samples round it, not their blend: at a cloud's edge the blend
+    // is somewhere between the cloud and the sky or sea far behind it, the place of neither, and
+    // the edge was put back where it wasn't: in flight, every edge a staircase of stale blocks.)
+    ivec2 i0 = ivec2(floor(hp));
+    float d = 1000.0 * min(min(texelFetch(tCurDist, clamp(i0, ivec2(0), hMax), 0).r, texelFetch(tCurDist, clamp(i0 + ivec2(1, 0), ivec2(0), hMax), 0).r),
+                           min(texelFetch(tCurDist, clamp(i0 + ivec2(0, 1), ivec2(0), hMax), 0).r, texelFetch(tCurDist, clamp(i0 + ivec2(1, 1), ivec2(0), hMax), 0).r));
     vec3 v = uPrevView * (rd * d + uCamMove);
     vec2 uvPrev = ((v.xy / max(-v.z, 1e-6)) / uPrevTanHalf - uPrevProjOff) * 0.5 + 0.5;
     bool ok = uHistOk > 0.5 && v.z < 0.0 && all(greaterThanEqual(uvPrev, vec2(0.0))) && all(lessThanEqual(uvPrev, vec2(1.0)));
@@ -1838,9 +1870,19 @@ const resolveFragment = /* glsl */ `
       outColor = fresh ? here : cur;
       return;
     }
-    vec4 hist = clamp(histAt(uvPrev), lo, hi);
+    vec4 h0 = histAt(uvPrev);
+    vec4 hist = clamp(h0, lo, hi);
+    // How wrong the history was here (how far outside this frame's samples): where it was, this
+    // frame's samples blended smoothly, not the history cut down to their range: that range is
+    // one value per 2x2 block, and a moving cloud's edge came out in blocks.
+    vec4 dv = abs(h0 - hist);
+    float bad = smoothstep(0.03, 0.2, max(max(dv.r, max(dv.g, dv.b)) / (max(hi.r, max(hi.g, hi.b)) + 0.05), dv.a));
+    // (And as the camera moves past the clouds, a little of this frame's every frame: a cloud has
+    // no one distance, so its history drifts off by a fraction of a pixel a frame, and adds up.)
+    float par = length(uCamMove) / max(d, 1.0) * uFullSize.y / (2.0 * uTanHalf.y);
+    float fade = max(bad, 0.15 * smoothstep(0.5, 4.0, par));
     // (A pixel's new sample blended in, not swapped: steadier.)
-    outColor = fresh ? mix(hist, here, 0.2) : hist;
+    outColor = fresh ? mix(hist, here, max(0.2, fade)) : mix(hist, cur, fade);
   }
 `;
 

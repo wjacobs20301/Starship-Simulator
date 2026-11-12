@@ -7,12 +7,12 @@ import * as THREE from 'three';
 import { DEG } from '../sim/constants';
 import type { V3 } from '../sim/math';
 import type { FloatingOrigin } from './floatingOrigin';
-import { ecefToWorld, tileXToLon, tileYToLat, toWorld } from './geo';
+import { ecefToWorld, horizonDistance, tileXToLon, tileYToLat, toWorld } from './geo';
 import { SEA_GLSL, bindSea, sea } from './ocean';
 
 const BASE = `${import.meta.env.BASE_URL}globe/tiles/`;
 const SINK_M = -40;
-const MAX_TILES = 500;
+const MAX_TILES = 400;
 const MAX_LOADS = 8;
 const SPLIT_PIXELS = 256 * 1.2;
 const EARTH_CENTER = ecefToWorld([0, 0, 0]);
@@ -63,6 +63,8 @@ class GlobeTile {
   state: 'idle' | 'loading' | 'ready' | 'failed' = 'idle';
   children: GlobeTile[] | null = null;
   lastUsed = 0;
+  /** The last frame it was in the camera's view (lastUsed: wanted, in view or not). */
+  lastSeen = 0;
   center: V3;
   radius: number;
   size: number;
@@ -107,18 +109,28 @@ export class GlobeTiles {
     this.projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     this.frustum.setFromProjectionMatrix(this.projView);
     const focal = this.renderer.domElement.clientHeight / 2 / Math.tan((camera.fov * DEG) / 2);
+    // The Earth all round the camera, out to its horizon, at the detail its distance calls for,
+    // whichever way the camera looks: only those in view are drawn, the rest loaded and ready for
+    // when it turns. (Only what was in view, each turn showed the sea and land coarse first.)
+    // (And past the horizon a way: mountains stand up over it.)
+    const reach = horizonDistance(cam) + 250e3;
     const visible: GlobeTile[] = [];
     const sphere = new THREE.Sphere();
     const visit = (t: GlobeTile) => {
       sphere.center.set(t.center[0] - cam[0], t.center[1] - cam[1], t.center[2] - cam[2]);
       sphere.radius = t.radius;
-      if (!this.frustum.intersectsSphere(sphere)) return;
-      t.lastUsed = this.frame;
       const dist = Math.max(1, sphere.center.length() - t.radius);
-      if ((t.size / dist) * focal > SPLIT_PIXELS && t.z < this.maxZoom) {
+      const seen = this.frustum.intersectsSphere(sphere);
+      // (Over the horizon: in view, as coarse as it is, out of sight; out of view, left alone.)
+      const beyond = dist > reach;
+      if (!seen && beyond) return;
+      t.lastUsed = this.frame;
+      if (seen) t.lastSeen = this.frame;
+      if (!beyond && (t.size / dist) * focal > SPLIT_PIXELS && t.z < this.maxZoom) {
         const kids = this.childrenOf(t);
         kids.forEach((k) => {
           k.lastUsed = this.frame;
+          if (seen) k.lastSeen = this.frame;
           this.request(k);
         });
         if (kids.every((k) => k.state === 'ready' || k.state === 'failed')) {
@@ -131,12 +143,25 @@ export class GlobeTiles {
     };
     visit(this.root);
     for (const t of this.tiles.values()) if (t.mesh) t.mesh.visible = false;
+    this.around.length = 0;
     for (const t of visible) {
-      t.mesh!.visible = true;
+      t.mesh!.visible = t.lastSeen === this.frame;
       this.origin.place(t.mesh!, t.center);
+      this.around.push(t.mesh!);
     }
     this.pump(cam);
     this.evict();
+  }
+
+  /** The tiles round the camera at the detail they're seen at, in view or not. */
+  private around: THREE.Mesh[] = [];
+
+  /** Draw with all of them shown, not only those in view (the sea's map: oceanSurface.ts). */
+  withAllShown(draw: () => void): void {
+    const was = this.around.map((m) => m.visible);
+    for (const m of this.around) m.visible = true;
+    draw();
+    this.around.forEach((m, i) => (m.visible = was[i]));
   }
 
   private childrenOf(t: GlobeTile): GlobeTile[] {
@@ -160,8 +185,11 @@ export class GlobeTiles {
   private pump(cam: V3): void {
     this.queue = this.queue.filter((t) => t.state === 'idle' && t.lastUsed >= this.frame - 1);
     const d = (t: GlobeTile) => (t.center[0] - cam[0]) ** 2 + (t.center[1] - cam[1]) ** 2 + (t.center[2] - cam[2]) ** 2;
-    this.queue.sort((a, b) => a.z - b.z || d(a) - d(b));
+    // (What's in view first.)
+    const unseen = (t: GlobeTile) => (t.lastSeen >= this.frame - 1 ? 0 : 1);
+    this.queue.sort((a, b) => unseen(a) - unseen(b) || a.z - b.z || d(a) - d(b));
     while (this.loading < MAX_LOADS && this.queue.length) {
+      if (unseen(this.queue[0]) && this.loading >= 3) break;
       const t = this.queue.shift()!;
       t.state = 'loading';
       this.loading++;
@@ -173,9 +201,12 @@ export class GlobeTiles {
   }
 
   private evict(): void {
-    if (this.tiles.size < MAX_TILES) return;
-    const old = [...this.tiles.values()].filter((t) => t.mesh && t.z > 1 && t.lastUsed < this.frame - 60).sort((a, b) => a.lastUsed - b.lastUsed);
-    for (const t of old.slice(0, this.tiles.size - MAX_TILES + 50)) {
+    // (By the tiles built, not all those ever looked at.)
+    if (this.frame % 30) return;
+    const built = [...this.tiles.values()].filter((t) => t.mesh);
+    if (built.length <= MAX_TILES) return;
+    const old = built.filter((t) => t.z > 1 && t.lastUsed < this.frame - 60).sort((a, b) => a.lastUsed - b.lastUsed);
+    for (const t of old.slice(0, built.length - MAX_TILES + 50)) {
       const m = t.mesh!;
       this.group.remove(m);
       m.geometry.dispose();

@@ -29,6 +29,12 @@ const MAX_ALT = 6000;
 /** The detailed region (terrain.ts): its water is the terrain's out here (pad east / north, m). */
 const REGION_INNER = 80_000;
 
+/** Ground the sea's maps are drawn from: its tiles, and a way to draw with all of them shown. */
+interface SeaSource {
+  group: THREE.Group;
+  withAllShown(draw: () => void): void;
+}
+
 /** A map of the sea from above: 1 = water, 0 = land (R), mipmapped. */
 class SeaMask {
   readonly rt: THREE.WebGLRenderTarget;
@@ -378,8 +384,8 @@ normal = normalize((viewMatrix * vec4(mix(gSeaNormal, normalize(vSeaRel - uSeaCe
     north: THREE.Vector3,
     ground: V3,
     on: boolean,
-    terrain: { group: THREE.Group; waterLevelWorld: number } | null,
-    globe: THREE.Group,
+    terrain: (SeaSource & { waterLevelWorld: number }) | null,
+    globe: SeaSource,
     hulls: readonly { at: V3; r: number }[] = [],
   ): void {
     this.frame++;
@@ -436,8 +442,8 @@ normal = normalize((viewMatrix * vec4(mix(gSeaNormal, normalize(vSeaRel - uSeaCe
     up: THREE.Vector3,
     east: THREE.Vector3,
     north: THREE.Vector3,
-    terrain: { group: THREE.Group } | null,
-    globe: THREE.Group,
+    terrain: SeaSource | null,
+    globe: SeaSource,
   ): void {
     mk.centre = [...ground] as V3;
     mk.E.copy(east);
@@ -469,16 +475,21 @@ normal = normalize((viewMatrix * vec4(mix(gSeaNormal, normalize(vSeaRel - uSeaCe
     // (Nothing drawn: taken as sea.)
     renderer.setClearColor(0xffffff, 1);
     renderer.clear(true, false, false);
-    const swap = (grp: THREE.Group, pick: (m: THREE.Mesh) => THREE.Material) => {
-      const saved: [THREE.Mesh, THREE.Material | THREE.Material[]][] = [];
-      for (const o of grp.children) {
-        const m = o as THREE.Mesh;
-        if (!m.isMesh || !m.visible) continue;
-        saved.push([m, m.material]);
-        m.material = pick(m);
-      }
-      renderer.render(grp, c);
-      for (const [m, mat] of saved) m.material = mat;
+    // (All the ground round the camera, not only what it's looking at: the map is from above,
+    // and one drawn from what's in view had the land behind the camera down as sea until the
+    // next redraw after a turn: waves over it, then gone.)
+    const swap = (src: SeaSource, pick: (m: THREE.Mesh) => THREE.Material) => {
+      src.withAllShown(() => {
+        const saved: [THREE.Mesh, THREE.Material | THREE.Material[]][] = [];
+        for (const o of src.group.children) {
+          const m = o as THREE.Mesh;
+          if (!m.isMesh || !m.visible) continue;
+          saved.push([m, m.material]);
+          m.material = pick(m);
+        }
+        renderer.render(src.group, c);
+        for (const [m, mat] of saved) m.material = mat;
+      });
     };
     swap(globe, (m) => {
       const ud = m.userData as { seaMask?: THREE.ShaderMaterial };
@@ -486,7 +497,7 @@ normal = normalize((viewMatrix * vec4(mix(gSeaNormal, normalize(vSeaRel - uSeaCe
       if (!ud.seaMask && map) ud.seaMask = globeMask(map);
       return ud.seaMask ?? TERRAIN_MASK;
     });
-    if (terrain) swap(terrain.group, () => TERRAIN_MASK);
+    if (terrain) swap(terrain, () => TERRAIN_MASK);
     renderer.setRenderTarget(prevTarget);
     renderer.autoClear = prevAuto;
     renderer.shadowMap.enabled = prevShadows;

@@ -1642,7 +1642,7 @@ function frame(): void {
   sound.prune(simTime);
   const heard = sound.hear(simTime, cam);
   globeTiles.update(world.camera, cam);
-  terrain.update(world.camera, cam, now / 1000);
+  terrain.update(world.camera, cam, now / 1000, rig.mode === 'orbit' && !rig.map ? rig.distance : 0);
   framesDrawn++;
   if (menu.kind === 'main') warmPad();
   padRig?.update(snap.missionTime, snap.towers);
@@ -1708,7 +1708,7 @@ function frame(): void {
     sg.east.set(eastP[0] - ground[0], eastP[1] - ground[1], eastP[2] - ground[2]);
     sg.east.addScaledVector(sg.up, -sg.east.dot(sg.up)).normalize();
     sg.north.crossVectors(sg.up, sg.east);
-    oceanSurface.update(world.renderer, cam, g.h - wl, sg.up, sg.east, sg.north, ground, !rig.map && terrain.ready, terrain, globeTiles.group, afloatFx.hulls);
+    oceanSurface.update(world.renderer, cam, g.h - wl, sg.up, sg.east, sg.north, ground, !rig.map && terrain.ready, terrain, globeTiles, afloatFx.hulls);
   }
   audio.update(heard.level, heard.distance, Math.exp(-Math.max(0, camAlt) / 8500), paused);
   // Everything else you hear: wind, surf, air rush, tower machinery, deluge, venting.

@@ -10,7 +10,7 @@ import { TRENCHES } from './launchSite';
 import { DEG, PAD } from '../sim/constants';
 import type { V3 } from '../sim/math';
 import type { FloatingOrigin } from './floatingOrigin';
-import { M_PER_DEG_LAT, M_PER_DEG_LON, tileXToLon, tileYToLat, toWorld } from './geo';
+import { M_PER_DEG_LAT, M_PER_DEG_LON, horizonDistance, tileXToLon, tileYToLat, toWorld } from './geo';
 
 interface Range { x0: number; x1: number; y0: number; y1: number }
 interface TerrainIndex {
@@ -26,10 +26,13 @@ interface TerrainIndex {
 
 const BASE = `${import.meta.env.BASE_URL}terrain/`;
 const GRID = 33; // vertices per tile edge
-const MAX_TILES = 1200;
+/** Tiles kept built (each a 256 px image and a 33 x 33 grid); ~1000 are in use on the ground. */
+const MAX_TILES = 1500;
 const MAX_LOADS = 12;
 /** Split when the tile would be drawn larger than ~1.3 texels per screen pixel. */
 const SPLIT_PIXELS = 256 * 1.3;
+/** How far past the camera's horizon the ground is still loaded in detail (m). */
+const HORIZON_MARGIN_M = 15_000;
 
 
 // --- Shared water-aware terrain material ----------------------------------------------
@@ -212,6 +215,8 @@ class Tile {
   state: 'idle' | 'loading' | 'ready' | 'failed' = 'idle';
   children: Tile[] | null = null;
   lastUsed = 0;
+  /** The last frame it was in the camera's view (lastUsed: wanted, in view or not). */
+  lastSeen = 0;
   /** Ground heights (m above the ellipsoid), GRID x GRID, once built. */
   heights: Float32Array | null = null;
   /** Render-world center (float64) and bounding radius, from the tile corners. */
@@ -299,22 +304,30 @@ export class Terrain {
     return uniforms.uWaterLevel.value;
   }
 
-  /** Per-frame: choose tiles for this camera, place them with the floating origin, stream. */
-  update(camera: THREE.PerspectiveCamera, cameraWorld: V3, time: number): void {
+  /**
+   * Per-frame: choose tiles for this camera, place them with the floating origin, stream.
+   * orbit: how far ahead the point is that the camera turns about (m; 0: it doesn't): the ground
+   * is loaded for wherever turning about it takes the camera.
+   */
+  update(camera: THREE.PerspectiveCamera, cameraWorld: V3, time: number, orbit = 0): void {
     if (!this.ready) return;
     this.frame++;
     uniforms.uTime.value = time;
-    const visible = this.select(camera, cameraWorld);
+    const around = this.select(camera, cameraWorld, orbit);
     // (How many tiles this view still waits for: the loading screen holds for them.)
     let pending = 0;
-    for (const t of this.tiles.values()) if (t.lastUsed === this.frame && (t.state === 'idle' || t.state === 'loading')) pending++;
+    for (const t of this.tiles.values()) if (t.lastSeen === this.frame && (t.state === 'idle' || t.state === 'loading')) pending++;
     this.pendingInView = pending;
 
+    // Drawn: those in view. (The rest, all round the camera, are loaded and placed, ready the
+    // moment the camera turns to them.)
     for (const t of this.tiles.values()) if (t.mesh) t.mesh.visible = false;
-    for (const t of visible) {
+    this.around.length = 0;
+    for (const t of around) {
       const m = t.mesh!;
-      m.visible = true;
+      m.visible = t.lastSeen === this.frame;
       this.origin.place(m, t.center);
+      this.around.push(m);
     }
     this.pump(cameraWorld);
     this.evict();
@@ -322,6 +335,20 @@ export class Terrain {
 
   /** Tiles the current view is still waiting for (0: it's all there at full detail). */
   pendingInView = Infinity;
+
+  /** The ground all round the camera at the detail it's seen at, in view or not. */
+  private around: THREE.Mesh[] = [];
+
+  /**
+   * Draw with all the ground round the camera shown, not only what's in view (the sea's map,
+   * from above: oceanSurface.ts).
+   */
+  withAllShown(draw: () => void): void {
+    const was = this.around.map((m) => m.visible);
+    for (const m of this.around) m.visible = true;
+    draw();
+    this.around.forEach((m, i) => (m.visible = was[i]));
+  }
 
   /**
    * Load ahead the tiles another view will want (the launch pad's while the menu is up), without
@@ -331,32 +358,55 @@ export class Terrain {
     if (!this.ready) return Infinity;
     this.select(camera, cameraWorld);
     let pending = 0;
-    for (const t of this.tiles.values()) if (t.lastUsed === this.frame && (t.state === 'idle' || t.state === 'loading')) pending++;
+    for (const t of this.tiles.values()) if (t.lastSeen === this.frame && (t.state === 'idle' || t.state === 'loading')) pending++;
     this.pump(cameraWorld);
     return pending;
   }
 
-  /** Which tiles to draw for this camera (marking every tile it wants as in use, and asking for any not loaded). */
-  private select(camera: THREE.PerspectiveCamera, cameraWorld: V3): Tile[] {
+  /**
+   * The tiles for this camera: the ground all round it at the detail its distance calls for,
+   * whichever way the camera looks (marking every tile wanted as in use, those in view as seen,
+   * and asking for any not loaded). (Only what was in view, each turn of the camera showed the
+   * ground coarse and sharpened it level by level as its tiles came in.)
+   */
+  private select(camera: THREE.PerspectiveCamera, cameraWorld: V3, orbit = 0): Tile[] {
     camera.updateMatrixWorld();
+    // (The point the camera turns about: straight ahead of it.)
+    const e = camera.matrixWorld.elements;
+    const target: V3 = [cameraWorld[0] - e[8] * orbit, cameraWorld[1] - e[9] * orbit, cameraWorld[2] - e[10] * orbit];
     this.projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     this.frustum.setFromProjectionMatrix(this.projView);
     const focal = this.renderer.domElement.clientHeight / 2 / Math.tan((camera.fov * DEG) / 2);
 
+    const reach = horizonDistance(cameraWorld) + HORIZON_MARGIN_M;
     const visible: Tile[] = [];
     const sphere = new THREE.Sphere();
     const visit = (t: Tile) => {
       sphere.center.set(t.center[0] - cameraWorld[0], t.center[1] - cameraWorld[1], t.center[2] - cameraWorld[2]);
       sphere.radius = t.radius;
-      if (!this.frustum.intersectsSphere(sphere)) return;
-      t.lastUsed = this.frame;
       const dist = Math.max(1, sphere.center.length() - t.radius);
-      const pixels = (t.size / dist) * focal;
-      if (pixels > SPLIT_PIXELS && t.z < this.index.maxZoom && t.hasImagery) {
+      const seen = this.frustum.intersectsSphere(sphere);
+      // (Not what's over the horizon: out of sight whichever way the camera turns. In view,
+      // that's drawn as coarse as it is, under the horizon; out of view, not at all.)
+      const beyond = dist > reach;
+      if (!seen && beyond) return;
+      t.lastUsed = this.frame;
+      if (seen) t.lastSeen = this.frame;
+      let pixels = (t.size / dist) * focal;
+      // (And as near as the camera could come to it, turned about its target: dragged round a
+      // vehicle on the pad, the camera crosses hundreds of metres of ground, and the ground there
+      // was coarse until its tiles came in. Not tiles much smaller than the circle it moves on:
+      // from far out that's too many.)
+      if (orbit > 0 && t.size > orbit / 2) {
+        const dT = Math.hypot(t.center[0] - target[0], t.center[1] - target[1], t.center[2] - target[2]);
+        pixels = Math.max(pixels, (t.size / Math.max(1, Math.abs(dT - orbit) - t.radius)) * focal);
+      }
+      if (!beyond && pixels > SPLIT_PIXELS && t.z < this.index.maxZoom && t.hasImagery) {
         const kids = this.childrenOf(t);
         if (kids.some((k) => k.hasImagery)) {
           for (const k of kids) {
             k.lastUsed = this.frame;
+            if (seen) k.lastSeen = this.frame;
             this.request(k);
           }
           if (kids.every((k) => k.state === 'ready' || k.state === 'failed')) {
@@ -413,10 +463,14 @@ export class Terrain {
   }
 
   private pump(cam: V3): void {
-    // Nearest, coarsest first.
+    // What's in view first; then nearest, coarsest first.
     this.queue = this.queue.filter((t) => t.state === 'idle' && t.lastUsed >= this.frame - 1);
-    this.queue.sort((a, b) => a.z - b.z || distSq(a.center, cam) - distSq(b.center, cam));
+    const unseen = (t: Tile) => (t.lastSeen >= this.frame - 1 ? 0 : 1);
+    this.queue.sort((a, b) => unseen(a) - unseen(b) || a.z - b.z || distSq(a.center, cam) - distSq(b.center, cam));
     while (this.loading < MAX_LOADS && this.queue.length) {
+      // (What's out of view a few at a time: it's in no hurry, and each tile built is work between
+      // frames.)
+      if (unseen(this.queue[0]) && this.loading >= 3) break;
       const t = this.queue.shift()!;
       t.state = 'loading';
       this.loading++;
@@ -431,11 +485,13 @@ export class Terrain {
   }
 
   private evict(): void {
-    if (this.tiles.size < MAX_TILES) return;
-    const old = [...this.tiles.values()]
-      .filter((t) => t.mesh && t.lastUsed < this.frame - 60 && t.z > this.index.minZoom)
-      .sort((a, b) => a.lastUsed - b.lastUsed);
-    for (const t of old.slice(0, this.tiles.size - MAX_TILES + 50)) {
+    // (By the tiles built, not all those ever looked at: counting those, once past the limit
+    // every tile out of use for a second was dropped, and loaded again on the way back.)
+    if (this.frame % 30) return;
+    const built = [...this.tiles.values()].filter((t) => t.mesh);
+    if (built.length <= MAX_TILES) return;
+    const old = built.filter((t) => t.lastUsed < this.frame - 60 && t.z > this.index.minZoom).sort((a, b) => a.lastUsed - b.lastUsed);
+    for (const t of old.slice(0, built.length - MAX_TILES + 50)) {
       const m = t.mesh!;
       this.group.remove(m);
       m.geometry.dispose();

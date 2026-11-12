@@ -31,3 +31,12 @@ export const tileYToLat = (y: number, z: number) => (180 / Math.PI) * Math.atan(
 /** Local east/north metres -> approximate lat/lon (for shaders; good to ~0.1% within 100 km). */
 export const M_PER_DEG_LAT = 110_800;
 export const M_PER_DEG_LON = 111_320 * Math.cos(PAD.latDeg * DEG);
+
+/**
+ * How far the sea's horizon is from a point of the render world (m), with a fifth to spare: what
+ * lies farther is out of sight from there, whichever way one looks.
+ */
+export function horizonDistance(w: V3): number {
+  const h = Math.max(2, worldToGeodetic(w).h);
+  return 1.2 * Math.sqrt(2 * 6.371e6 * h + h * h);
+}

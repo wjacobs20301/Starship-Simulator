@@ -53,12 +53,18 @@ function mulberry(seed: number): () => number {
   };
 }
 
+/** The wind sea's bands: the shortest's wavelength (m), each one's over the last's. */
+const LAM0 = 0.7;
+const RATIO = 1.55;
+/** A band's wavelength is 0.92 to 1.08 of its nominal one: the most. */
+const LAM_MOST = 1.08;
+
 const TRAINS: Train[] = (() => {
   const r = mulberry(0x5ea5);
   const out: Train[] = [];
-  const ratio = 1.55;
+  const ratio = RATIO;
   for (let b = 0; b < BANDS; b++) {
-    const lam = 0.7 * ratio ** b * (0.92 + 0.16 * r());
+    const lam = LAM0 * ratio ** b * (0.92 + 0.16 * r());
     const k = (2 * Math.PI) / lam;
     const omega = Math.sqrt(G * k);
     const th0 = r() * 2 * Math.PI;
@@ -131,6 +137,8 @@ export class SeaState {
     /** Per train: heading (x, y on the plane), k, amplitude (m). */
     uSeaW: { value: Array.from({ length: SEA_N }, () => new THREE.Vector4()) },
     uSeaPh: { value: new Float32Array(SEA_N) },
+    /** The slopes (mean square) of the wind sea's bands shorter than band b, for b = 0..BANDS. */
+    uSeaLost: { value: new Float32Array(BANDS + 1) },
     /** Wind (m/s), whitecap share, foam threshold (in the resolved height's sigmas), the slopes finer than the set (mean square). */
     uSea: { value: new THREE.Vector4() },
     /** The wind's heading on the plane (x, y), streaks (0..1), how much darker the sea. */
@@ -242,6 +250,7 @@ export class SeaState {
       // (No train steeper than breaks.)
       a = Math.min(a, 0.11 / t.k);
       mss += 0.5 * (a * t.k) ** 2;
+      if (i < BANDS * PER_BAND && i % PER_BAND === PER_BAND - 1) u.uSeaLost.value[(i + 1) / PER_BAND] = mss;
       var0 += 0.5 * a * a;
       const th = i < BANDS * PER_BAND ? t.th : this.swellTh + (i === SEA_N - 1 ? 0.25 : 0);
       const dir = u.uSeaW.value[i].set(Math.cos(th), Math.sin(th), t.k, a);
@@ -338,6 +347,7 @@ export class SeaState {
 export const SEA_COMMON = /* glsl */ `
 uniform vec4 uSeaW[${SEA_N}];
 uniform float uSeaPh[${SEA_N}];
+uniform float uSeaLost[${BANDS + 1}];
 uniform vec4 uSea;
 uniform vec4 uSea2;
 uniform vec4 uSea3;
@@ -406,18 +416,32 @@ vec4 seaPixel(vec2 p) {
 // (A pixel's reach along heading d, m.)
 float seaReach(vec4 J, vec2 d) { return abs(dot(J.xy, d)) + abs(dot(J.zw, d)) + 1e-4; }
 void seaSurface(vec3 rel, vec2 p, vec4 J, float wpLim, float swellK) {
-  vec2 pw = seaWarp(p);
+  vec2 pw = p;
+  bool warped = false;
   vec2 slope = vec2(0.0);
-  float h = 0.0, v = 0.0, vAll = 0.0, lost = 0.0;
-  for (int i = 0; i < ${SEA_N}; i++) {
+  float h = 0.0, v = 0.0;
+  // The bands too short to draw at all here are skipped whole, their slopes (the roughness) added
+  // up beforehand (uSeaLost): from the air that's most of them, at every pixel of sea in view.
+  // A train is gone once shorter than 3.5 of the pixel's reach along its heading, so surely once
+  // shorter than 3.5 of the pixel's least reach any way (and only bands the fetch leaves whole).
+  float rmin = abs(J.x * J.w - J.y * J.z) / sqrt(dot(J, J) + 1e-12);
+  float lamCut = 3.5 * rmin;
+  if (wpLim > 0.0) lamCut = min(lamCut, ${((2 * Math.PI * G) / 1.44).toFixed(3)} / (wpLim * wpLim));
+  int b0 = int(clamp(floor(log(max(lamCut, 1e-4) / ${(LAM0 * LAM_MOST).toFixed(4)}) / ${Math.log(RATIO).toFixed(5)}) + 1.0, 0.0, ${BANDS}.0));
+  float lost = uSeaLost[b0];
+  for (int i = b0 * ${PER_BAND}; i < ${SEA_N}; i++) {
     vec4 W = uSeaW[i];
     W.w *= seaScale(i, W.z, wpLim, swellK);
     float ak = W.w * W.z;
-    vAll += 0.5 * W.w * W.w;
     // (Faded out once finer than a few pixels along its heading: its tilt goes into the roughness.)
     float f = smoothstep(3.5, 9.0, 6.2832 / (W.z * seaReach(J, W.xy)));
     lost += 0.5 * ak * ak * (1.0 - f);
     if (f <= 0.0) continue;
+    // (The warp, four noises: only where there's a wave to draw.)
+    if (!warped) {
+      pw = seaWarp(p);
+      warped = true;
+    }
     float ph = dot(pw, W.xy) * W.z + uSeaPh[i];
     float s = sin(ph);
     slope += f * ak * cos(ph) * W.xy;
@@ -441,21 +465,33 @@ void seaSurface(vec3 rel, vec2 p, vec4 J, float wpLim, float swellK) {
   // (How well drawn: patches, their lace, the streaks across the wind.)
   float okP = 1.0 - smoothstep(0.15 * L, 0.5 * L, max(dq.x, dq.y));
   float okL = 1.0 - smoothstep(0.25, 0.9, max(dq.x, dq.y));
-  float sig = sqrt(max(v, 1e-6));
-  float spot = 0.6 * seaNoise(vec2(q.x / (2.2 * L), q.y / L)) + 0.4 * seaNoise(vec2(q.x / (0.9 * L), q.y / (0.5 * L)) + 31.0);
-  float z = (spot - 0.5) * 4.0 * 0.75 + 0.65 * h / sig;
-  float lace = mix(0.75, 0.45 + 0.55 * seaNoise(q / 0.7 + 7.0) * (0.6 + 0.8 * seaNoise(q / 2.1 + 3.0)), okL);
-  float cap = smoothstep(uSea.z - 0.2, uSea.z + 0.45, z);
-  float old = 0.3 * smoothstep(uSea.z - 1.1, uSea.z - 0.2, z);
-  float foamNear = max(cap * (0.55 + 0.45 * lace), old * lace);
-  // (Far off: the average.)
+  // (Far off: the average. The patches, their lace and the streaks only where they're drawn:
+  // each is several noises a pixel.)
   float on = smoothstep(0.0003, 0.003, uSea.y);
-  float foam = mix(uSea.y * 1.2, foamNear, okP) * on;
+  float foam = uSea.y * 1.2 * on;
+  float lace = 0.75;
+  bool laced = false;
+  if (on > 0.0 && okP > 0.0) {
+    float sig = sqrt(max(v, 1e-6));
+    float spot = 0.6 * seaNoise(vec2(q.x / (2.2 * L), q.y / L)) + 0.4 * seaNoise(vec2(q.x / (0.9 * L), q.y / (0.5 * L)) + 31.0);
+    float z = (spot - 0.5) * 4.0 * 0.75 + 0.65 * h / sig;
+    if (okL > 0.0) lace = mix(0.75, 0.45 + 0.55 * seaNoise(q / 0.7 + 7.0) * (0.6 + 0.8 * seaNoise(q / 2.1 + 3.0)), okL);
+    laced = true;
+    float cap = smoothstep(uSea.z - 0.2, uSea.z + 0.45, z);
+    float old = 0.3 * smoothstep(uSea.z - 1.1, uSea.z - 0.2, z);
+    float foamNear = max(cap * (0.55 + 0.45 * lace), old * lace);
+    foam = mix(uSea.y * 1.2, foamNear, okP) * on;
+  }
   if (uSea2.z > 0.0) {
     float okS = 1.0 - smoothstep(0.3, 1.2, dq.y);
-    float st = seaNoise(vec2(q.x / 70.0, q.y / 2.2)) * 0.6 + 0.4 * seaNoise(vec2(q.x / 23.0 + 5.0, q.y / 1.1));
-    float streak = smoothstep(0.74, 0.86, st) * lace * smoothstep(0.3, 0.7, seaNoise(vec2(q.x / 150.0, q.y / 40.0) + 3.0));
-    foam = max(foam, uSea2.z * mix(0.04, 0.4 * streak, okS));
+    float streakK = 0.04;
+    if (okS > 0.0) {
+      if (!laced && okL > 0.0) lace = mix(0.75, 0.45 + 0.55 * seaNoise(q / 0.7 + 7.0) * (0.6 + 0.8 * seaNoise(q / 2.1 + 3.0)), okL);
+      float st = seaNoise(vec2(q.x / 70.0, q.y / 2.2)) * 0.6 + 0.4 * seaNoise(vec2(q.x / 23.0 + 5.0, q.y / 1.1));
+      float streak = smoothstep(0.74, 0.86, st) * lace * smoothstep(0.3, 0.7, seaNoise(vec2(q.x / 150.0, q.y / 40.0) + 3.0));
+      streakK = mix(0.04, 0.4 * streak, okS);
+    }
+    foam = max(foam, uSea2.z * streakK);
   }
   gSeaFoam = clamp(foam, 0.0, 1.0);
   gSeaBody = mix(0.3, 1.0, smoothstep(2000.0, 40000.0, length(rel))) * (1.0 - uSea2.w);
