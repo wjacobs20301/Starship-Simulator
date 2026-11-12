@@ -130,6 +130,20 @@ const SITE_AIR: Record<Exclude<SiteWeather, 'natural'>, { spread: number; mid: n
   fog: { spread: 1.5, mid: 0.15 },
 };
 
+/**
+ * The name for a sky as the weather has it somewhere: which of the named kinds of day it's
+ * nearest (for a label: a world left to itself, 'natural', has no name of its own).
+ */
+export function skyName(s: Sample): Exclude<SiteWeather, 'natural'> {
+  if (s.fog > 0.5) return 'fog';
+  if (s.conv > 0.3) return 'storm';
+  if (s.precip > 0.2) return 'rain';
+  if (s.cover > 0.85) return 'overcast';
+  if (s.cover > 0.55) return 'mostly';
+  if (s.cover > 0.25) return 'partly';
+  return s.cover > 0.08 ? 'fair' : 'clear';
+}
+
 const smooth = (a: number, b: number, x: number) => {
   const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
   return t * t * (3 - 2 * t);

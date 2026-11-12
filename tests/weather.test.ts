@@ -212,3 +212,18 @@ describe('the cold-ocean index', () => {
     expect(land.coldOcean(0, -150)).toBeLessThan(0.02);
   });
 });
+
+describe('a name for a sky', () => {
+  it('is the kind of day nearest what the weather has there', async () => {
+    const { skyName, newSample } = await import('../src/weather/model');
+    const sky = (o: Partial<ReturnType<typeof newSample>>) => skyName({ ...newSample(), cover: 0, precip: 0, fog: 0, conv: 0, ...o });
+    expect(sky({})).toBe('clear');
+    expect(sky({ cover: 0.15 })).toBe('fair');
+    expect(sky({ cover: 0.4 })).toBe('partly');
+    expect(sky({ cover: 0.7 })).toBe('mostly');
+    expect(sky({ cover: 0.95 })).toBe('overcast');
+    expect(sky({ cover: 0.95, precip: 0.5 })).toBe('rain');
+    expect(sky({ cover: 0.8, precip: 0.6, conv: 0.6 })).toBe('storm');
+    expect(sky({ cover: 0.3, fog: 0.8 })).toBe('fog');
+  });
+});

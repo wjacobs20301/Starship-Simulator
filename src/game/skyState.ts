@@ -24,7 +24,7 @@ import { PAD, RE, RP } from '../sim/constants';
 import type { V3 } from '../sim/math';
 import type { Snapshot } from '../sim/simulation';
 import type { GameMenu } from '../ui/gameMenu';
-import { starbaseDay } from '../weather/model';
+import { starbaseDay, skyName } from '../weather/model';
 import type { ToWorker } from '../worker/protocol';
 import { DAY_RATE, type DaylightAt, daylightPhase } from './daylight';
 import { type FlightView, workerCaughtUp } from './flightView';
@@ -166,7 +166,10 @@ export function createSkyState(deps: SkyStateDeps): SkyState {
     // from this before the flight itself). Its time of day.
     if (WEATHER_AVAILABLE && s.flight.weather) {
       weather.restore(s.flight.weather);
-      if (s.flight.weather.site !== 'natural') weatherToday = s.flight.weather.site;
+      // (The label: the weather asked for over the site; a world left to itself has none, so
+      // what the sky over the pad is nearest to. It kept the last flight's label, before.)
+      const cfg = s.flight.weather;
+      weatherToday = cfg.site !== 'natural' ? cfg.site : weather.model ? skyName(weather.model.sample(PAD.latDeg, PAD.lonDeg, cfg.t0)) : weatherToday;
     }
     dayWants = null;
     dayPhase = s.day?.phase ?? 0;

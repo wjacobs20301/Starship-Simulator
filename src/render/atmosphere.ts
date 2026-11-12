@@ -1363,7 +1363,10 @@ const CLOUD_GLSL = /* glsl */ `
           // (Two bands: within ~150 m of a surface, a quarter step; within ~300 m, half: a cloud's
           // thin edge seen at a slant was caught by every other pixel along a long step, in
           // diagonal hatching.)
-          t += inCloud || gMargin > -0.12 ? dS : gMargin > -0.25 ? 2.0 * dIn : max(clearStep(t, muv), skip);
+          // (Out to ~250 m and ~500 m from a surface, not 150 and 300: over a cumulus's thin
+          // top, seen from the side, the ray runs level through wisps for a long way, and the
+          // long steps between came down in gaps: blue specks through the cloud's crown.)
+          t += inCloud || gMargin > -0.2 ? dS : gMargin > -0.4 ? 2.0 * dIn : max(clearStep(t, muv), skip);
           tMarch = min(t, tB);
         }
         low = vec4(C, T);

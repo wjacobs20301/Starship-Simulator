@@ -341,7 +341,12 @@ if (vShore.x < surfW + 30.0) {
   float pxs = max(length(seaJ.xy), length(seaJ.zw));
   // (Foam's lace: two layers of smooth noise turned against each other, drifting in with the swash.)
   vec2 ql = q + uSea2.xy * 0.4 * sin(uSea3.w + d * 0.05);
-  float lace = mix(0.5, smoothstep(0.36, 0.66, 0.6 * seaGNoise(ql / 2.3 + 9.0) + 0.4 * seaGNoise(mat2(0.8, -0.6, 0.6, 0.8) * ql / 0.85 + 4.0)), 1.0 - smoothstep(0.3, 1.2, pxs));
+  // (Patches a few metres across with finer ones in them, thinner between but never bare
+  // water: cut hard at one or two metres they were a field of dark specks in grey, static on a
+  // screen, from a few hundred metres up.)
+  float laceA = seaGNoise(mat2(0.6, 0.8, -0.8, 0.6) * ql / 5.5 + 9.0);
+  float laceB = seaGNoise(mat2(0.8, -0.6, 0.6, 0.8) * ql / 1.9 + 4.0);
+  float lace = mix(0.6, 0.3 + 0.7 * smoothstep(0.3, 0.7, 0.62 * laceA + 0.38 * laceB), 1.0 - smoothstep(0.3, 1.2, pxs));
   float inZone = 1.0 - smoothstep(surfW * 0.6, surfW + 30.0, d);
   float crest = smoothstep(0.95 - 0.08 * along, 0.995, line) * smoothstep(0.28, 0.5, along) * (0.6 + 0.4 * lace);
   float trail = smoothstep(0.1, 0.9, line) * (0.15 + 0.4 * along) * lace;
@@ -388,7 +393,7 @@ gl_FragColor.a = 1.0 - 0.5 * (1.0 - gSeaFoam);
 #endif`,
       );
     };
-    mat.customProgramCacheKey = () => 'sea-mesh-v4';
+    mat.customProgramCacheKey = () => 'sea-mesh-v5';
     this.mesh = new THREE.Mesh(g, mat);
     this.mesh.name = 'Sea';
     this.mesh.frustumCulled = false;
