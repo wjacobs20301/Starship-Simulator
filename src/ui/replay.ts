@@ -4,6 +4,7 @@
 // so a replay doesn't log, score or sound them again), one every 1/30 s of sim time at most.
 
 import type { Snapshot } from '../sim/simulation';
+import { escapeHtml, keyText } from './keyLabels';
 
 /** Snapshots kept: 5 minutes at 30 a second. */
 const CAPACITY = 9000;
@@ -25,6 +26,7 @@ export class Replay {
   private t = 0;
   private lastNow = 0;
   private bar: HTMLElement;
+  private shown = '';
 
   constructor() {
     this.bar = document.createElement('div');
@@ -104,11 +106,16 @@ export class Replay {
     const f = b.t > a.t ? Math.min(1, Math.max(0, (this.t - a.t) / (b.t - a.t))) : 1;
     const span = Math.max(1e-6, last - first);
     const pct = ((this.t - first) / span) * 100;
-    this.bar.innerHTML =
+    const html =
       `<b>REPLAY</b><span>${clock(a.missionTime)}</span>` +
       `<i class="rp-track"><i style="width:${pct.toFixed(1)}%"></i></i>` +
       `<span>${this.playing ? '▶' : '❚❚'} ${SPEEDS[this.speedIx]}×</span>` +
-      `<small>Space play · ← → 5 s · , . speed · R back to live</small>`;
+      `<small>${escapeHtml(`${keyText('launch')} play · ← → 5 s · ${keyText('warpDown')} ${keyText('warpUp')} speed · ${keyText('replay')} back to live`)}</small>`;
+    // (Only when it changes: every write costs a style / layout pass.)
+    if (html !== this.shown) {
+      this.shown = html;
+      this.bar.innerHTML = html;
+    }
     return { a, b, f };
   }
 }

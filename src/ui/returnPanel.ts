@@ -6,6 +6,7 @@ import { SPLASH_TARGET } from '../game/missions';
 import type { ReturnTarget } from '../sim/shipReturn';
 import type { Snapshot } from '../sim/simulation';
 import type { FromWorker } from '../worker/protocol';
+import { kbd } from './keyLabels';
 
 export class ReturnPanel {
   private root: HTMLElement;
@@ -94,7 +95,7 @@ export class ReturnPanel {
 
 /** Status while the player flies: how to hand back, and (falling) by what height. */
 function pausedText(r: NonNullable<Snapshot['shipReturn']>): string {
-  let text = '<b>Paused: you have the controls.</b> Press <kbd>L</kbd> to hand back to the autopilot.';
+  let text = `<b>Paused: you have the controls.</b> Press ${kbd('manual')} to hand back to the autopilot.`;
   if (r.handBackBy !== null && r.height !== null) {
     const km = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m / 10) * 10} m`);
     text +=

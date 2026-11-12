@@ -1,0 +1,19 @@
+# On every push and pull request: the types, then the tests. (The flight tests are heavy, a few
+# minutes on four cores; the terrain and globe tiles aren't needed for them.)
+name: check
+on:
+  push:
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test

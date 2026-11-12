@@ -5,6 +5,7 @@ import type { Snapshot } from '../sim/simulation';
 import { onSettingsChange } from '../settings';
 import type { MissionId } from '../game/missions';
 import { Webcast, formatClock } from './webcast';
+import { keyText, withKeyNames } from './keyLabels';
 
 export { formatClock };
 
@@ -32,10 +33,16 @@ export class Hud {
 
   update(
     s: Snapshot,
-    info: { camera: string; tracked: string; warp: string; paused: boolean; armsPad: number; orbit?: { inclination: number; period: number } | null; weather?: string; payload?: string },
+    info: { camera: string; tracked: string; warp: string; paused: boolean; armsPad: number; /** The player has the controls (else the autopilot flies). */ manual?: boolean; orbit?: { inclination: number; period: number } | null; weather?: string; payload?: string },
   ): void {
     this.webcast.update(s);
-    const label = (s.shipPhase && SHIP_PHASE_LABEL[s.shipPhase]) || PHASE_LABEL[s.phase];
+    // (On the pad: who flies once it lifts off, so nobody launches expecting the other.)
+    const label =
+      s.phase === 'prelaunch'
+        ? info.manual
+          ? `You fly this one · ${keyText('launch').toUpperCase()} to launch · ${keyText('manual')} for autopilot`
+          : `Autopilot flies · ${keyText('launch').toUpperCase()} to launch · ${keyText('manual')} to fly it yourself`
+        : (s.shipPhase && SHIP_PHASE_LABEL[s.shipPhase]) || PHASE_LABEL[s.phase];
     if (this.phase.textContent !== label) this.phase.textContent = label;
     const ship = s.vehicles.find((v) => v.id === 'ship');
     const orbit =
@@ -63,9 +70,14 @@ export class Hud {
       this.status.innerHTML = status;
       this.lastStatus = status;
     }
-    for (const e of s.events) {
+    this.logEvents(s.events);
+  }
+
+  /** Add events to the log (a snapshot's new ones; a saved flight's whole log, on taking it up). */
+  logEvents(events: readonly { missionTime: number | null; text: string }[]): void {
+    for (const e of events) {
       const row = document.createElement('div');
-      row.innerHTML = `<b>${formatClock(e.missionTime)}</b> ${e.text}`;
+      row.innerHTML = `<b>${formatClock(e.missionTime)}</b> ${withKeyNames(e.text)}`;
       this.log.prepend(row);
     }
   }

@@ -32,6 +32,8 @@ const REGION_INNER = 80_000;
 /** Ground the sea's maps are drawn from: its tiles, and a way to draw with all of them shown. */
 interface SeaSource {
   group: THREE.Group;
+  /** Goes up whenever the set of tiles round the camera changes (one built, another level chosen). */
+  readonly version: number;
   withAllShown(draw: () => void): void;
 }
 
@@ -46,6 +48,8 @@ class SeaMask {
   half = 1;
   at = -Infinity;
   valid = false;
+  /** The ground it was drawn from (the sources' versions). */
+  ver = -1;
 
   constructor(size: number) {
     this.rt = new THREE.WebGLRenderTarget(size, size, {
@@ -217,6 +221,22 @@ varying vec2 vSeaP;
 varying vec3 vShore;
 ${SEA_COMMON}
 ${MASK_GLSL}
+// How far to the shore (m; 1e4: none near), from the sharp map's mipmaps: the share of water in
+// a box of ground is 0.5 + distance / the box's size (for a straight shore), so each level
+// measures out to half its texel, the finer ones taking over as the shore comes near. (Two
+// levels alone left the distance in terraces, and the breakers, drawn along its contours, in
+// rectangular patches.)
+float seaShoreDist(vec2 muv) {
+  float c = textureLod(uMaskN, muv, 7.0).r;
+  if (c > 0.999) return 1e4;
+  float d = (c - 0.5) * 1000.000;
+  for (int L = 6; L >= 1; L--) {
+    float s = 7.81250 * exp2(float(L));
+    float dl = (textureLod(uMaskN, muv, float(L)).r - 0.5) * s;
+    d = mix(dl, d, smoothstep(0.28 * s, 0.45 * s, abs(d)));
+  }
+  return d;
+}
 // How far over water upwind (m: 3e4 = open), from here along dir (world).
 float seaFetch(vec3 rel, vec3 dir) {
   float f = 3e4;
@@ -245,11 +265,7 @@ if (uMaskNC.w > 0.0) {
   vec2 muv = maskUvN(rel0);
   float e = maskEdgeN(muv);
   if (e < 0.985) {
-    float b3 = textureLod(uMaskN, muv, 3.0).r;
-    float b6 = textureLod(uMaskN, muv, 6.0).r;
-    float dFar = (b6 - 0.5) * ${((NEAR_HALF * 2) / NEAR_SIZE * 64).toFixed(1)};
-    float dNear = (b3 - 0.5) * ${((NEAR_HALF * 2) / NEAR_SIZE * 8).toFixed(1)};
-    shore = b6 > 0.999 ? 1e4 : mix(dNear, dFar, smoothstep(15.0, 45.0, dFar));
+    shore = seaShoreDist(muv);
   }
   // (In the detailed region the terrain has the water past the sharp map: flat there.)
   vec2 en = vec2(rel0.x + uCamW.x, -(rel0.z + uCamW.z));
@@ -311,7 +327,8 @@ float surf = 0.0;
 float surfW = clamp(40.0 * uSea3.x + 30.0 * uSea3.y * vShore.z, 20.0, 250.0);
 if (vShore.x < surfW + 30.0) {
   float d = max(vShore.x, 0.0);
-  float ks = uSea3.z * 1.6;
+  // (Closer together than the swell offshore: waves shorten as the water shoals.)
+  float ks = uSea3.z * 2.4;
   vec2 q = vec2(dot(vSeaP, uSea2.xy), dot(vSeaP, vec2(-uSea2.y, uSea2.x)));
   float wob = 8.0 * (seaNoise(q / 40.0) - 0.5) + 3.0 * (seaNoise(q / 9.0) - 0.5);
   float phs = (d + wob) * ks - uSea3.w;
@@ -319,12 +336,14 @@ if (vShore.x < surfW + 30.0) {
   // (Each breaker breaks in stretches along the shore (its own: they come in with it), a bright
   // crest and lacy foam behind it.)
   float wave = floor((phs + 1.5708) / 6.2832);
-  float along = seaNoise(vec2(q.y / 35.0, wave * 7.3)) * 0.7 + 0.3 * seaNoise(vec2(q.y / 9.0, wave * 3.1 + 3.0));
+  float along = seaGNoise(vec2(q.y / 120.0, wave * 7.3)) * 0.7 + 0.3 * seaGNoise(vec2(q.y / 17.0, wave * 3.1 + 3.0));
   // (Faded to its average where finer than the pixels.)
   float pxs = max(length(seaJ.xy), length(seaJ.zw));
-  float lace = mix(0.5, smoothstep(0.25, 0.75, seaNoise(q / 1.3 + 9.0) * 0.6 + 0.4 * seaNoise(q / 4.0)), 1.0 - smoothstep(0.3, 1.2, pxs));
+  // (Foam's lace: two layers of smooth noise turned against each other, drifting in with the swash.)
+  vec2 ql = q + uSea2.xy * 0.4 * sin(uSea3.w + d * 0.05);
+  float lace = mix(0.5, smoothstep(0.36, 0.66, 0.6 * seaGNoise(ql / 2.3 + 9.0) + 0.4 * seaGNoise(mat2(0.8, -0.6, 0.6, 0.8) * ql / 0.85 + 4.0)), 1.0 - smoothstep(0.3, 1.2, pxs));
   float inZone = 1.0 - smoothstep(surfW * 0.6, surfW + 30.0, d);
-  float crest = smoothstep(0.93 - 0.1 * along, 0.99, line) * smoothstep(0.25, 0.6, along);
+  float crest = smoothstep(0.95 - 0.08 * along, 0.995, line) * smoothstep(0.28, 0.5, along) * (0.6 + 0.4 * lace);
   float trail = smoothstep(0.1, 0.9, line) * (0.15 + 0.4 * along) * lace;
   float brk = max(crest, trail) * inZone;
   float swash = (1.0 - smoothstep(2.0, 10.0 + 0.1 * surfW, d)) * (0.6 + 0.4 * lace);
@@ -359,9 +378,17 @@ roughnessFactor = mix(gSeaRough, 0.9, gSeaFoam);`,
           '#include <normal_fragment_maps>',
           `#include <normal_fragment_maps>
 normal = normalize((viewMatrix * vec4(mix(gSeaNormal, normalize(vSeaRel - uSeaCentre), 0.6 * gSeaFoam), 0.0)).xyz);`,
-        );
+        )
+      .replace(
+        '#include <dithering_fragment>',
+        `#include <dithering_fragment>
+// (Water, told to the atmosphere pass in the alpha: a cloud's shadow dims it far less than land.)
+#ifdef OPAQUE
+gl_FragColor.a = 1.0 - 0.5 * (1.0 - gSeaFoam);
+#endif`,
+      );
     };
-    mat.customProgramCacheKey = () => 'sea-mesh-v2';
+    mat.customProgramCacheKey = () => 'sea-mesh-v4';
     this.mesh = new THREE.Mesh(g, mat);
     this.mesh.name = 'Sea';
     this.mesh.frustumCulled = false;
@@ -415,12 +442,15 @@ normal = normalize((viewMatrix * vec4(mix(gSeaNormal, normalize(vSeaRel - uSeaCe
     this.mesh.updateMatrixWorld();
     u.uToLocal.value.setFromMatrix4(this.m).transpose();
 
-    // The maps: redrawn now and then (tiles stream in), and when the camera's moved on.
+    // The maps: redrawn when the camera's moved on, and when the ground they're drawn from has
+    // changed (tiles streaming in), a few times a second at most. (Not on a timer: each redraw
+    // draws every tile round the camera, ~10 ms, a late frame each time.)
     if (terrain) TERRAIN_MASK.uniforms.uWL.value = terrain.waterLevelWorld;
+    const ver = (terrain ? terrain.version : -1) * 65536 + globe.version;
     const moved = (mk: SeaMask, frac: number) => Math.hypot(ground[0] - mk.centre[0], ground[1] - mk.centre[1], ground[2] - mk.centre[2]) > mk.half * frac;
-    if (!this.near.valid || this.frame - this.near.at > 15 || moved(this.near, 0.15)) this.draw(renderer, this.near, NEAR_HALF, cam, ground, up, east, north, terrain, globe);
-    else if (!this.far.valid || this.frame - this.far.at > 90 || moved(this.far, 0.1) || Math.abs(this.far.half - outer) > 0.3 * outer) {
-      this.draw(renderer, this.far, outer, cam, ground, up, east, north, terrain, globe);
+    if (!this.near.valid || moved(this.near, 0.15) || (this.near.ver !== ver && this.frame - this.near.at > 15)) this.draw(renderer, this.near, NEAR_HALF, cam, ground, up, east, north, terrain, globe, ver);
+    else if (!this.far.valid || moved(this.far, 0.1) || Math.abs(this.far.half - outer) > 0.3 * outer || (this.far.ver !== ver && this.frame - this.far.at > 90)) {
+      this.draw(renderer, this.far, outer, cam, ground, up, east, north, terrain, globe, ver);
     }
     for (const [mk, C, E, N, I] of [
       [this.near, u.uMaskNC, u.uMaskNE, u.uMaskNN, u.uMaskNI],
@@ -444,7 +474,9 @@ normal = normalize((viewMatrix * vec4(mix(gSeaNormal, normalize(vSeaRel - uSeaCe
     north: THREE.Vector3,
     terrain: SeaSource | null,
     globe: SeaSource,
+    ver: number,
   ): void {
+    mk.ver = ver;
     mk.centre = [...ground] as V3;
     mk.E.copy(east);
     mk.N.copy(north);

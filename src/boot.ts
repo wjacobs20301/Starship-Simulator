@@ -3,6 +3,9 @@
 // tablets get a message instead. A few things that would make it run badly (a tiny window,
 // software rendering) get a warning the player can click past.
 
+// (Small: the settings and the key names only, not the game.)
+import { keyText } from './ui/keyLabels';
+
 interface Problem {
   title: string;
   text: string;
@@ -47,7 +50,7 @@ function problems(): Problem[] {
   if (innerWidth < 900 || innerHeight < 560) {
     out.push({
       title: 'Small window',
-      text: 'The simulator’s displays need room: make the browser window larger (or go full screen with F once it loads).',
+      text: `The simulator’s displays need room: make the browser window larger (or go full screen with ${keyText('fullscreen')} once it loads).`,
       soft: true,
     });
   }

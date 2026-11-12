@@ -122,6 +122,13 @@ function seaWarp(x: number, y: number): [number, number] {
   ];
 }
 
+function seaWarpB(x: number, y: number): [number, number] {
+  return [
+    x + 7 * (seaNoise(x / 39 + 23.7, y / 39 + 23.7) - 0.5) + 2.5 * (seaNoise(x / 12 + 17.9, y / 12 + 17.9) - 0.5),
+    y + 7 * (seaNoise(x / 47 + 41.1, y / 47 + 41.1) - 0.5) + 2.5 * (seaNoise(x / 14 + 29.3, y / 14 + 29.3) - 0.5),
+  ];
+}
+
 /** The sea's surface at a point (SeaState.surfaceAt). */
 export interface SeaPoint {
   /** Height above the still sea, m. */
@@ -292,12 +299,15 @@ export class SeaState {
     // here, then its height.)
     let qx = px, qy = py;
     for (let it = 0; it < 3; it++) {
-      const [wx, wy] = seaWarp(qx, qy);
+      const wa = seaWarp(qx, qy);
+      const wb = seaWarpB(qx, qy);
       let cx = 0, cy = 0;
       for (let i = 0; i < SEA_N; i++) {
         const w = W[i];
         const f = fade(w.z);
         if (f <= 0) continue;
+        // (Every other train on the second warp, as the shader has them.)
+        const [wx, wy] = i & 1 ? wb : wa;
         const c = Math.cos((wx * w.x + wy * w.y) * w.z + P[i]);
         cx += f * 0.65 * w.w * c * w.x;
         cy += f * 0.65 * w.w * c * w.y;
@@ -305,12 +315,14 @@ export class SeaState {
       qx = px - cx;
       qy = py - cy;
     }
-    const [wx, wy] = seaWarp(qx, qy);
+    const wa = seaWarp(qx, qy);
+    const wb = seaWarpB(qx, qy);
     let h = 0, se = 0, sn = 0, rate = 0;
     for (let i = 0; i < SEA_N; i++) {
       const w = W[i];
       const f = fade(w.z);
       if (f <= 0) continue;
+      const [wx, wy] = i & 1 ? wb : wa;
       const ph = (wx * w.x + wy * w.y) * w.z + P[i];
       const sn0 = Math.sin(ph), cs = Math.cos(ph);
       h += f * w.w * sn0;
@@ -376,6 +388,28 @@ vec2 seaPlane(vec3 rel) {
 vec2 seaWarp(vec2 p) {
   return p + 7.0 * vec2(seaNoise(p / 43.0) - 0.5, seaNoise(p / 37.0 + 11.3) - 0.5) + 2.5 * vec2(seaNoise(p / 13.0 + 5.1) - 0.5, seaNoise(p / 11.0 + 2.7) - 0.5);
 }
+// A second warp, for every other train: trains all bent the same way keep their crossings in
+// step, a regular lattice over the whole sea (it looked woven). (SeaState's seaWarpB is the same.)
+vec2 seaWarpB(vec2 p) {
+  return p + 7.0 * vec2(seaNoise(p / 39.0 + 23.7) - 0.5, seaNoise(p / 47.0 + 41.1) - 0.5) + 2.5 * vec2(seaNoise(p / 12.0 + 17.9) - 0.5, seaNoise(p / 14.0 + 29.3) - 0.5);
+}
+// And a fine one for the chop (waves under ~9 m): short waves are the least regular of all.
+vec2 seaFine(vec2 p) {
+  return 0.9 * vec2(seaNoise(p / 3.3 + 3.1) - 0.5, seaNoise(p / 2.9 + 8.4) - 0.5) + 0.35 * vec2(seaNoise(p / 1.1 + 6.7) - 0.5, seaNoise(p / 0.9 + 1.9) - 0.5);
+}
+// Smooth noise without the square cells value noise shows once it's cut at a threshold (foam's
+// lace, the surf): gradient noise, ~0..1.
+vec2 seaGrad(vec2 i) {
+  float a = 6.2832 * seaHash(i);
+  return vec2(cos(a), sin(a));
+}
+float seaGNoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  float a = dot(seaGrad(i), f), b = dot(seaGrad(i + vec2(1.0, 0.0)), f - vec2(1.0, 0.0));
+  float c = dot(seaGrad(i + vec2(0.0, 1.0)), f - vec2(0.0, 1.0)), d = dot(seaGrad(i + vec2(1.0, 1.0)), f - vec2(1.0, 1.0));
+  return clamp(0.5 + 0.75 * mix(mix(a, b, u.x), mix(c, d, u.x), u.y), 0.0, 1.0);
+}
 // (Train i's share here: the swell as much as gets in; the wind sea's longer waves only as far as
 // the fetch lets the wind raise them.)
 float seaScale(int i, float k, float wpLim, float swellK) {
@@ -388,11 +422,15 @@ float seaHeight(vec2 p, float spacing, float wpLim, float swellK, out vec2 chop)
   float h = 0.0;
   chop = vec2(0.0);
   vec2 pw = seaWarp(p);
+  vec2 pwB = seaWarpB(p);
+  vec2 fine = spacing < 3.6 ? seaFine(p) : vec2(0.0);
   for (int i = 0; i < ${SEA_N}; i++) {
     vec4 W = uSeaW[i];
-    float f = smoothstep(2.5 * spacing, 6.0 * spacing, 6.2832 / W.z) * seaScale(i, W.z, wpLim, swellK);
+    float lam = 6.2832 / W.z;
+    float f = smoothstep(2.5 * spacing, 6.0 * spacing, lam) * seaScale(i, W.z, wpLim, swellK);
     if (f <= 0.0) continue;
-    float ph = dot(pw, W.xy) * W.z + uSeaPh[i];
+    vec2 pp = ((i & 1) == 0 ? pw : pwB) + fine * (1.0 - smoothstep(4.0, 9.0, lam));
+    float ph = dot(pp, W.xy) * W.z + uSeaPh[i];
     h += f * W.w * sin(ph);
     chop += f * 0.65 * W.w * cos(ph) * W.xy;
   }
@@ -417,7 +455,10 @@ vec4 seaPixel(vec2 p) {
 float seaReach(vec4 J, vec2 d) { return abs(dot(J.xy, d)) + abs(dot(J.zw, d)) + 1e-4; }
 void seaSurface(vec3 rel, vec2 p, vec4 J, float wpLim, float swellK) {
   vec2 pw = p;
+  vec2 pwB = p;
+  vec2 fine = vec2(0.0);
   bool warped = false;
+  bool fined = false;
   vec2 slope = vec2(0.0);
   float h = 0.0, v = 0.0;
   // The bands too short to draw at all here are skipped whole, their slopes (the roughness) added
@@ -437,12 +478,23 @@ void seaSurface(vec3 rel, vec2 p, vec4 J, float wpLim, float swellK) {
     float f = smoothstep(3.5, 9.0, 6.2832 / (W.z * seaReach(J, W.xy)));
     lost += 0.5 * ak * ak * (1.0 - f);
     if (f <= 0.0) continue;
-    // (The warp, four noises: only where there's a wave to draw.)
+    // (The warps, several noises each: only where there's a wave to draw; the fine one only
+    // where there's chop to draw.)
     if (!warped) {
       pw = seaWarp(p);
+      pwB = seaWarpB(p);
       warped = true;
     }
-    float ph = dot(pw, W.xy) * W.z + uSeaPh[i];
+    float lam = 6.2832 / W.z;
+    vec2 pp = (i & 1) == 0 ? pw : pwB;
+    if (lam < 9.0) {
+      if (!fined) {
+        fine = seaFine(p);
+        fined = true;
+      }
+      pp += fine * (1.0 - smoothstep(4.0, 9.0, lam));
+    }
+    float ph = dot(pp, W.xy) * W.z + uSeaPh[i];
     float s = sin(ph);
     slope += f * ak * cos(ph) * W.xy;
     h += f * W.w * s;

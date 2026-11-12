@@ -7,6 +7,7 @@ export const WEATHER_AVAILABLE = true;
 /** Weather over Starbase: as the global weather has it, or set. */
 export type { SiteWeather as StarbaseWeather } from './weather/model';
 import type { SiteWeather } from './weather/model';
+import { type KeyOverrides, cleanKeys } from './ui/keys';
 
 /** Free roam's weather: a day as Starbase's climate deals them out ('starbase'), or one picked. */
 export type FreeWeather = 'starbase' | Exclude<SiteWeather, 'natural'>;
@@ -21,6 +22,17 @@ export interface Settings {
   shipSerial: string;
   /** Launch sound off. */
   muted: boolean;
+  /** Loudness, 0..1 (of everything: the world's sounds and the menus'). */
+  volume: number;
+  /** The flight displays' size: 1, or larger for a small or distant screen. */
+  uiScale: number;
+  /**
+   * How much the picture costs to draw, apart from its resolution: 'high' is everything; 'medium'
+   * coarser clouds and shadows; 'low' no shadows or glow as well, for slow graphics cards.
+   */
+  detail: 'high' | 'medium' | 'low';
+  /** How far a drag or a controller's stick turns the camera (1 = normal). */
+  cameraSpeed: number;
   /**
    * Render resolution: a fraction of the display's (1 = full, the default), or 'auto', which lowers
    * it when frames are missed.
@@ -36,9 +48,11 @@ export interface Settings {
   tileLoss: boolean;
   /** Free roam: the ship carries 26 Starlink V3 satellites (deployed with B in orbit). */
   freeStarlink: boolean;
+  /** Keys the player has changed (ui/keys.ts): action -> key, '' for none. The rest are the defaults. */
+  keys: KeyOverrides;
 }
 
-const DEFAULTS: Settings = { shipSerial: 'SN41', muted: false, renderScale: 'auto', clouds: true, freeWeather: 'starbase', engineFailures: false, tileLoss: false, freeStarlink: false };
+const DEFAULTS: Settings = { shipSerial: 'SN41', muted: false, volume: 1, uiScale: 1, detail: 'high', cameraSpeed: 1, renderScale: 'auto', clouds: true, freeWeather: 'starbase', engineFailures: false, tileLoss: false, freeStarlink: false, keys: {} };
 const STORAGE_KEY = 'starship-sim.settings';
 
 function load(): Settings {
@@ -48,9 +62,17 @@ function load(): Settings {
     // (The old setting, 'weather', is gone: free roam starts on Starbase's own.)
     delete (s as Partial<Settings> & { weather?: unknown }).weather;
     if (!FREE_WEATHER.includes(s.freeWeather)) s.freeWeather = 'starbase';
+    // (Anything out of range, from an older version or a hand-edited store: the default.)
+    const num = (x: unknown, lo: number, hi: number, d: number) => (typeof x === 'number' && Number.isFinite(x) ? Math.min(hi, Math.max(lo, x)) : d);
+    s.volume = num(s.volume, 0, 1, 1);
+    s.uiScale = num(s.uiScale, 0.8, 1.5, 1);
+    s.cameraSpeed = num(s.cameraSpeed, 0.25, 3, 1);
+    if (!['high', 'medium', 'low'].includes(s.detail)) s.detail = 'high';
+    s.keys = cleanKeys(s.keys);
+    s.shipSerial = String(s.shipSerial ?? '').replace(/[^A-Za-z0-9 -]/g, '').slice(0, 6) || DEFAULTS.shipSerial;
     return s;
   } catch {
-    return { ...DEFAULTS };
+    return { ...DEFAULTS, keys: {} };
   }
 }
 

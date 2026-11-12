@@ -110,6 +110,16 @@ export class Weather {
   }
 
   /**
+   * The weather of a saved flight, exactly: the same world from the same moment (its config, as
+   * the worker kept it), at once.
+   */
+  restore(cfg: WeatherConfig): void {
+    this.want = null;
+    this.morph = null;
+    this.start(cfg);
+  }
+
+  /**
    * New weather for a flight or a menu scene: the weather asked for over the site (or whatever
    * the day brings), a new random world around it. Takes effect at the next fresh snapshot.
    * calm: a world whose wind at the site stays light for the next few hours (missions).

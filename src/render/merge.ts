@@ -20,6 +20,9 @@ export function mergeStatic(group: THREE.Object3D, keep: Set<THREE.Object3D> = n
     if (g.index) g = g.toNonIndexed();
     for (const name of Object.keys(g.attributes)) if (!['position', 'normal', 'uv'].includes(name)) g.deleteAttribute(name);
     if (!g.attributes.uv) g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(g.attributes.position.count * 2), 2));
+    // (And all plain floats: a model's compressed attributes (normalized integers) won't join
+    // with a box's, and the merge failed, taking every part of that material with it.)
+    for (const name of Object.keys(g.attributes)) g.setAttribute(name, plain(g.attributes[name]));
     g.applyMatrix4(new THREE.Matrix4().multiplyMatrices(toGroup, o.matrixWorld));
     let entry = byMaterial.get(o.material);
     if (!entry) byMaterial.set(o.material, (entry = { geos: [], cast: false, receive: false }));
@@ -31,11 +34,22 @@ export function mergeStatic(group: THREE.Object3D, keep: Set<THREE.Object3D> = n
   for (const o of merged) o.removeFromParent();
   for (const [material, { geos, cast, receive }] of byMaterial) {
     const geometry = mergeGeometries(geos);
-    for (const g of geos) g.dispose();
-    if (!geometry) continue;
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.castShadow = cast;
-    mesh.receiveShadow = receive;
-    group.add(mesh);
+    // (Couldn't be joined after all: each part drawn on its own, as it was, rather than not at all.)
+    const parts = geometry ? [geometry] : geos;
+    if (geometry) for (const g of geos) g.dispose();
+    for (const part of parts) {
+      const mesh = new THREE.Mesh(part, material);
+      mesh.castShadow = cast;
+      mesh.receiveShadow = receive;
+      group.add(mesh);
+    }
   }
+}
+
+/** An attribute as plain 32-bit floats (its values as the shader would see them). */
+function plain(a: THREE.BufferAttribute | THREE.InterleavedBufferAttribute): THREE.BufferAttribute | THREE.InterleavedBufferAttribute {
+  if (a instanceof THREE.BufferAttribute && a.array instanceof Float32Array && !a.normalized) return a;
+  const out = new Float32Array(a.count * a.itemSize);
+  for (let i = 0; i < a.count; i++) for (let k = 0; k < a.itemSize; k++) out[i * a.itemSize + k] = a.getComponent(i, k);
+  return new THREE.BufferAttribute(out, a.itemSize);
 }

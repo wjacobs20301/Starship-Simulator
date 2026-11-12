@@ -118,6 +118,7 @@ export interface MissionDef {
   title: string;
   /** Hand-flown (autopilot off for what you fly) or watched on autopilot (L takes over). */
   group: 'manual' | 'auto' | 'free';
+  /** (A key is named as {key:action}, an action of ui/keys.ts: shown as the key the player has it on.) */
   brief: string;
   /** The mission page's lead, for a long brief (the brief then folds away under it). */
   summary?: string;
@@ -190,7 +191,7 @@ export const MISSIONS: MissionDef[] = [
     id: 'ascent',
     title: 'Hand-Flown Ascent',
     group: 'manual',
-    brief: `You fly Starship off the pad: pitch over through max-Q without breaking it up, stage (Space) and cut the ship's engines (X) with the apoapsis at ${km(ASCENT_APO)} (±${km(ASCENT_TOL)}). The booster flies itself home.`,
+    brief: `You fly Starship off the pad: pitch over through max-Q without breaking it up, stage ({key:launch}) and cut the ship's engines ({key:throttleCut}) with the apoapsis at ${km(ASCENT_APO)} (±${km(ASCENT_TOL)}). The booster flies itself home.`,
     setup: { fly: 'stack' },
     objectives: [
       separation,
@@ -214,7 +215,7 @@ export const MISSIONS: MissionDef[] = [
     id: 'orbit',
     title: 'Reach Orbit',
     group: 'manual',
-    brief: `Fly it yourself all the way to a stable orbit: perigee above ${km(ORBIT_PERIGEE)}. Plan the circularisation burn at apoapsis with a maneuver node (Tab, N). Save as much delta-v as you can.`,
+    brief: `Fly it yourself all the way to a stable orbit: perigee above ${km(ORBIT_PERIGEE)}. Plan the circularisation burn at apoapsis with a maneuver node ({key:map}, {key:node}). Save as much delta-v as you can.`,
     setup: { fly: 'stack' },
     objectives: [
       separation,
@@ -234,7 +235,7 @@ export const MISSIONS: MissionDef[] = [
     id: 'boosterocean',
     title: 'Booster Ocean Splashdown',
     group: 'manual',
-    brief: 'Starts the moment the stages separate, 70 km up, with Super Heavy yours. Turn it round (flip), burn back toward the marker in the Gulf 32 km off the coast (boostback), fall engines-first, light the landing burn (13 engines, then 3) and set it down on the water on the marker, gently. The marker shows in the sky and on the map (Tab); the readout gives the range and heading to it.',
+    brief: 'Starts the moment the stages separate, 70 km up, with Super Heavy yours. Turn it round (flip), burn back toward the marker in the Gulf 32 km off the coast (boostback), fall engines-first, light the landing burn (13 engines, then 3) and set it down on the water on the marker, gently. The marker shows in the sky and on the map ({key:map}); the readout gives the range and heading to it.',
     setup: { start: 'separation', fly: 'booster', boosterOcean: true },
     target: boosterTarget,
     objectives: [boosterSplashInZone, boosterSoft],
@@ -493,6 +494,30 @@ export class MissionTracker {
 
   states(): ObjectiveState[] {
     return this.mission.objectives.map((o) => o.check(this.record));
+  }
+
+  /** The flight's record so far, as plain data (for a saved flight: game/savedFlight.ts). */
+  saveState(): unknown {
+    // (finished: the result was given out already. A flight goes on after its mission is over,
+    // "Keep watching", and is saved like any other.)
+    return JSON.parse(JSON.stringify({ record: this.record, splashSpeed: this.splashSpeed, boosterSplashSpeed: this.boosterSplashSpeed, finished: this.result !== null }));
+  }
+
+  /**
+   * Take up a saved record (after reset() to its mission). Anything missing or odd in it: as a new
+   * flight's. A mission that was already over is over again, quietly: its result is set from the
+   * record, and update() doesn't hand it out a second time (no results screen for it on loading).
+   */
+  loadState(saved: unknown): void {
+    const s = (saved ?? {}) as { record?: Partial<FlightRecord>; splashSpeed?: unknown; boosterSplashSpeed?: unknown; finished?: unknown };
+    this.record = { ...emptyRecord(), ...(typeof s.record === 'object' && s.record ? s.record : {}) };
+    this.splashSpeed = typeof s.splashSpeed === 'number' ? s.splashSpeed : null;
+    this.boosterSplashSpeed = typeof s.boosterSplashSpeed === 'number' ? s.boosterSplashSpeed : null;
+    this.result = null;
+    if (s.finished === true) {
+      const { lines, total } = this.score();
+      this.result = { mission: this.mission, states: this.states(), lines, total, grade: grade(total) };
+    }
   }
 
   score(): { lines: ScoreLine[]; total: number } {

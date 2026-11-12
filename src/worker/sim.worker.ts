@@ -3,11 +3,14 @@
 
 import { DEFAULT_ENV } from '../sim/dynamics';
 import { DT, PHYSICS_WARP_MAX, Simulation } from '../sim/simulation';
-import { Land, WeatherModel } from '../weather/model';
-import type { FromWorker, ToWorker, WarpTarget } from './protocol';
+import { Land } from '../weather/model';
+import type { FromWorker, SaveReply, ToWorker, WarpTarget } from './protocol';
+import { type FlightWeather, flightWeather, loadFlight, saveFlight } from './savedFlight';
 
 const sim = new Simulation({ ...DEFAULT_ENV });
 let land: Land | null = null;
+/** The weather whose wind is on the vehicles (null: still air): saved with a flight. */
+let weather: FlightWeather | null = null;
 let warp = 1;
 let sceneId = 0;
 let paused = false;
@@ -40,6 +43,8 @@ function warpFor(remaining: number): number {
   for (let decade = 1; decade <= 1e5; decade *= 10) for (const m of [1, 2, 5]) if (m * decade <= want) w = m * decade;
   return w;
 }
+
+const reply = (m: SaveReply) => self.postMessage(m);
 
 self.onmessage = (ev: MessageEvent<ToWorker>) => {
   const msg = ev.data;
@@ -95,17 +100,29 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       sim.commandReturn(msg.target);
       lastPredict = -Infinity;
       break;
-    case 'weather': {
+    case 'weather':
       if (msg.land && !land) land = new Land(msg.land);
-      if (!msg.cfg) {
-        sim.env.wind = undefined;
-        break;
-      }
-      const model = new WeatherModel(msg.cfg, land);
-      const DEG = 180 / Math.PI;
-      sim.env.wind = (geo, t, gusts = true) => model.wind(geo.lat * DEG, geo.lon * DEG, Math.max(0, geo.h), t, gusts);
+      weather = flightWeather(msg.cfg, land);
+      sim.env.wind = weather?.wind;
       break;
-    }
+    case 'save':
+      reply({ type: 'saved', data: saveFlight(sim, weather) });
+      break;
+    case 'load':
+      if (msg.land && !land) land = new Land(msg.land);
+      try {
+        weather = loadFlight(sim, msg.data, land);
+        // A flight picked up again runs at 1x, with nothing left over from the one it replaces.
+        warp = 1;
+        warpTo = null;
+        accumulator = 0;
+        lastPredict = -Infinity;
+        reply({ type: 'loaded', events: sim.events, weather: weather?.cfg ?? null });
+      } catch (err) {
+        reply({ type: 'loadFailed', reason: err instanceof Error ? err.message : String(err) });
+      }
+      sceneId++;
+      break;
   }
 };
 

@@ -39,7 +39,10 @@ function compact(g: THREE.BufferGeometry, m: THREE.Matrix4): THREE.BufferGeometr
     const a = attr as THREE.BufferAttribute;
     const arr = new Float32Array(remap.size * a.itemSize);
     for (const [from, to] of remap) for (let k = 0; k < a.itemSize; k++) arr[to * a.itemSize + k] = a.getComponent(from, k);
-    out.setAttribute(name, new THREE.BufferAttribute(arr, a.itemSize, a.normalized));
+    // (Plain floats now, read out as the shader would see them: not marked normalized any more.
+    // Left marked, parts from compressed and uncompressed attributes wouldn't merge, and the
+    // whole material's share of the garden's vehicles went undrawn.)
+    out.setAttribute(name, new THREE.BufferAttribute(arr, a.itemSize, false));
   }
   out.setIndex(new THREE.BufferAttribute(idx, 1));
   out.applyMatrix4(m);
@@ -73,13 +76,15 @@ export function rocketGarden(lib: ModelLibrary, vehicles: GardenVehicle[]): THRE
   }
   for (const { material, parts } of buckets.values()) {
     const merged = mergeGeometries(parts);
-    for (const p of parts) p.dispose();
-    if (!merged) continue;
-    merged.computeBoundingSphere();
-    const mesh = new THREE.Mesh(merged, material);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    group.add(mesh);
+    // (Couldn't be joined: each part on its own rather than none of them.)
+    if (merged) for (const p of parts) p.dispose();
+    for (const part of merged ? [merged] : parts) {
+      part.computeBoundingSphere();
+      const mesh = new THREE.Mesh(part, material);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      group.add(mesh);
+    }
   }
   return group;
 }

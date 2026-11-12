@@ -1,8 +1,11 @@
 import type { PilotCommand } from '../sim/pilot';
-import type { FlightOptions, ManeuverNode, MenuScene, MissionStart, Snapshot } from '../sim/simulation';
+import type { FlightOptions, ManeuverNode, MenuScene, MissionStart, SimEvent, Snapshot } from '../sim/simulation';
 import type { ReturnTarget } from '../sim/shipReturn';
 import type { Trajectory } from '../sim/trajectory';
 import type { WeatherConfig } from '../weather/model';
+import type { SavedFlight } from './savedFlight';
+
+export type { SavedFlight };
 
 export type ToWorker =
   | { type: 'launch' }
@@ -31,10 +34,22 @@ export type ToWorker =
   /** The weather (the same as the renderer's): its wind acts on the vehicles. null: still air. */
   | { type: 'weather'; cfg: WeatherConfig | null; land: Uint8Array | null }
   /** Speed time up until just before the maneuver node's burn / the autopilot's next event, then back to 1x. */
-  | { type: 'warpTo'; target: WarpTarget };
+  | { type: 'warpTo'; target: WarpTarget }
+  /** Ask for the flight as it is now, to keep and load later: answered by a 'saved' message. */
+  | { type: 'save' }
+  /**
+   * Take up a saved flight (the answer to an earlier 'save', kept as JSON), in place of whatever
+   * is flying: answered by 'loaded', or 'loadFailed' (the flight in progress then carries on
+   * untouched). The flight comes back with its own weather's wind and at 1x (any warp is
+   * dropped; paused stays as it is). Like a 'reset' it counts as a scene: the snapshots' sceneId
+   * goes up by one once it has been handled, loaded or not. land: the land mask, as in 'weather'
+   * (needed only if no 'weather' message has brought it yet).
+   */
+  | { type: 'load'; data: SavedFlight; land?: Uint8Array | null };
 
 export type WarpTarget = 'node' | 'next';
 
+/** The world as it is now, ~60 times a second. */
 export type FromWorker = {
   type: 'snapshot';
   snapshot: Snapshot;
@@ -51,3 +66,19 @@ export type FromWorker = {
   /** Predicted trajectories, attached only when recomputed (a few times a second). */
   trajectories?: Trajectory[];
 };
+
+/** The answers to 'save' and 'load'. */
+export type SaveReply =
+  /** The flight as it was when asked (plain JSON: JSON.stringify it into localStorage / IndexedDB). */
+  | { type: 'saved'; data: SavedFlight }
+  /**
+   * The saved flight is now the one flying. events: its whole log so far (the snapshots only
+   * carry what's logged from here on); weather: the weather it flies in (the renderer should show
+   * the same).
+   */
+  | { type: 'loaded'; events: SimEvent[]; weather: WeatherConfig | null }
+  /** The save couldn't be loaded (and why, in words): nothing has changed. */
+  | { type: 'loadFailed'; reason: string };
+
+/** Everything the worker posts: a snapshot every tick, and the answers to 'save' / 'load'. */
+export type WorkerMessage = FromWorker | SaveReply;

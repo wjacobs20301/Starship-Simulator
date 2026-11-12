@@ -21,24 +21,26 @@ export const SUN_AT_DAY0 = new THREE.Vector3(0.7, 0.55, 0.3).normalize();
  * Image-based lighting for polished stainless steel: a sky gradient with a bright
  * horizon, a sun hotspot, and sand-colored ground below (Boca Chica beach).
  */
-function outdoorEnvironment(): { env: THREE.Scene; sunDir: THREE.Vector3; overcast: { value: number } } {
+function outdoorEnvironment(): { env: THREE.Scene; sunDir: THREE.Vector3; overcast: { value: number }; ground: THREE.Vector3; space: { value: number } } {
   const env = new THREE.Scene();
   const mat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     depthWrite: false,
-    uniforms: { sunDir: { value: new THREE.Vector3(0.7, 0.55, 0.3).normalize() }, overcast: { value: 0 } },
+    uniforms: { sunDir: { value: new THREE.Vector3(0.7, 0.55, 0.3).normalize() }, overcast: { value: 0 }, ground: { value: new THREE.Vector3(0.42, 0.37, 0.28) }, space: { value: 0 } },
     vertexShader: `varying vec3 vDir; void main() { vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
     fragmentShader: `
       uniform vec3 sunDir;
       uniform float overcast;
+      uniform vec3 ground;   // what's below: sand, sea, or the Earth from high up
+      uniform float space;   // 0 at the ground .. 1 above the air (a black sky)
       varying vec3 vDir;
       void main() {
         vec3 d = normalize(vDir);
         float h = d.y;
-        vec3 zenith = vec3(0.18, 0.36, 0.72);
-        vec3 horizon = vec3(0.78, 0.86, 0.95);
-        vec3 ground = vec3(0.42, 0.37, 0.28);
-        vec3 sky = mix(horizon, zenith, pow(max(h, 0.0), 0.45));
+        vec3 zenith = vec3(0.18, 0.36, 0.72) * (1.0 - space);
+        vec3 horizon = mix(vec3(0.78, 0.86, 0.95), vec3(0.3, 0.45, 0.7), space);
+        // (From high up the sky's blue is a thin band at the horizon, black above it.)
+        vec3 sky = mix(horizon, zenith, pow(max(h, 0.0), mix(0.45, 0.12, space)));
         vec3 col = h >= 0.0 ? sky : mix(horizon * 0.8, ground, smoothstep(0.0, 0.08, -h));
         // Under an overcast: a grey deck overhead (a little brighter toward the zenith), no sun.
         vec3 deck = vec3(0.5, 0.52, 0.55) * mix(0.8, 1.0, max(h, 0.0));
@@ -49,7 +51,7 @@ function outdoorEnvironment(): { env: THREE.Scene; sunDir: THREE.Vector3; overca
       }`,
   });
   env.add(new THREE.Mesh(new THREE.SphereGeometry(100, 64, 32), mat));
-  return { env, sunDir: mat.uniforms.sunDir.value, overcast: mat.uniforms.overcast };
+  return { env, sunDir: mat.uniforms.sunDir.value, overcast: mat.uniforms.overcast, ground: mat.uniforms.ground.value, space: mat.uniforms.space };
 }
 
 export interface World {
@@ -62,6 +64,8 @@ export interface World {
   /** Render with bloom (HDR scene -> bloom -> tone mapping). */
   render(): void;
   bloom: UnrealBloomPass;
+  /** The shadow map's largest size, texels across (4096; less on lower detail). */
+  shadowMax: number;
   atmosphere: SceneAtmospherePass;
   exposure: AutoExposurePass;
   setSize(width: number, height: number): void;
@@ -95,6 +99,11 @@ export interface World {
   setOvercast(k: number): void;
   /** Lightning's light on everything near: 0 (none) .. 1 (a stroke a km or two away). */
   setFlash(k: number): void;
+  /**
+   * What the reflections show below the horizon: sea (1) or land (0) under the camera, and its
+   * height (m: the Earth from high up, under a black sky).
+   */
+  setSurroundings(sea: number, altitude: number): void;
   /** Direction to the sun (world axes, unit). */
   readonly sunDir: THREE.Vector3;
   /** Equatorial (celestial) -> world rotation now: the star sky's, turning with the day. */
@@ -259,7 +268,9 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.0;
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // (Soft-edged: three's percentage-closer filter. Its separate "soft" kind is gone from three,
+  // and asking for it was a warning in the console at every start.)
+  renderer.shadowMap.type = THREE.PCFShadowMap;
 
   const scene = new THREE.Scene();
   const pmrem = new THREE.PMREMGenerator(renderer);
@@ -285,6 +296,10 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
   /** The day angle the environment map was last drawn for, and when (ms). */
   let envAngle = 0;
   let envAt = 0;
+  const envGround = new THREE.Vector3();
+  // (The sea as the waves' own reflections see it: other water, itself mostly reflected sky.)
+  const ENV_SEA = new THREE.Vector3(0.2, 0.28, 0.36);
+  const ENV_EARTH = new THREE.Vector3(0.26, 0.36, 0.5);
   sun.position.copy(sunDir);
   sun.castShadow = true;
   sun.shadow.mapSize.set(4096, 4096);
@@ -354,6 +369,7 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
     statics,
     sun,
     bloom,
+    shadowMax: 4096,
     exposure,
     atmosphere,
     composer,
@@ -394,7 +410,15 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
       const sunUp = THREE.MathUtils.smoothstep(elev + dip, -0.05, 0.03);
       const day = THREE.MathUtils.smoothstep(elev, -0.2, 0.05);
       sun.intensity = 2.6 * sunUp;
-      hemi.intensity = 0.3 * (1 - 0.7 * t2) * (0.08 + 0.92 * day);
+      // (Low in the sky its light comes through far more air: yellow, then orange at the horizon,
+      // as the sky's own shader has it for the clouds.)
+      const low = THREE.MathUtils.smoothstep(elev + dip, -0.02, 0.32) ** 0.7;
+      sun.color.setRGB(1, THREE.MathUtils.lerp(0.52, 0.945, low), THREE.MathUtils.lerp(0.26, 0.863, low), THREE.SRGBColorSpace);
+      // The sky's light on the ground: falling away fast as the sun nears the horizon and all but
+      // gone a few degrees under it, as the sky itself is drawn. (On the stars' slower curve, the
+      // ground at dawn stood bright as day under a sky still nearly black.)
+      const skyLight = THREE.MathUtils.smoothstep(elev, -0.1, 0.1) ** 2;
+      hemi.intensity = 0.3 * (1 - 0.7 * t2) * (0.04 + 0.96 * skyLight);
       // How dark it is here: the sun's height at the ground, whether the sun is in sight up high.
       const dark = 1 - THREE.MathUtils.lerp(day, sunUp, t2);
       // (Dim at the ground, where the eye is on lit things and a night away from them is dark;
@@ -404,7 +428,7 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
       // adapted to the sunlit ship and Earth); fully in the Earth's shadow.
       const starsShow = Math.max(dark, 0.4 * t2);
       // (Its sky is a daytime one: at night only a trace of it, least at the ground.)
-      scene.environmentIntensity = 0.75 * (1 - 0.6 * t2) * (THREE.MathUtils.lerp(0.02, 0.06, t2) + (1 - THREE.MathUtils.lerp(0.02, 0.06, t2)) * day) + THREE.MathUtils.lerp(0.03, 0.08, t2) * dark;
+      scene.environmentIntensity = 0.75 * (1 - 0.6 * t2) * (THREE.MathUtils.lerp(0.02, 0.06, t2) + (1 - THREE.MathUtils.lerp(0.02, 0.06, t2)) * THREE.MathUtils.lerp(skyLight, day, t2)) + THREE.MathUtils.lerp(0.03, 0.08, t2) * dark;
       stars.update(camera, starsShow, 1 - t2, performance.now() / 1000, renderer.getPixelRatio());
     },
     sunDir,
@@ -427,6 +451,20 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
     setFlash(k: number) {
       flash.intensity = 2.5 * k;
     },
+    setSurroundings(sea: number, altitude: number) {
+      // Sand at Starbase; out at sea, dark water (a stage afloat reflected beach sand, and came
+      // out beige); from high up the blue-white Earth, under a sky gone black.
+      const high = THREE.MathUtils.smoothstep(altitude, 5000, 50000);
+      const space = THREE.MathUtils.smoothstep(altitude, 20000, 80000);
+      envGround.set(0.42, 0.37, 0.28).lerp(ENV_SEA, sea).lerp(ENV_EARTH, high);
+      const now = performance.now();
+      if ((envGround.distanceTo(outdoor.ground) > 0.03 || Math.abs(space - outdoor.space.value) > 0.06) && now - envAt > 1000) {
+        envAt = now;
+        outdoor.ground.copy(envGround);
+        outdoor.space.value = space;
+        redrawEnv();
+      }
+    },
     setOvercast(k: number) {
       hemi.color.copy(HEMI_SKY).lerp(HEMI_OVERCAST, k);
       const now = performance.now();
@@ -442,7 +480,7 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
       // The map's resolution: 4096 texels for the whole launch site (~0.3 m each), 2048 for a
       // vehicle alone (its few hundred metres: ~0.15 m), a quarter of the cost each time it's
       // redrawn (every frame while something moves).
-      const size = r > 250 ? 4096 : 2048;
+      const size = Math.min(this.shadowMax, r > 250 ? 4096 : 2048);
       if (sun.shadow.mapSize.x !== size) {
         sun.shadow.mapSize.set(size, size);
         sun.shadow.map?.dispose();

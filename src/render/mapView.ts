@@ -175,8 +175,28 @@ export class MapView {
       const el = this.next();
       el.className = `map-label ${cls}`;
       if (el.innerHTML !== html) el.innerHTML = html;
-      el.style.transform = `translate(${((rel.x + 1) / 2) * w}px, ${((1 - rel.y) / 2) * h}px)`;
+      const px = ((rel.x + 1) / 2) * w;
+      const py = ((1 - rel.y) / 2) * h;
+      el.style.transform = `translate(${px}px, ${py}px)`;
+      // Its text clear of the labels already placed: moved down or up a line or two where marks
+      // crowd together (the ship, entry, apogee and impact along one short arc were one unreadable
+      // heap). (Its size reckoned from the text, not measured: measuring forces a layout a frame.)
+      const lines = html.replace(/<i><\/i>/g, '').split('<br>').map((x) => x.replace(/<[^>]*>/g, '').length);
+      const bw = 10 + 6.6 * Math.max(...lines);
+      const bh = 14.5 * lines.length + 2;
+      let dy = 0;
+      for (const k of [0, 1, -1, 2, -2, 3, -3]) {
+        dy = k * bh;
+        const x0 = px + 8, y0 = py - 7 + dy;
+        if (!placed.some((b) => x0 < b[0] + b[2] && b[0] < x0 + bw && y0 < b[1] + b[3] && b[1] < y0 + bh)) break;
+      }
+      placed.push([px + 8, py - 7 + dy, bw, bh]);
+      const text = el.lastElementChild as HTMLElement | null;
+      const shift = dy ? `translateY(${dy}px)` : '';
+      if (text && text.style.transform !== shift) text.style.transform = shift;
     };
+    /** The labels' text boxes placed so far this frame: x, y, width, height (px). */
+    const placed: [number, number, number, number][] = [];
 
     label([0, 0, 0], 'site', '<i></i><span>Starbase</span>');
     if (this.bodies) {

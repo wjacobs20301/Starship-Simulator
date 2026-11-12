@@ -10,6 +10,7 @@ import { type MissionTarget, distanceKm } from '../game/missions';
 import type { StageId } from '../sim/vehicle';
 import { Navball } from './navball';
 import { Gauge, type Webcast } from './webcast';
+import { kbd } from './keyLabels';
 
 const SAS_BUTTONS: { mode: SasMode; label: string; title: string }[] = [
   { mode: 'stability', label: '⊙', title: 'Hold attitude' },
@@ -25,6 +26,7 @@ const SAS_BUTTONS: { mode: SasMode; label: string; title: string }[] = [
 ];
 
 export class FlightPanel {
+  private lastReadout = '';
   private navball: Navball;
   private throttle = new Gauge('THROTTLE', '%', 1);
   private readout: HTMLElement;
@@ -72,8 +74,8 @@ export class FlightPanel {
     this.webcast.setPiloting(piloting);
     this.webcast.setMode(
       p.manual
-        ? `<b>MANUAL</b> · ${flying ? '' : `${(p.target === 'stack' ? 'STARSHIP' : p.target).toUpperCase()} · `}<kbd>L</kbd> AUTOPILOT`
-        : `AUTOPILOT · <kbd>L</kbd> TAKE CONTROL`,
+        ? `<b>MANUAL</b> · ${flying ? '' : `${(p.target === 'stack' ? 'STARSHIP' : p.target).toUpperCase()} · `}${kbd('manual')} AUTOPILOT`
+        : `AUTOPILOT · ${kbd('manual')} TAKE CONTROL`,
     );
     // Tag the flown vehicle's block (the stack flies on the booster).
     const stage = piloting && v ? activeStageId(v.stages) : null;
@@ -104,10 +106,15 @@ export class FlightPanel {
     const dv = Object.entries(t.deltaV)
       .map(([id, x]) => `${id === 'booster' ? 'B' : 'S'} ${Math.round(x ?? 0).toLocaleString('en-US')}`)
       .join(' / ');
-    this.readout.innerHTML =
+    const readout =
       `HDG <b>${this.navball.heading.toFixed(0).padStart(3, '0')}°</b> PITCH <b>${this.navball.pitch.toFixed(0)}°</b> ` +
       `T/W <b>${t.twr.toFixed(2)}</b> ΔV <b>${dv}</b> <b>${lit.length}</b> LIT${set ? ` · ${set.label.toUpperCase()}` : ''}` +
       (p.sas === 'off' ? ' <b class="warn">SAS OFF</b>' : '');
+    // (Only when it changes: every write costs a style / layout pass.)
+    if (readout !== this.lastReadout) {
+      this.lastReadout = readout;
+      this.readout.innerHTML = readout;
+    }
   }
 
   /**

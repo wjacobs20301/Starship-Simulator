@@ -37,9 +37,16 @@ export class AudioEngine {
     if (this.ctx && this.world) this.world.gain.setTargetAtTime(level, this.ctx.currentTime, seconds / 3);
   }
 
-  setMuted(muted: boolean): void {
+  /** Sound off, and how loud when on (0..1; heard as a loudness, so squared for the gain). */
+  setMuted(muted: boolean, volume = this.volume): void {
     this.muted = muted;
-    if (this.ctx && this.master) this.master.gain.setTargetAtTime(muted ? 0 : 1, this.ctx.currentTime, 0.05);
+    this.volume = volume;
+    if (this.ctx && this.master) this.master.gain.setTargetAtTime(this.level(), this.ctx.currentTime, 0.05);
+  }
+
+  private volume = 1;
+  private level(): number {
+    return this.muted ? 0 : this.volume * this.volume;
   }
 
   private start(): void {
@@ -47,7 +54,7 @@ export class AudioEngine {
     const ctx = new AudioContext();
     this.ctx = ctx;
     this.master = ctx.createGain();
-    this.master.gain.value = this.muted ? 0 : 1;
+    this.master.gain.value = this.level();
     // Keep the peaks from clipping when you're right under it.
     const limiter = ctx.createDynamicsCompressor();
     limiter.threshold.value = -6;

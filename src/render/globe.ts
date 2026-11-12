@@ -46,7 +46,29 @@ export function createGlobe(texture: THREE.Texture): THREE.Mesh {
   g.computeBoundingSphere();
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.anisotropy = 8;
-  const mesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ map: texture, roughness: 0.85, metalness: 0 }));
+  const material = new THREE.MeshStandardMaterial({ map: texture, roughness: 0.85, metalness: 0 });
+  // Its sea marked in the alpha, as the tiles over it mark theirs (told by colour the same way):
+  // the atmosphere pass dims water under a cloud's shadow less than land, and where this sphere
+  // shows (the poles, a tile not loaded yet) its unmarked sea was a darker rectangle beside theirs.
+  material.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nfloat gGlobeWater = 0.0;')
+      .replace(
+        '#include <map_fragment>',
+        `#include <map_fragment>
+vec3 globeSrgb = pow(max(diffuseColor.rgb, vec3(0.0)), vec3(1.0 / 2.2));
+gGlobeWater = smoothstep(0.08, 0.2, (globeSrgb.b - max(globeSrgb.r, globeSrgb.g)) / max(globeSrgb.b, 0.01));`,
+      )
+      .replace(
+        '#include <dithering_fragment>',
+        `#include <dithering_fragment>
+#ifdef OPAQUE
+gl_FragColor.a = 1.0 - 0.5 * gGlobeWater;
+#endif`,
+      );
+  };
+  material.customProgramCacheKey = () => 'globe-base-v1';
+  const mesh = new THREE.Mesh(g, material);
   mesh.name = 'Globe';
   mesh.frustumCulled = false;
   return mesh;

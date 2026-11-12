@@ -72,6 +72,8 @@ export class CameraRig {
   mode: CameraMode = 'orbit';
   /** Photo mode's own field of view (deg), over every camera's; null: each its own. */
   fovOverride: number | null = null;
+  /** How far a drag turns the view (1 = normal; the Settings' camera speed). */
+  sensitivity = 1;
   azimuth = -2.3;
   elevation = 0.12;
   distance = 420;
@@ -95,18 +97,21 @@ export class CameraRig {
       el.setPointerCapture(e.pointerId);
     });
     el.addEventListener('pointerup', () => (this.dragging = false));
+    // (A drag the browser took over, or the pointer's capture lost: it's over too.)
+    el.addEventListener('pointercancel', () => (this.dragging = false));
+    el.addEventListener('lostpointercapture', () => (this.dragging = false));
     el.addEventListener('pointermove', (e) => {
       if (!this.dragging) return;
       if (this.map) {
-        const k = 0.004 * Math.min(1, (this.mapDistance - 6.2e6) / 1.2e7 + 0.15);
+        const k = 0.004 * this.sensitivity * Math.min(1, (this.mapDistance - 6.2e6) / 1.2e7 + 0.15);
         this.mapLon -= (e.clientX - this.last.x) * k;
         this.mapLat = THREE.MathUtils.clamp(this.mapLat + (e.clientY - this.last.y) * k, -1.5, 1.5);
         this.last = { x: e.clientX, y: e.clientY };
         return;
       }
       if (this.mode !== 'orbit') this.mode = 'orbit';
-      this.azimuth -= (e.clientX - this.last.x) * 0.005;
-      this.elevation = THREE.MathUtils.clamp(this.elevation + (e.clientY - this.last.y) * 0.005, -1.4, 1.5);
+      this.azimuth -= (e.clientX - this.last.x) * 0.005 * this.sensitivity;
+      this.elevation = THREE.MathUtils.clamp(this.elevation + (e.clientY - this.last.y) * 0.005 * this.sensitivity, -1.4, 1.5);
       this.last = { x: e.clientX, y: e.clientY };
     });
     el.addEventListener(

@@ -1,6 +1,7 @@
 // Owns the world state: vehicles, time, events. Steps physics at a fixed dt and
 // produces render/telemetry snapshots in the pad's local ENU frame.
 
+import { type EventKind, type EventWho, eventKind, eventWho } from './events';
 import { G0, MU, OMEGA_E, PAD, DEG, RE } from './constants';
 import { MISSION, STARLINK_V3, STARSHIP_V3, SUPER_HEAVY_V3 } from './config/starshipV3';
 import { type Aux, DEFAULT_ENV, type Env, currentAux, rk4Step } from './dynamics';
@@ -99,6 +100,9 @@ import { type StageId, Vehicle, massProps, stageDry } from './vehicle';
 import { PayloadBay } from './payload';
 import { EngineFaults, type FaultSetting } from './engineFaults';
 import { HeatShield, type ShieldSnapshot, type TileSetting } from './heatShield';
+import { readGraph, writeGraph } from './saveGraph';
+import { SAVE_VERSION, type SavedSimulation, saveKit } from './saveFlight';
+import { SAVE_UPGRADES, upgradeSave } from './saveVersion';
 
 export const DT = 0.01;
 
@@ -106,6 +110,9 @@ export interface SimEvent {
   t: number;
   missionTime: number | null;
   text: string;
+  /** What it is, for the events the game acts on, and whose (sim/events.ts). */
+  kind?: EventKind;
+  who?: EventWho;
 }
 
 export interface VehicleSnapshot {
@@ -283,8 +290,71 @@ export class Simulation {
   /** The ship's orbit: SECO with the apoapsis here and a circularisation burn there (m), or null (the test flights' path). */
   parkingAlt: number | null = null;
 
+  /**
+   * The flight log as a function to hand to the things that write to it (the autopilots, the
+   * engine faults...). One function for all of them, so a saved flight can say what their `log`
+   * was (saveFlight.ts) and a loaded one gets its own simulation's.
+   */
+  readonly logLine = (text: string): void => this.log(text);
+
   constructor(public env: Env = DEFAULT_ENV) {
     this.reset();
+  }
+
+  /** The flight's options as configure() takes them. */
+  get options(): FlightOptions {
+    return {
+      payload: this.payloadKind,
+      parkingAlt: this.parkingAlt,
+      faults: this.engineFaults,
+      faultSeed: this.faultSeed,
+      tiles: this.tileLoss,
+      splashFireball: this.splashFireball,
+      deploy: this.deployMode,
+    };
+  }
+
+  /**
+   * The flight as it is now, as plain JSON (it survives JSON.stringify and back): load() puts it
+   * into another simulation, which flies on from here step for step as this one will. Everything
+   * the simulation holds is written (saveFlight.ts) except the environment's wind, a function:
+   * whoever made it gives the loading simulation the same one.
+   */
+  save(): SavedSimulation {
+    return {
+      version: SAVE_VERSION,
+      t: this.t,
+      missionTime: this.mission.missionTime,
+      phase: this.mission.phase,
+      // (Through JSON, so the summary shares nothing with the live flight.)
+      options: JSON.parse(JSON.stringify(this.options)) as FlightOptions,
+      pad: this.launchPad,
+      boosterOcean: this.boosterOcean ? [this.boosterOcean[0], this.boosterOcean[1]] : null,
+      env: { gravity: this.env.gravity, aero: this.env.aero, wind: !!this.env.wind },
+      state: writeGraph(this, saveKit(this.logLine), ['env']),
+    };
+  }
+
+  /**
+   * Take up a saved flight: this simulation becomes the one that was saved (whatever it was
+   * doing is dropped). Throws, leaving this simulation as it was, if the save is of another
+   * format version or can't be read. The wind isn't in a save: set env.wind as it was first.
+   */
+  load(saved: SavedSimulation): void {
+    if (typeof saved !== 'object' || saved === null || typeof saved.version !== 'number') throw new Error("Can't load the flight: this isn't a saved flight");
+    // (A save from an older build: brought up to this one's format, or refused saying why.)
+    saved = upgradeSave<SavedSimulation>(saved, SAVE_VERSION, SAVE_UPGRADES);
+    // Everything is read before anything is changed: a save that can't be read leaves this flight alone.
+    const fields = readGraph(saved.state, this, saveKit(this.logLine));
+    const mine = Object.keys(this).filter((k) => k !== 'env');
+    const missing = mine.filter((k) => !(k in fields));
+    const extra = Object.keys(fields).filter((k) => !mine.includes(k));
+    if (missing.length || extra.length) throw new Error(`Can't load the flight: the save doesn't match this version (${[...missing, ...extra].join(', ')})`);
+    Object.assign(this, fields);
+    // (The same gravity and air; the wind stays whatever this simulation was given.)
+    if (saved.env && (saved.env.gravity !== this.env.gravity || saved.env.aero !== this.env.aero)) {
+      this.env = { ...this.env, gravity: saved.env.gravity, aero: saved.env.aero };
+    }
   }
 
   /** Set the next flight's options (they take effect at the reset); left out = the default. */
@@ -307,8 +377,8 @@ export class Simulation {
       { def: STARSHIP_V3, prop: STARSHIP_V3.propMass * MISSION.shipPropLoad },
     ]);
     this.bay = this.payloadKind === 'starlink' ? new PayloadBay(undefined, this.deployMode === 'auto') : null;
-    this.faults = new EngineFaults(this.engineFaults, this.faultSeed, (text) => this.log(text));
-    this.shield = new HeatShield(this.tileLoss, this.faultSeed + 7, (text) => this.log(text));
+    this.faults = new EngineFaults(this.engineFaults, this.faultSeed, this.logLine);
+    this.shield = new HeatShield(this.tileLoss, this.faultSeed + 7, this.logLine);
     if (this.bay) stack.stages[1].payload = PayloadBay.massFor(this.bay.aboard);
     this.vehicles = [stack];
     this.health.clear();
@@ -502,7 +572,7 @@ export class Simulation {
   }
 
   log(text: string): void {
-    this.events.push({ t: this.t, missionTime: this.mission?.missionTime ?? null, text });
+    this.events.push({ t: this.t, missionTime: this.mission?.missionTime ?? null, text, kind: eventKind(text), who: eventWho(text) });
   }
 
   find(id: string): Vehicle | undefined {
@@ -545,7 +615,7 @@ export class Simulation {
     this.pilot.targetDir = booster && br && this.pilot.flies(booster) && this.aux.get('booster') ? br.targetHold(booster, this.aux.get('booster')!, dt) : null;
     this.mission.update(dt);
     this.trackBurn(dt);
-    this.bay?.update(this.t, dt, this.mission.missionTime, this.find('ship'), (text) => this.log(text));
+    this.bay?.update(this.t, dt, this.mission.missionTime, this.find('ship'), this.logLine);
     this.pilot.deployHold = this.bay?.hold ?? null;
     this.watchShield();
     this.watchSplash();
@@ -712,7 +782,7 @@ export class Simulation {
       this.turnaround = swung ? { pad, slew: target.slew!, stage: 'wait', t: this.t } : null;
     }
     this.pilot.set({ manual: false });
-    m.shipReturn = new ShipReturn(this, ship, target, (text) => this.log(text));
+    m.shipReturn = new ShipReturn(this, ship, target, this.logLine);
     if (m.shipReturn.phase === 'lost') {
       this.returnNotice = { text: m.shipReturn.status, t: this.t };
       m.shipReturn = null;
@@ -967,7 +1037,7 @@ export class Simulation {
       for (const t of this.towers) t.update(h);
       this.t += h;
       // (The deployment starts on time on rails too: then time runs at physics speed to watch it.)
-      this.bay?.update(this.t, h, this.mission.missionTime, this.find('ship'), (text) => this.log(text));
+      this.bay?.update(this.t, h, this.mission.missionTime, this.find('ship'), this.logLine);
       this.watchShield();
       done += h;
       this.refreshAux();

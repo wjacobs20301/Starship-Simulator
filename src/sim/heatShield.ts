@@ -20,6 +20,7 @@
 // there (or a big gap up the nose) burns on into the tank.
 
 import type { V3 } from './math';
+import { SeededRandom } from './seededRandom';
 
 /** Rows along the ship (m from its base) and columns round its windward half (deg from the belly line, + toward body +z). */
 export const SHIELD = {
@@ -56,15 +57,8 @@ export interface ShieldSnapshot {
   lost: number;
 }
 
-function rng(seed: number): () => number {
-  let a = Math.imul((seed >>> 0) ^ 0x5bd1e995, 0x27d4eb2d) >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
+function rng(seed: number): SeededRandom {
+  return new SeededRandom(Math.imul((seed >>> 0) ^ 0x5bd1e995, 0x27d4eb2d) >>> 0);
 }
 
 export class HeatShield {
@@ -77,7 +71,7 @@ export class HeatShield {
   verdict: 'go' | 'nogo' | null = null;
   /** Flaps cooked by a burn-through at their hinge (indices into the ship's surfaces: fwd L, fwd R, aft L, aft R). */
   flapsHit = new Set<number>();
-  private rand: () => number;
+  private rand: SeededRandom;
   private shaken = new Set<string>();
   private burned = new Set<number>();
 
@@ -111,11 +105,11 @@ export class HeatShield {
     const odds = { liftoff: 0.35, maxq: 0.3, staging: 0.45 }[moment];
     let lost = 0;
     for (let k = 0; k < 3; k++) {
-      if (this.rand() > odds) continue;
-      const row = moment === 'staging' && this.rand() < 0.6 ? Math.floor(this.rand() * 6) : Math.floor(this.rand() * SHIELD.rows);
-      const col = Math.floor(this.rand() * SHIELD.cols);
+      if (this.rand.next() > odds) continue;
+      const row = moment === 'staging' && this.rand.next() < 0.6 ? Math.floor(this.rand.next() * 6) : Math.floor(this.rand.next() * SHIELD.rows);
+      const col = Math.floor(this.rand.next() * SHIELD.cols);
       // Mostly single tiles; now and then a cluster (one knocks its neighbours loose).
-      const n = this.rand() < 0.7 ? 1 : 2 + Math.floor(this.rand() * 7);
+      const n = this.rand.next() < 0.7 ? 1 : 2 + Math.floor(this.rand.next() * 7);
       this.lose(row, col, n);
       lost += n;
     }

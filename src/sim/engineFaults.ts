@@ -14,6 +14,7 @@
 // flight in three sees an engine out somewhere), or scripted (a replay of a real flight: which
 // engine, when). Relights in space are logged either way: Flight 15's deorbit burn is one.
 
+import { SeededRandom } from './seededRandom';
 import type { Vehicle } from './vehicle';
 
 export interface ScriptedFault {
@@ -46,22 +47,16 @@ export function engineName(stage: 'booster' | 'ship', ring: number, n: number): 
   return `${['center', 'inner ring', 'outer ring'][ring] ?? 'outer ring'} Raptor ${n + 1}`;
 }
 
-/** mulberry32: a small seeded generator (the same flight replays the same way). */
-function rng(seed: number): () => number {
+/** The flight's random numbers (the same seed flies the same failures). */
+function rng(seed: number): SeededRandom {
   // (Seeds 1, 2, 3... scrambled first: nearby seeds would start out alike.)
   let a = Math.imul((seed >>> 0) ^ 0x9e3779b9, 0x85ebca6b) >>> 0;
   a = Math.imul(a ^ (a >>> 13), 0xc2b2ae35) >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
+  return new SeededRandom(a);
 }
 
 export class EngineFaults {
-  private rand: () => number;
+  private rand: SeededRandom;
   /** Engines starting now (vehicle id / index), and since when. */
   private starting = new Set<string>();
   /** When each engine last ran (vehicle id / index): a pulse after a moment off isn't a new start. */
@@ -122,7 +117,7 @@ export class EngineFaults {
           const scripted = script.find((s) => !this.done.has(s) && s.noRelightAfter !== undefined && mt !== null && mt >= s.noRelightAfter && s.stage === stage && s.ring === e.place.ring && s.n === n);
           const space = relight && h > SPACE_ALT && v.id === 'ship';
           const p = !random ? 0 : !relight ? IGNITION_FAIL.first : space ? IGNITION_FAIL.space : IGNITION_FAIL.air;
-          if (scripted || this.rand() < p) {
+          if (scripted || this.rand.next() < p) {
             if (scripted) this.done.add(scripted);
             this.fail(v, e, stage, n, 'norelight', space);
             if (space) this.noteRelight(t, key);
@@ -134,7 +129,7 @@ export class EngineFaults {
         if (!lighting && e.throttleCmd <= 0) this.starting.delete(key);
         if (e.throttle > 0.3) {
           this.ran.add(id);
-          if (random && this.rand() < HAZARD * dt) this.fail(v, e, stage, n, 'out');
+          if (random && this.rand.next() < HAZARD * dt) this.fail(v, e, stage, n, 'out');
         }
       });
     }

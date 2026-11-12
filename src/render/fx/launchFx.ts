@@ -405,12 +405,14 @@ export class LaunchFx {
             const along = (side: number, speed: number, spread: number, up: number) =>
               new THREE.Vector3((ax * side - an * spread) * speed, up, (-an * side - ax * spread) * speed);
             // Jets out of the tunnel mouths, confined to the trench's width and the tunnel's height.
-            emit(`${s.id}:mouth`, 280 * strength, (t) => {
+            // (As the engines come up, slow and thick first: a few puffs flung out at full speed
+            // were a scatter of separate balls across the site for the first second or two.)
+            emit(`${s.id}:mouth`, 280 * strength ** 0.6, (t) => {
               const side = Math.random() < 0.5 ? -1 : 1;
               const pos = at(side * rand(STAND_HALF, STAND_HALF + 5), rand(-hw, hw) * 0.8, rand(1, TUNNEL_TOP - 2));
-              const vel = along(side, rand(50, 110) * (0.4 + 0.6 * strength), rand(-0.12, 0.12), rand(1, 6));
+              const vel = along(side, rand(50, 110) * (0.12 + 0.88 * strength), rand(-0.12, 0.12), rand(1, 6));
               const dust = Math.random() < 0.2;
-              p.emit(dust ? DUST : STEAM, { pos, vel, life: rand(28, 50), size0: rand(6, 10), size1: rand(45, 85) }, t);
+              p.emit(dust ? DUST : STEAM, { pos, vel, life: rand(28, 50), size0: rand(8, 13), size1: rand(45, 85) }, t);
             });
             // Big billows where the trench ramps up at its far ends.
             emit(`${s.id}:ends`, 110 * strength, (t) => {
@@ -428,9 +430,9 @@ export class LaunchFx {
             });
           } else {
             // Bare ground: the exhaust spreads out in every direction.
-            emit(`${s.id}:cloud`, 320 * strength, (t) => {
+            emit(`${s.id}:cloud`, 320 * strength ** 0.6, (t) => {
               const a = Math.random() * Math.PI * 2;
-              const speed = rand(25, 75) * (0.4 + 0.6 * strength);
+              const speed = rand(25, 75) * (0.12 + 0.88 * strength);
               const dust = Math.random() < 0.3;
               const pos = new THREE.Vector3(impact.x + Math.cos(a) * rand(4, 16), rand(2, 10), impact.z + Math.sin(a) * rand(4, 16));
               const vel = new THREE.Vector3(Math.cos(a) * speed, rand(1, 12), Math.sin(a) * speed);

@@ -5,6 +5,7 @@
 import type { ManeuverNode, Snapshot } from '../sim/simulation';
 import type { Trajectory } from '../sim/trajectory';
 import type { FromWorker } from '../worker/protocol';
+import { kbd } from './keyLabels';
 
 const AXES = ['Prograde', 'Normal', 'Radial'] as const;
 /** After a click, trust the local copy over the sim's echo for this long (ms). */
@@ -96,7 +97,7 @@ export class ManeuverPanel {
 
     let html: string;
     if (!this.node) {
-      html = `<div class="mn-title">MANEUVER</div><button data-act="add" class="mn-add">+ Add maneuver node <kbd>N</kbd></button>`;
+      html = `<div class="mn-title">MANEUVER</div><button data-act="add" class="mn-add">+ Add maneuver node ${kbd('node')}</button>`;
     } else {
       const n = this.node;
       const name = s.vehicles.find((v) => v.id === n.vehicle)?.name ?? n.vehicle;
@@ -128,7 +129,7 @@ export class ManeuverPanel {
           : start > 35
             ? `<div class="mn-row mn-warp"><button data-act="warp">⏩ Warp to burn</button></div>`
             : '') +
-        `<div class="mn-hint">Shift-click ×10 · <kbd>N</kbd> delete · <kbd>.</kbd> warp</div>`;
+        `<div class="mn-hint">Shift-click ×10 · ${kbd('node')} delete · ${kbd('warpUp')} warp</div>`;
     }
     if (html !== this.lastHtml) {
       this.body.innerHTML = html;

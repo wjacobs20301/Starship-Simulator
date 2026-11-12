@@ -104,7 +104,7 @@ export class GamepadInput {
 }
 
 /** Move the focus to the nearest button that way (the menus' buttons and cards). */
-function navigate(dir: 'up' | 'down' | 'left' | 'right'): void {
+export function navigate(dir: 'up' | 'down' | 'left' | 'right'): void {
   // (Within what's up front: the menu, else the results screen.)
   const menu = document.querySelector<HTMLElement>('#menu:not(.closed)');
   const results = document.querySelector<HTMLElement>('.results:not(.hidden)');

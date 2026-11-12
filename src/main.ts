@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { BOOSTER_LENGTH, SHIP_LENGTH, STARLINK_V3, STARSHIP_V3, SUPER_HEAVY_V3 } from './sim/config/starshipV3';
 import type { V3 } from './sim/math';
-import type { FlightOptions, MenuScene, Snapshot, VehicleSnapshot } from './sim/simulation';
+import type { FlightOptions, Snapshot, VehicleSnapshot } from './sim/simulation';
 import type { ReturnTarget } from './sim/shipReturn';
 import { CAMERA_LABELS, CameraRig, type CameraTarget } from './render/cameras';
 import { FloatingOrigin, enuToWorld, vehicleQuaternion } from './render/floatingOrigin';
@@ -15,6 +15,7 @@ import { PadLights, lampLightAll } from './render/padLights';
 import { Moon } from './render/moon';
 import { type StarbaseWeather, WEATHER_AVAILABLE, WEATHER_NAME, onSettingsChange, settings, updateSettings } from './settings';
 import { type PadRig, SUN_AT_DAY0, createWorld } from './render/scene';
+import { createFramePacing } from './render/framePacing';
 import { PAD, RE, RP } from './sim/constants';
 import { GlobeTiles } from './render/globeTiles';
 import { ecefToWorld, toWorld, worldToGeodetic } from './render/geo';
@@ -24,6 +25,7 @@ import { OceanSurface } from './render/oceanSurface';
 import { FarCull } from './render/farCull';
 import { Director } from './render/director';
 import { Terrain, seaColourUniforms } from './render/terrain';
+import { tileTextureStats } from './render/tileTexture';
 import { type MapVehicle, MapView } from './render/mapView';
 import type { Trajectory } from './sim/trajectory';
 import { VehicleMesh } from './render/vehicleMesh';
@@ -40,22 +42,30 @@ import { AudioEngine } from './audio/engine';
 import { Ambience } from './audio/ambience';
 import { MenuAudio } from './audio/menuAudio';
 import { MOUNTS, TOWERS } from './sim/padCollision';
-import { SoundField, plumePower } from './audio/soundField';
+import { type Heard, SoundField, plumePower } from './audio/soundField';
 import { Hud, formatClock } from './ui/hud';
-import { type InputActions, WARP_LEVELS, bindKeys, flightAxes } from './ui/input';
+import { type InputActions, WARP_LEVELS, bindKeys } from './ui/input';
+import { SnapshotClock } from './render/snapshotClock';
+import { keyText, paintKeys } from './ui/keyLabels';
 import { GamepadInput } from './ui/gamepad';
 import { Replay } from './ui/replay';
 import { ManeuverPanel } from './ui/maneuverPanel';
-import { overflight } from './game/places';
+import { DAY_RATE, type DaylightAt, daylightPhase, missionDaylight } from './game/daylight';
+import { flightLines } from './ui/statusLines';
 import { ShieldPanel } from './ui/shieldPanel';
-import { BOOSTER_OCEAN_ENU, type MissionSetup, type MissionTarget, MissionTracker, SPLASH_TARGET, missionById } from './game/missions';
+import { BOOSTER_OCEAN_ENU, type MissionDef, type MissionSetup, type MissionTarget, MissionTracker, SPLASH_TARGET, missionById } from './game/missions';
 import { MissionUi } from './ui/missionUi';
 import { GameMenu, toggleFullscreen } from './ui/gameMenu';
 import { ReturnPanel } from './ui/returnPanel';
 import { FlightPanel } from './ui/flightPanel';
-import { type PilotCommand, activeStageId } from './sim/pilot';
 import { TelemetryPlot } from './ui/plot';
-import type { FromWorker, ToWorker } from './worker/protocol';
+import type { FromWorker, ToWorker, WorkerMessage } from './worker/protocol';
+import { type FlightSave, formatSavedAt } from './game/savedFlight';
+import { createSaveSession } from './game/saveSession';
+import { createPilotControls } from './game/pilotControls';
+import { type Received, createViewModes } from './game/viewModes';
+import { createMenuBackdrop } from './game/menuBackdrop';
+import { installWindowChrome } from './ui/windowChrome';
 import SimWorker from './worker/sim.worker.ts?worker';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#view')!;
@@ -104,7 +114,12 @@ document.addEventListener('click', (e) => {
 });
 /** Whether the main menu's music (rather than the world's sounds) is playing. */
 let menuMusic: boolean | null = null;
-onSettingsChange((s) => audioEngine.setMuted(s.muted));
+onSettingsChange((s) => audioEngine.setMuted(s.muted, s.volume));
+// The flight displays' size, and the camera's speed.
+onSettingsChange((s) => {
+  document.documentElement.style.setProperty('--ui-scale', String(s.uiScale));
+  rig.sensitivity = s.cameraSpeed;
+});
 /** How fast each pad's arms are moving (0 = still, 1 ~ a full-speed motion), from the snapshots. */
 const towerMotion = [0, 0];
 /** Each vehicle's mid-body (world) last frame, and its Mach number (for the sonic boom). */
@@ -178,7 +193,7 @@ loadModels(world.renderer, (f) => (loadingBar.style.transform = `scaleX(${f})`))
     loadingBar.style.transform = 'scaleX(1)';
     loading.classList.add('done');
     setTimeout(() => loading.remove(), 1000);
-    if (import.meta.env.DEV) Object.assign(window, { __debug: { sea, oceanSurface, afloatFx, farCull, models, padRig, world, meshes, terrain, settings, updateSettings, rig, fx, sound, pr: () => pixelRatio, frame, globeTiles, mapView, flightPanel, hud, plot, ambience, audioEngine, lightning, starlink: () => starlink, menu, menuAudio, weather, moon, origin, showScene } });
+    if (import.meta.env.DEV) Object.assign(window, { __debug: { sea, oceanSurface, afloatFx, farCull, models, padRig, world, meshes, terrain, settings, updateSettings, rig, fx, sound, pr: () => pacing.state().pixelRatio, pacing: () => pacing.state(), frame, globeTiles, tileTextureStats, mapView, flightPanel, hud, plot, ambience, audioEngine, lightning, starlink: () => starlink, menu, menuAudio, weather, moon, origin, showScene: backdrop.showScene } });
   })
   .catch((err) => {
     loadingText.textContent = import.meta.env.DEV
@@ -190,12 +205,16 @@ loadModels(world.renderer, (f) => (loadingBar.style.transform = `scaleX(${f})`))
 const worker = new SimWorker();
 const send = (m: ToWorker) => worker.postMessage(m);
 
-interface Received {
-  snap: Snapshot;
-  at: number;
-}
 let prev: Received | null = null;
 let curr: Received | null = null;
+/**
+ * What frame() draws the motion from: a steady sim-time clock a couple of snapshots behind the
+ * newest, and the snapshots either side of it (render/snapshotClock.ts). Everything else (the
+ * HUD, events, mission logic) goes by the newest snapshot, curr.
+ */
+const motion = new SnapshotClock<Snapshot>();
+/** The flight or scene (the worker's count of them) its snapshots are of. */
+let motionScene = 0;
 let warp = 1;
 /** Warping ahead to a maneuver / the autopilot's next event (the worker drives it). */
 let warpTo: FromWorker['warpTo'] = null;
@@ -203,28 +222,31 @@ let effectiveWarp = 1;
 let rails = false;
 let paused = false;
 let trackedId = 'stack';
-/** The auto camera (render/director.ts), and the log lines it hasn't seen yet. */
+/** The auto camera (render/director.ts; the log lines it hasn't seen yet: game/viewModes.ts). */
 const director = new Director();
-const directorEvents: string[] = [];
-/** Instant replay (ui/replay.ts): the live snapshots it keeps, and the live ones while it plays. */
+/** Instant replay (ui/replay.ts): the live snapshots it keeps (the live ones while it plays: game/viewModes.ts). */
 const replay = new Replay();
-let liveHeld: { prev: Received | null; curr: Received | null } | null = null;
-/** Photo mode: time frozen (if it wasn't), the HUD hidden, a field of view of its own. */
-let photo: { paused: boolean } | null = null;
 /** A Starlink the cameras follow instead (V steps on to them after the vehicles), by its number. */
 let satFocus: number | null = null;
 /** Which pad's tower arms the arrow keys drive (0 = Pad 1). */
 let armsPad = 0;
 
-worker.onmessage = (ev: MessageEvent<FromWorker>) => {
-  // Replaying: the live flight waits (paused); its snapshots are kept for the return.
-  if (replay.active && liveHeld) {
-    liveHeld = { prev: liveHeld.curr, curr: { snap: ev.data.snapshot, at: performance.now() } };
-    return;
+worker.onmessage = (ev: MessageEvent<WorkerMessage>) => {
+  // (The answers to 'save' / 'load'.)
+  if (ev.data.type !== 'snapshot') return void saves.onReply(ev.data);
+  const at = performance.now();
+  // (A new flight or scene: nothing of the last one to draw between. During a replay too: the
+  // clock goes on with the live flight, so it's in step when the replay ends.)
+  if (ev.data.sceneId !== motionScene) {
+    motionScene = ev.data.sceneId;
+    motion.reset();
   }
+  motion.push(ev.data.snapshot, ev.data.snapshot.t, at);
+  // (Replaying: the live flight waits, its snapshots kept for the return: game/viewModes.ts.)
+  if (views.holdLive({ snap: ev.data.snapshot, at })) return;
   if (!ev.data.paused) replay.record(ev.data.snapshot);
   prev = curr;
-  curr = { snap: ev.data.snapshot, at: performance.now() };
+  curr = { snap: ev.data.snapshot, at };
   warp = ev.data.warp;
   effectiveWarp = ev.data.effectiveWarp;
   rails = ev.data.rails;
@@ -243,17 +265,16 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       towerMotion[i] = m > 4 ? 0 : m;
     });
   }
-  for (const e of curr.snap.events) directorEvents.push(e.text);
+  views.noteEvents(curr.snap.events);
   // One-off sounds from what happened.
   for (const e of curr.snap.events) {
     const at = (id: string) => vehicleMid.get(id) ?? null;
-    const who = /^Super Heavy|^Booster/.test(e.text) ? 'booster' : /^Starship|^Ship/.test(e.text) ? 'ship' : null;
-    const where = (who && at(who)) ?? at(trackedId);
+    const where = (e.who && at(e.who)) ?? at(trackedId);
     if (!where) continue;
-    if (/caught/i.test(e.text) && /!/.test(e.text)) ambience.play('catch', where, origin.camera);
-    else if (/chopsticks lifting|stacked on/.test(e.text)) ambience.play('grab', where, origin.camera);
-    else if (/touchdown/.test(e.text)) ambience.play('touchdown', where, origin.camera);
-    else if (/splashdown/.test(e.text)) ambience.play('splash', where, origin.camera);
+    if (e.kind === 'boosterCaught' || e.kind === 'shipCaught') ambience.play('catch', where, origin.camera);
+    else if (e.kind === 'grab' || e.kind === 'stacked') ambience.play('grab', where, origin.camera);
+    else if (e.kind === 'touchdown') ambience.play('touchdown', where, origin.camera);
+    else if (e.kind === 'splashdown') ambience.play('splash', where, origin.camera);
   }
   followMission(curr.snap);
   if (ev.data.trajectories) {
@@ -262,9 +283,9 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
     mapView.setTrajectories(ev.data.trajectories);
   }
   // Hot staging hands the player a fresh stage: full throttle, all engines.
-  if (prev && prev.snap.phase === 'hotstaging' && curr.snap.phase === 'shipburn' && pilot.manual) setPilot({ throttle: 1, engines: 0 });
+  if (prev && prev.snap.phase === 'hotstaging' && curr.snap.phase === 'shipburn' && pilotCtl.cmd.manual) pilotCtl.set({ throttle: 1, engines: 0 });
   const shipOrbit = trajectories.get('ship')?.orbit ?? null;
-  hud.update(curr.snap, { camera: rig.map ? 'Map' : (director.enabled ? 'Auto camera: ' : '') + CAMERA_LABELS[rig.mode], tracked: trackedName(), warp: warpLabel(), paused, armsPad, orbit: shipOrbit, weather: weather.enabled ? WEATHER_NAME[weatherToday] : '', payload: payloadLine(curr.snap) });
+  hud.update(curr.snap, { camera: rig.map ? 'Map' : (director.enabled ? 'Auto camera: ' : '') + CAMERA_LABELS[rig.mode], tracked: trackedName(), warp: warpLabel(), paused, armsPad, manual: pilotCtl.cmd.manual, orbit: shipOrbit, weather: weather.enabled ? WEATHER_NAME[weatherToday] : '', payload: flightLines(curr.snap, tracker.mission.id === 'free') });
   {
     // The heat shield map: in the inspection camera view, and through the entry when there are gaps.
     const sh = curr.snap.shield;
@@ -326,214 +347,93 @@ const menu = new GameMenu(
       menu.close();
     },
     mainMenu: () => openMainMenu(),
-    nextScene: () => changeScene(),
-    backdrop: (pad) => menuBackdrop(pad),
+    nextScene: () => backdrop.changeScene(),
+    saves: () => saves.list().map((e) => ({ ...e, clock: formatClock(e.missionTime), when: formatSavedAt(e.savedAt) })),
+    continueFlight: (id) => saves.continueFlight(id),
+    deleteSave: (id) => saves.delete(id),
+    canSave: () => (replay.active ? 'Not during a replay.' : !inFlight() ? 'Nothing to save before liftoff.' : !workerReady() ? 'Not yet: the flight is still loading.' : null),
+    saveFlight: (name, replace) => {
+      if (!saves.askSave({ name, replace })) showToast('Flight not saved');
+    },
+    backdrop: (pad) => backdrop.backdrop(pad),
   },
   document.querySelector<HTMLElement>('#help')!,
 );
 
-function openMainMenu(): void {
+// --- Replay, photo mode and the auto camera (game/viewModes.ts) ------------------------------
+const views = createViewModes({
+  replay,
+  director,
+  menu,
+  rig,
+  world,
+  send,
+  showToast,
+  live: () => ({ prev, curr }),
+  setLive: (p, c) => {
+    prev = p;
+    curr = c;
+  },
+  paused: () => paused,
+  manual: () => pilotCtl.cmd.manual,
+  tracked: () => trackedId,
+  setTracked: (id) => {
+    trackedId = id;
+  },
+  setSatFocus: (n) => {
+    satFocus = n;
+  },
+});
+
+function openMainMenu(page?: 'saves'): void {
+  // (The flight as it is now, kept: "Continue" in the menu takes it up again.)
+  saves.askSave();
   if (menuPaused) send({ type: 'pause', value: false });
   menuPaused = false;
   resetFlight();
   // (Its Free Roam page puts up the backdrop: the pad picked, menuBackdrop.)
-  menu.open('main', { mission: missionUi.selected });
+  menu.open('main', { mission: missionUi.selected, page });
 }
 
-// Main menu backdrops: the sim sets each one up (Simulation.scene); the camera frames it and turns
-// slowly round it. They change every so often (or on the menu's › button) through a fade to black.
-/**
- * shift: how far right of centre (fraction of the width) the scene is framed, clear of the menu;
- * azimuth: the range the camera starts in (rad; it turns ~1 rad while the scene is up), else anywhere.
- */
-const MENU_SCENES: {
-  kind: MenuScene;
-  caption: string;
-  track: string;
-  elevation: number;
-  distance: number;
-  shift?: number;
-  azimuth?: [number, number];
-  /** How long it stays up, s (default SCENE_SECONDS). */
-  seconds?: number;
-  /** Its own weather over Starbase (else the Settings'). */
-  weather?: StarbaseWeather;
-}[] = [
-  { kind: 'pad', caption: 'Stacked on Pad 1 · rain over Starbase', track: 'stack', elevation: 0.12, distance: 420, weather: 'rain' },
-  { kind: 'liftoff', caption: 'Liftoff · Pad 1', track: 'stack', elevation: 0.08, distance: 520, weather: 'overcast', seconds: 34 },
-  { kind: 'orbit', caption: 'Starship in orbit · 250 km over Starbase', track: 'ship', elevation: 0.8, distance: 190, shift: 0.26, azimuth: [-0.2, 1.2], weather: 'partly' },  // looking over the coast, not out to sea
-  // The ship against the black sky with the Earth's curved horizon below it: the camera nearly
-  // level with it (from 250 km the horizon is 16 deg down), on its sunlit side.
-  { kind: 'orbit', caption: 'Starship in orbit · Earth and space', track: 'ship', elevation: 0.13, distance: 170, shift: 0.26, azimuth: [0.6, 1.3], weather: 'partly' },
-  // (Back and up: above the dust its engines raise, the whole approach in view.)
-  { kind: 'reentry', caption: 'Starship reentry · 72 km, Mach 23', track: 'ship', elevation: 0.25, distance: 150, shift: 0.26, seconds: 24 },
-  { kind: 'boosterCatch', caption: 'Super Heavy returning to the tower', track: 'booster', elevation: 0.16, distance: 620, shift: 0.3, seconds: 42, weather: 'partly' },
-  // The ship home from orbit: flip, landing burn, and the catch by Pad 1's chopsticks, live.
-  { kind: 'shipCatch', caption: 'Starship returning to the tower', track: 'ship', elevation: 0.14, distance: 420, shift: 0.3, seconds: 70 },
-];
-/** Seconds each backdrop stays up. */
-const SCENE_SECONDS = 28;
-let sceneIndex = -1;
-let sceneTime = 0;
-let sceneChanging = false;
 /** Menu scenes asked for, and the worker's count of those it has set up. */
 let scenesSent = 0;
 let workerSceneId = 0;
-let sceneHold = 0;
-const sceneFade = document.createElement('div');
-sceneFade.id = 'scene-fade';
-document.body.appendChild(sceneFade);
 
-function randomScene(): number {
-  const others = MENU_SCENES.map((_, i) => i).filter((i) => i !== sceneIndex);
-  return others[Math.floor(Math.random() * others.length)];
-}
-
-function showScene(i: number): void {
-  const sc = MENU_SCENES[i];
-  sceneIndex = i;
-  sceneTime = 0;
-  send({ type: 'scene', kind: sc.kind });
-  scenesSent++;
-  sceneWeather = sc.weather ?? null;
-  applyWeatherSetting();
-  startDay(null);
-  blasts.clear();
-  send({ type: 'warp', value: 1 });
-  send({ type: 'node', node: null });
-  trackedId = sc.track;
-  setPilot({ manual: false, target: sc.track, throttle: 1, engines: 0, sas: 'stability' });
-  if (rig.map) rig.toggleMap(lastTarget);
-  rig.mode = 'orbit';
-  const [a0, a1] = sc.azimuth ?? [0, Math.PI * 2];
-  rig.azimuth = a0 + Math.random() * (a1 - a0);
-  rig.elevation = sc.elevation;
-  rig.distance = sc.distance;
-  // (Hold the framing for a moment: until the new scene's snapshots arrive, the camera may be
-  // aiming at the old one and get pushed up out of the ground.)
-  sceneHold = performance.now() + 1500;
-  plot.reset();
-  hud.clearLog();
-  tracker.reset();
-  missionUi.hideResults();
-  // (With the weather off, a caption's weather part (after a '·' naming it) is dropped.)
-  menu.setCaption((WEATHER_AVAILABLE ? sc.caption : sc.caption.replace(/ · (rain|morning fog).*$/, '')).toUpperCase());
-}
-
-/** Fade to black, swap the backdrop, fade back in. */
-function changeScene(): void {
-  fadeTo(() => showScene(randomScene()));
-}
-
-/** Fade to black, put up a backdrop (`show`), and fade back in once the worker has it. */
-function fadeTo(show: () => void): void {
-  if (menu.kind !== 'main') return;
-  if (sceneChanging) {
-    // (Mid-fade: whatever is asked for last goes up.)
-    fadeNext = show;
-    return;
-  }
-  sceneChanging = true;
-  fadeNext = show;
-  sceneFade.classList.add('on');
-  window.setTimeout(() => {
-    if (menu.kind === 'main') fadeNext?.();
-    fadeNext = null;
-    // Fade back in once the worker has the new scene up (some take a moment to compute), plus a
-    // moment for its first frames to arrive.
-    const started = performance.now();
-    const wait = () => {
-      if (workerSceneId < scenesSent && performance.now() - started < 8000) return void window.setTimeout(wait, 100);
-      window.setTimeout(() => {
-        sceneFade.classList.remove('on');
-        sceneChanging = false;
-      }, 350);
-    };
-    wait();
-  }, 900);
-}
-
-let fadeNext: (() => void) | null = null;
-
-// The main menu's Free Roam page: the pad picked, seen from the ground, in the weather picked.
-// Picking the other pad glides the camera over to its tower; picking other weather blends the sky
-// into it (WeatherSystem's transition).
-/** The pad on view (null: the rotating backdrops). */
-let padView: number | null = null;
-const PAD_GLIDE_MS = 2600;
-const padAim = { from: new THREE.Vector3(), to: new THREE.Vector3(), start: 0, sent: true, pad: 0 };
-/** A pad's launch mount, half way up the stack (world). */
-const mountWorld = (pad: number) => {
-  const [e, n] = MOUNTS[pad] ?? [0, 0];
-  return new THREE.Vector3(e, 95, -n);
-};
-/** Where the camera aims now, gliding from one tower to the other. */
-function padAimNow(now: number): THREE.Vector3 {
-  const f = Math.min(1, Math.max(0, (now - padAim.start) / PAD_GLIDE_MS));
-  return padAim.from.clone().lerp(padAim.to, f * f * (3 - 2 * f));
-}
-/** Free roam's weather pick as a day's weather ('Starbase' rolls one). */
-const freeWeatherPick = (): StarbaseWeather => (settings.freeWeather === 'starbase' ? starbaseDay(SEASON, Math.random()) : settings.freeWeather);
-
-function menuBackdrop(pad: number | null): void {
-  if (pad === null) {
-    if (padView === null) return;
-    padView = null;
-    changeScene();
-    return;
-  }
-  if (padView === null) {
-    padView = pad;
-    fadeTo(() => showPadScene(padView ?? pad));
-    return;
-  }
-  if (pad === padView) return;
-  // Over to the other tower: the camera glides; the stack moves there half way.
-  padView = pad;
-  const now = performance.now();
-  padAim.from.copy(padAimNow(now));
-  padAim.to.copy(mountWorld(pad));
-  padAim.start = now;
-  padAim.sent = false;
-  padAim.pad = pad;
-  padCaption();
-}
-
-function showPadScene(pad: number): void {
-  sceneIndex = -1;
-  sceneTime = 0;
-  send({ type: 'scene', kind: 'pad', pad });
-  scenesSent++;
-  sceneWeather = freeWeatherPick();
-  applyWeatherSetting();
-  startDay(null);
-  blasts.clear();
-  send({ type: 'warp', value: 1 });
-  send({ type: 'node', node: null });
-  trackedId = 'stack';
-  setPilot({ manual: false, target: 'stack', throttle: 1, engines: 0, sas: 'stability' });
-  if (rig.map) rig.toggleMap(lastTarget);
-  rig.mode = 'orbit';
-  // (From the ground, ~30 m up, looking up at the tower and the stack against the sky.)
-  rig.azimuth = -2.3 + (Math.random() - 0.5) * 0.6;
-  rig.elevation = -0.072;
-  rig.distance = 900;
-  padAim.from.copy(mountWorld(pad));
-  padAim.to.copy(padAim.from);
-  padAim.start = 0;
-  padAim.sent = true;
-  padAim.pad = pad;
-  plot.reset();
-  hud.clearLog();
-  tracker.reset();
-  missionUi.hideResults();
-  padCaption();
-}
-
-function padCaption(): void {
-  if (padView === null) return;
-  menu.setCaption(`PAD ${padView + 1}${WEATHER_AVAILABLE && settings.clouds ? ` · ${WEATHER_NAME[weatherToday]}` : ''}`.toUpperCase());
-}
+// --- Main menu backdrops (game/menuBackdrop.ts) ------------------------------------------------
+const backdrop = createMenuBackdrop({
+  menu,
+  rig,
+  settle: () => pacing.settle(),
+  sendScene: (m) => {
+    send(m);
+    scenesSent++;
+  },
+  workerReady: () => workerReady(),
+  enter: (w, track) => {
+    sceneWeather = w;
+    applyWeatherSetting();
+    startDay(null);
+    blasts.clear();
+    send({ type: 'warp', value: 1 });
+    send({ type: 'node', node: null });
+    trackedId = track;
+    pilotCtl.set({ manual: false, target: track, throttle: 1, engines: 0, sas: 'stability' });
+    if (rig.map) rig.toggleMap(lastTarget);
+    rig.mode = 'orbit';
+  },
+  cleared: () => {
+    plot.reset();
+    hud.clearLog();
+    tracker.reset();
+    missionUi.hideResults();
+  },
+  weatherToday: () => weatherToday,
+  pickFreeWeather: () => freeWeatherPick(),
+  setWeather: (w, morph) => {
+    sceneWeather = w;
+    applyWeatherSetting(morph);
+  },
+});
 
 function openPauseMenu(): void {
   menuPaused = !paused;
@@ -550,15 +450,75 @@ function setLaunchPad(pad: number): void {
   document.querySelector('#site')!.textContent = `STARSHIP V3 · STARBASE PAD ${pad + 1}`;
 }
 
+// --- The flights kept for next time (game/savedFlight.ts, game/saveSession.ts) ---------------
+const saves = createSaveSession({
+  send,
+  canSave: () => !replay.active && workerReady() && inFlight(),
+  meta: () => ({
+    mission: tracker.mission.id,
+    title: tracker.mission.title,
+    finished: tracker.result !== null,
+    pad: launchPad,
+    tracked: trackedId,
+    manual: [...pilotCtl.manualVehicles],
+    day: dayRef ? { phase: dayPhase, t: dayRef.t, missionTime: dayRef.missionTime } : null,
+    tracker: tracker.saveState(),
+  }),
+  showToast,
+  savesChanged: () => menu.savesChanged(),
+  logEvents: (events) => hud.logEvents(events),
+  missionOver: () => !!tracker.result,
+  openMainMenu: (page) => openMainMenu(page),
+  takeUp: (s, mission) => takeUpFlight(s, mission),
+});
+
+/**
+ * A saved flight taken up (saves.continueFlight): the same mission, vehicles, weather and time of
+ * day. (The save's own bookkeeping, after this: game/saveSession.ts.)
+ */
+function takeUpFlight(s: FlightSave, mission: MissionDef): void {
+  menuAudio.go();
+  missionUi.select(mission.id);
+  tracker.loadState(s.tracker);
+  menu.close();
+  setLaunchPad(s.pad);
+  pacing.settle();
+  sceneWeather = null;
+  backdrop.clearPadView();
+  // Its weather, the same world from the same moment (and so the same wind: the worker has it
+  // from this before the flight itself). Its time of day.
+  if (WEATHER_AVAILABLE && s.flight.weather) {
+    weather.restore(s.flight.weather);
+    if (s.flight.weather.site !== 'natural') weatherToday = s.flight.weather.site;
+  }
+  dayWants = null;
+  dayPhase = s.day?.phase ?? 0;
+  dayRef = s.day ? { t: s.day.t, missionTime: s.day.missionTime } : null;
+  send({ type: 'load', data: s.flight });
+  scenesSent++;
+  trackedId = s.tracked;
+  satFocus = null;
+  pilotCtl.manualVehicles.clear();
+  for (const id of s.manual) pilotCtl.manualVehicles.add(id);
+  views.restartDirector(false);
+  showPreparing(true);
+  plot.reset();
+  hud.clearLog();
+  missionUi.hideResults();
+  blasts.clear();
+}
+
 function resetFlight(): void {
+  saves.newFlight();
+  pacing.settle();
   // (A new weather map for the flight: the Settings' weather, not a menu scene's.)
   sceneWeather = null;
-  padView = null;
+  backdrop.clearPadView();
   applyWeatherSetting();
   const setup = tracker.mission.setup;
   const start = setup.start ?? 'pad';
   if (setup.pad !== undefined && launchPad !== setup.pad) setLaunchPad(setup.pad);
-  startDay(missionDaylight());
+  startDay(missionDaylight(tracker.mission));
   send({ type: 'reset', pad: launchPad, start, boosterOcean: setup.boosterOcean ? BOOSTER_OCEAN_ENU : null, options: flightOptions(setup) });
   scenesSent++;
   send({ type: 'warp', value: 1 });
@@ -567,17 +527,15 @@ function resetFlight(): void {
   // for what they fly: set up for where it starts.
   trackedId = setup.fly ?? 'stack';
   // Watched flights get the auto camera (K turns it off; touching the camera does too).
-  director.reset();
-  director.enabled = tracker.mission.group === 'auto';
-  directorEvents.length = 0;
+  views.restartDirector(tracker.mission.group === 'auto');
   const fly = setup.fly;
-  manualVehicles.clear();
-  if (fly) manualVehicles.add(fly);
-  if (!fly) setPilot({ manual: false, target: 'stack', throttle: 1, engines: 0, sas: 'stability' });
-  else if (start === 'separation') setPilot({ manual: true, target: fly, throttle: 0, engines: 1, sas: 'stability' });
-  else if (start === 'boosterLanding') setPilot({ manual: true, target: fly, throttle: 0, engines: 1, sas: 'retrograde' });
-  else if (start === 'entry') setPilot({ manual: true, target: fly, throttle: 0, engines: 1, sas: 'entry' });
-  else setPilot({ manual: true, target: fly, throttle: 1, engines: 0, sas: 'stability' });
+  pilotCtl.manualVehicles.clear();
+  if (fly) pilotCtl.manualVehicles.add(fly);
+  if (!fly) pilotCtl.set({ manual: false, target: 'stack', throttle: 1, engines: 0, sas: 'stability' });
+  else if (start === 'separation') pilotCtl.set({ manual: true, target: fly, throttle: 0, engines: 1, sas: 'stability' });
+  else if (start === 'boosterLanding') pilotCtl.set({ manual: true, target: fly, throttle: 0, engines: 1, sas: 'retrograde' });
+  else if (start === 'entry') pilotCtl.set({ manual: true, target: fly, throttle: 0, engines: 1, sas: 'entry' });
+  else pilotCtl.set({ manual: true, target: fly, throttle: 1, engines: 0, sas: 'stability' });
   showPreparing(start !== 'pad');
   plot.reset();
   hud.clearLog();
@@ -651,13 +609,16 @@ function warmPad(): void {
 
 /** The worker has caught up with the last scene / mission set-up asked for. */
 const workerReady = () => workerSceneId >= scenesSent;
+/** A flight is under way (not a menu backdrop, not the stack waiting on the pad). */
+const inFlight = () => menu.kind !== 'main' && !!curr && curr.snap.phase !== 'prelaunch';
 
 /** Launch with the selected mission's setup. */
 function startMission(): void {
   const setup = tracker.mission.setup;
   tracker.reset();
   missionUi.hideResults();
-  if (setup.fly === 'stack') setPilot({ manual: true, target: 'stack', sas: 'stability', throttle: 1, engines: 0 });
+  // (Unless the player handed the stack to the autopilot on the pad, with L.)
+  if (setup.fly === 'stack' && pilotCtl.manualVehicles.has('stack')) pilotCtl.set({ manual: true, target: 'stack', sas: 'stability', throttle: 1, engines: 0 });
   send({ type: 'launch' });
 }
 
@@ -667,12 +628,12 @@ function followMission(snap: Snapshot): void {
   const setup = tracker.mission.setup;
   for (const e of snap.events) {
     // Flying the stack by hand: at separation the controls stay with the ship.
-    if (/^Stage separation/.test(e.text) && manualVehicles.has('stack')) manualVehicles.add('ship');
+    if (e.kind === 'separation' && pilotCtl.manualVehicles.has('stack')) pilotCtl.manualVehicles.add('ship');
     // Missions about the booster: the camera goes with it at separation.
-    if (setup.followBooster && /^Stage separation/.test(e.text)) trackedId = 'booster';
+    if (setup.followBooster && e.kind === 'separation') trackedId = 'booster';
     // Ship Catch: at SECO the ship heads home by itself. Time only speeds up when the player
     // warps; it drops back to normal for the flip and catch so they can be watched.
-    if (setup.shipReturn && /^SECO/.test(e.text)) {
+    if (setup.shipReturn && e.kind === 'seco') {
       trackedId = 'ship';
       const aim = tracker.mission.target?.vehicle === 'ship' ? tracker.mission.target : SPLASH_TARGET;
       const target: ReturnTarget =
@@ -683,15 +644,17 @@ function followMission(snap: Snapshot): void {
           : { kind: 'ocean', lat: aim.lat, lon: aim.lon };
       send({ type: 'return', target });
     }
-    if (setup.shipReturn && /^Return: flip and landing burn/.test(e.text)) send({ type: 'warp', value: 1 });
+    if (setup.shipReturn && e.kind === 'landingFlip') send({ type: 'warp', value: 1 });
     // Starlink flights: back to normal speed, the camera on the ship, for the deployment.
-    if (setup.payload && /^Payload door opening/.test(e.text)) {
+    if (setup.payload && e.kind === 'doorOpening') {
       trackedId = 'ship';
       send({ type: 'warp', value: 1 });
     }
   }
   if (snap.phase === 'prelaunch') return;
   const result = tracker.update(snap);
+  // (Over: the result once. The flight is still autosaved after, marked as over; the player's
+  // own saves are theirs to delete.)
   if (result) missionUi.showResults(result);
 }
 
@@ -710,7 +673,7 @@ const maneuverPanel = new ManeuverPanel(
 const returnPanel = new ReturnPanel(
   document.body,
   (target) => {
-    if (target) setPilot({ manual: false });
+    if (target) pilotCtl.set({ manual: false });
     send({ type: 'return', target });
   },
   (go) => send(go ? { type: 'warpTo', target: 'next' } : { type: 'warp', value: 1 }),
@@ -732,42 +695,21 @@ canvas.addEventListener('click', (e) => {
 
 // --- Player controls (manual flight) -------------------------------------------------
 
-/** The player's controls; mirrored to the sim's Pilot whenever they change. */
-const pilot: PilotCommand = { manual: false, target: 'stack', pitch: 0, yaw: 0, roll: 0, throttle: 1, sas: 'stability', engines: 0 };
-let pilotDirty = true;
-const setPilot = (patch: Partial<PilotCommand>) => {
-  Object.assign(pilot, patch);
-  pilotDirty = true;
-};
-/** Vehicles the player has taken the controls of (the others fly on autopilot). */
-const manualVehicles = new Set<string>();
-/** Throttle ramp while Shift / Ctrl are held, per second. */
-const THROTTLE_RATE = 0.6;
-
-/** The flown vehicle's current mean throttle on its lit engines (0 if none). */
-function currentThrottle(): number {
-  const v = curr?.snap.vehicles.find((x) => x.id === trackedId);
-  if (!v) return 0;
-  if (v.status === 'held') return 1;
-  const t = v.stageState[activeStageId(v.stages)]?.throttles.filter((x) => x > 0.02) ?? [];
-  return t.length ? t.reduce((a, b) => a + b, 0) / t.length : 0;
-}
-
-/** The engine set matching what's lit on the tracked vehicle (so taking over doesn't relight everything). */
-function currentEngineSet(): number {
-  const v = curr?.snap.vehicles.find((x) => x.id === trackedId);
-  if (!v || v.status === 'held') return 0;
-  const lit = (v.stageState[activeStageId(v.stages)]?.throttles ?? []).filter((x) => x > 0.02).length;
-  if (activeStageId(v.stages) === 'booster') return lit === 0 || lit > 13 ? 0 : lit > 3 ? 1 : 2;
-  return lit === 0 || lit > 3 ? 0 : 1;
-}
-
-/** Take over the tracked vehicle as it is flying right now. */
-const takeOver = () => ({ throttle: currentThrottle(), engines: currentEngineSet() });
+const pilotCtl = createPilotControls({
+  snap: () => curr?.snap ?? null,
+  tracked: () => trackedId,
+  setTracked: (id) => {
+    trackedId = id;
+  },
+  workerReady: () => workerReady(),
+  send,
+  adoptPending: () => saves.adoptPending(),
+  adoptDone: () => saves.adoptDone(),
+});
 
 const flightPanel = new FlightPanel(hud.webcast, document.querySelector('#console')!, (mode) => {
-  if (!pilot.manual) setPilot({ manual: true, ...takeOver() });
-  setPilot({ sas: mode });
+  if (!pilotCtl.cmd.manual) pilotCtl.set({ manual: true, ...pilotCtl.takeOver() });
+  pilotCtl.set({ sas: mode });
 });
 
 const actions: InputActions = {
@@ -775,55 +717,36 @@ const actions: InputActions = {
     if (replay.active) return replay.togglePlay();
     const phase = curr?.snap.phase;
     if (phase === 'prelaunch') startMission();
-    else if (pilot.manual) send({ type: 'stage' });
+    else if (pilotCtl.cmd.manual) send({ type: 'stage' });
   },
   toggleMissions: () => {
     if (curr?.snap.phase === 'prelaunch') menu.open('main', { mission: missionUi.selected });
   },
   menu: () => {
-    if (replay.active) return endReplay();
-    if (photo) return endPhoto();
+    if (replay.active) return views.endReplay();
+    if (views.inPhoto()) return views.endPhoto();
     menu.isOpen ? menu.back() : openPauseMenu();
   },
   blocked: () => menu.isOpen,
-  toggleManual: () => {
-    // Taking the controls from the return autopilot pauses it; handing them back resumes it
-    // from wherever the ship is by then (Cancel in the Return panel ends it).
-    setPilot({ manual: !pilot.manual, ...takeOver() });
-    if (pilot.manual) manualVehicles.add(trackedId);
-    else manualVehicles.delete(trackedId);
-  },
-  toggleSas: () => setPilot({ sas: pilot.sas === 'off' ? 'stability' : 'off' }),
-  cycleEngines: () => setPilot({ engines: (pilot.engines + 1) % 3 }),
+  toggleManual: () => pilotCtl.toggleManual(),
+  toggleSas: () => pilotCtl.toggleSas(),
+  cycleEngines: () => pilotCtl.cycleEngines(),
   deploy: () => send({ type: 'deploy' }),
-  throttleFull: () => setPilot({ throttle: 1 }),
-  throttleCut: () => setPilot({ throttle: 0 }),
-  toggleReplay: () => (replay.active ? endReplay() : startReplay()),
-  togglePhoto: () => (photo ? endPhoto() : startPhoto()),
-  savePhoto: () => {
-    if (!photo) return;
-    // (Drawn now and read at once: the canvas keeps no copy once it's on screen.)
-    world.render();
-    const a = document.createElement('a');
-    a.href = world.renderer.domElement.toDataURL('image/png');
-    a.download = `starship-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.png`;
-    a.click();
-    showToast('Picture saved');
-  },
-  toggleDirector: () => {
-    director.enabled = !director.enabled;
-    director.reset();
-    showToast(director.enabled ? 'Auto camera on · K to turn off' : 'Auto camera off');
-  },
+  throttleFull: () => pilotCtl.throttleFull(),
+  throttleCut: () => pilotCtl.throttleCut(),
+  toggleReplay: () => (replay.active ? views.endReplay() : views.startReplay()),
+  togglePhoto: () => (views.inPhoto() ? views.endPhoto() : views.startPhoto()),
+  savePhoto: () => views.savePhoto(),
+  toggleDirector: () => views.toggleDirector(),
   cycleCamera: () =>
-    (stopDirector(),
+    (views.stopDirector(),
     rig.cycle((need) => {
       const ship = curr?.snap.vehicles.find((v) => v.id === trackedId && v.stages.length === 1 && v.stages[0] === 'ship' && v.status !== 'destroyed');
       return !!ship && (need === 'door' ? !!curr?.snap.payload : !!curr?.snap.payload?.sats.length);
     })),
   toggleMap: () => rig.toggleMap(lastTarget),
   cycleTarget: () => {
-    stopDirector();
+    views.stopDirector();
     const ids = curr?.snap.vehicles.filter((v) => v.status !== 'destroyed').map((v) => v.id) ?? [];
     // After the vehicles, the satellites out (the cameras follow one; the ship stays the one tracked).
     const sats = curr?.snap.payload?.sats.map((s) => s.n) ?? [];
@@ -831,19 +754,19 @@ const actions: InputActions = {
       const i = sats.indexOf(satFocus);
       satFocus = i >= 0 && i + 1 < sats.length ? sats[i + 1] : null;
       if (satFocus === null && ids.length) trackedId = ids[0];
-      setPilot({ manual: manualVehicles.has(trackedId) });
+      pilotCtl.set({ manual: pilotCtl.manualVehicles.has(trackedId) });
       return;
     }
     if (sats.length && ids.indexOf(trackedId) === ids.length - 1 && ids.includes('ship')) {
       trackedId = 'ship';
       satFocus = sats[0];
-      setPilot({ manual: manualVehicles.has(trackedId) });
+      pilotCtl.set({ manual: pilotCtl.manualVehicles.has(trackedId) });
       return;
     }
     if (ids.length) trackedId = ids[(ids.indexOf(trackedId) + 1) % ids.length];
     // Looking at another vehicle doesn't take its autopilot away: the controls are yours only
     // on the ones you've taken over (L).
-    setPilot({ manual: manualVehicles.has(trackedId) });
+    pilotCtl.set({ manual: pilotCtl.manualVehicles.has(trackedId) });
   },
   setWarp: (w) => send({ type: 'warp', value: w }),
   stepWarp: (dir) => {
@@ -857,7 +780,8 @@ const actions: InputActions = {
   togglePlot: () => plot.toggle(),
   toggleHelp: () => document.querySelector('#help')!.classList.toggle('hidden'),
   toggleLog: () => hud.toggleLog(),
-  toggleMute: () => updateSettings({ muted: !settings.muted }),
+  // (Unmuted at no volume would still be silent: back to half.)
+  toggleMute: () => updateSettings(settings.muted ? { muted: false, volume: settings.volume || 0.5 } : { muted: true }),
   toggleFullscreen,
   arms: (lift, swing, slew = null) => {
     // (Replaying, ← → step back and on; in photo mode [ ] change the field of view.)
@@ -865,7 +789,7 @@ const actions: InputActions = {
       if (swing) replay.seek(swing * 5);
       return;
     }
-    if (photo) {
+    if (views.inPhoto()) {
       if (slew) rig.fovOverride = THREE.MathUtils.clamp((rig.fovOverride ?? 50) * (slew > 0 ? 1.15 : 1 / 1.15), 2, 100);
       return;
     }
@@ -877,6 +801,8 @@ const actions: InputActions = {
   },
 };
 bindKeys(actions);
+// The help panel names the keys as the player has them (the menu's Controls page changes them).
+onSettingsChange(() => paintKeys(document.querySelector('#help')!));
 // A game controller, alongside the keys (gamepad.ts).
 const toast = document.createElement('div');
 toast.id = 'toast';
@@ -888,19 +814,14 @@ function showToast(text: string): void {
   clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => toast.classList.remove('on'), 3500);
 }
-/** The player took the camera: the auto camera stands down. */
-function stopDirector(): void {
-  if (!director.enabled) return;
-  director.enabled = false;
-  showToast('Auto camera off · K to turn it back on');
-}
-world.renderer.domElement.addEventListener('pointerdown', stopDirector);
-world.renderer.domElement.addEventListener('wheel', stopDirector, { passive: true });
+// (The player took the camera: the auto camera stands down, game/viewModes.ts.)
+world.renderer.domElement.addEventListener('pointerdown', views.stopDirector);
+world.renderer.domElement.addEventListener('wheel', views.stopDirector, { passive: true });
 const gamepad = new GamepadInput(
   actions,
   {
     orbit: (dAz, dEl, zoom) => {
-      stopDirector();
+      views.stopDirector();
       if (rig.map) {
         rig.mapDistance = THREE.MathUtils.clamp(rig.mapDistance * zoom, 6.5e6, 4e8);
         rig.mapLon -= dAz;
@@ -908,12 +829,12 @@ const gamepad = new GamepadInput(
         return;
       }
       if ((dAz || dEl) && rig.mode !== 'orbit') rig.mode = 'orbit';
-      rig.azimuth += dAz;
-      rig.elevation = THREE.MathUtils.clamp(rig.elevation + dEl, -1.4, 1.5);
+      rig.azimuth += dAz * rig.sensitivity;
+      rig.elevation = THREE.MathUtils.clamp(rig.elevation + dEl * rig.sensitivity, -1.4, 1.5);
       rig.distance = THREE.MathUtils.clamp(rig.distance * zoom, 20, 2e6);
     },
   },
-  (name) => showToast(name ? 'Controller connected · H for its buttons' : 'Controller disconnected'),
+  (name) => showToast(name ? `Controller connected · ${keyText('help')} for its buttons` : 'Controller disconnected'),
 );
 
 function trackedName(): string {
@@ -928,8 +849,9 @@ const meshes = new Map<string, VehicleMesh>();
 const targetMarker = new TargetMarker();
 world.scene.add(targetMarker.group);
 let shownTarget: MissionTarget | null = null;
+type Blast = { at: V3; radius: number; since: number };
 /** Vehicles that blew up: where, how big, and when (real ms), so the camera can stay on them. */
-const blasts = new Map<string, { at: V3; radius: number; since: number }>();
+const blasts = new Map<string, Blast>();
 /** How long the camera watches a blast before moving to a stage that's still flying, ms. */
 const WATCH_BLAST_MS = 12000;
 
@@ -1027,47 +949,6 @@ function flightOptions(setup: MissionSetup): FlightOptions {
   };
 }
 
-/**
- * The flight's own lines in the status corner: how many Starlinks are out (and the door), the
- * heat shield's state, engines out, and where a ship coming home is.
- */
-function payloadLine(s: Snapshot): string {
-  const lines: string[] = [];
-  const p = s.payload;
-  if (p) {
-    const out = p.total - p.aboard;
-    const door =
-      p.state === 'orienting' ? ', ship turning to deploy'
-      : p.state === 'opening' ? ', door opening'
-      : p.state === 'closing' ? ', door closing'
-      : p.door > 0.5 ? ', door open'
-      : p.state === 'stowed' && tracker.mission.id === 'free' ? ' · <kbd>B</kbd> to deploy'
-      : '';
-    lines.push(`Starlink V3: ${out} of ${p.total} deployed${door}`);
-  }
-  const ship = s.vehicles.find((v) => v.stages.length === 1 && v.stages[0] === 'ship' && v.status === 'flight');
-  const sh = s.shield;
-  if (sh.lost > 0 || sh.verdict) {
-    const burned = sh.char.filter((c) => c >= 1).length;
-    lines.push(
-      `Heat shield: ${sh.lost ? `${sh.lost} tile${sh.lost > 1 ? 's' : ''} missing` : 'intact'}` +
-        (burned ? ` · <span class="bad">${burned} burn-through${burned > 1 ? 's' : ''}</span>` : '') +
-        (sh.verdict ? ` · ${sh.verdict === 'go' ? 'inspection GO' : '<span class="bad">inspection NO-GO</span>'}` : ''),
-    );
-  }
-  const outs = s.vehicles
-    .filter((v) => v.status !== 'destroyed')
-    .flatMap((v) => Object.entries(v.stageState).map(([id, st]) => [id, st?.failed.filter(Boolean).length ?? 0] as const))
-    .filter(([, n]) => n > 0);
-  if (outs.length) lines.push(`Engines out: ${outs.map(([id, n]) => `${id === 'ship' ? 'ship' : 'booster'} ${n}`).join(', ')}`);
-  // Coming home: what it's over (the corridor in from the Pacific, across Mexico).
-  if (ship && ship.telemetry.altitude < 140e3 && ship.telemetry.verticalSpeed < 0) {
-    const over = overflight(ship.telemetry.lat, ship.telemetry.lon);
-    if (over) lines.push(`Ship ${over}`);
-  }
-  return lines.join('<br>');
-}
-
 /** Mid-body of a vehicle along its axis, from the booster-base origin, m. */
 function midpoint(v: VehicleSnapshot): number {
   const lo = v.stages.includes('booster') ? 0 : BOOSTER_LENGTH;
@@ -1081,21 +962,11 @@ const earthCenterRel = new THREE.Vector3();
 const EARTH_CENTER_WORLD = ecefToWorld([0, 0, 0]);
 const EARTH_AXIS_WORLD = new THREE.Vector3(...ecefToWorld([0, 0, 1e6])).sub(new THREE.Vector3(...EARTH_CENTER_WORLD)).normalize();
 const seaEast = new THREE.Vector3();
+/** How much of what's under the camera is sea, 0..1 (eased: the reflections' ground). */
+let seaUnder = 0;
 const seaNorth = new THREE.Vector3();
 
 // --- Time of day: the Earth turns once in 24 h of sim time ---------------------------------------
-const DAY_RATE = (2 * Math.PI) / 86400;
-/** Where and when a mission wants daylight: at a mission time (s), or some time after its start. */
-interface DaylightAt {
-  lat: number;
-  lon: number;
-  /** Instead of lat / lon: where the flown vehicle is at the start. */
-  atVehicle?: boolean;
-  missionTime?: number;
-  afterStart?: number;
-  /** Wants it dark there instead (the sun well below the horizon). */
-  night?: boolean;
-}
 /** The flight's day angle at its first snapshot, and that snapshot's times (null: not yet in). */
 let dayPhase = 0;
 let dayRef: { t: number; missionTime: number } | null = null;
@@ -1105,63 +976,6 @@ function startDay(wants: DaylightAt[] | null): void {
   dayWants = wants;
   dayRef = null;
 }
-/** The key moments of a mission, to be in daylight: the pad at liftoff, the target on arrival. */
-function missionDaylight(): DaylightAt[] | null {
-  const m = tracker.mission;
-  if (m.group === 'free') return null;
-  const pad = { lat: PAD.latDeg, lon: PAD.lonDeg };
-  const start = m.setup.start ?? 'pad';
-  if (start === 'entry' && m.target) {
-    // Night where the ship starts, then entry (~10-25 minutes, eastward) into the dawn and
-    // daylight over the target: the sunrise line lies between.
-    const { lat, lon } = m.target;
-    return [
-      { lat: 0, lon: 0, atVehicle: true, afterStart: 0, night: true },
-      { lat, lon, afterStart: 900 },
-      { lat, lon, afterStart: 1500 },
-    ];
-  }
-  // Starting near Starbase part-way up (staging, the booster coming home).
-  if (start !== 'pad') return [{ ...pad, afterStart: 0 }];
-  const wants: DaylightAt[] = [{ ...pad, missionTime: 0 }];
-  // The ship's splashdown on the far side of the world, ~65 minutes after liftoff.
-  if (m.target?.vehicle === 'ship') wants.push({ lat: m.target.lat, lon: m.target.lon, missionTime: 3900 });
-  return wants;
-}
-/**
- * The day angle at this flight's start that puts its key moments in daylight: the sun at least
- * ~30 degrees up at each if that can be had (or ~12 below, where it wants night), else as near
- * as they can all have it together;
- * of those, the nearest to a Starbase morning (day angle 0).
- */
-function daylightPhase(wants: DaylightAt[], missionTime: number, vehicle: { lat: number; lon: number } | null): number {
-  const center = new THREE.Vector3(...EARTH_CENTER_WORLD);
-  wants = wants.filter((w) => !w.atVehicle || vehicle);
-  const ups = wants.map((w) => {
-    const at = w.atVehicle ? vehicle! : w;
-    return new THREE.Vector3(...toWorld(at.lat, at.lon, 0)).sub(center).normalize();
-  });
-  const q = new THREE.Quaternion();
-  const sun = new THREE.Vector3();
-  const score = (phase: number) =>
-    Math.min(
-      ...wants.map((w, i) => {
-        const dt = w.missionTime !== undefined ? w.missionTime - missionTime : (w.afterStart ?? 0);
-        q.setFromAxisAngle(EARTH_AXIS_WORLD, -(phase + DAY_RATE * dt));
-        sun.copy(SUN_AT_DAY0).applyQuaternion(q);
-        const elev = Math.asin(THREE.MathUtils.clamp(sun.dot(ups[i]), -1, 1));
-        // (Enough is enough: 30 degrees up for daylight, 12 below for a dark night.)
-        return w.night ? Math.min(-elev, 12 * (Math.PI / 180)) : Math.min(elev, 30 * (Math.PI / 180));
-      }),
-    );
-  const step = Math.PI / 180;
-  const tries = [0];
-  for (let k = 1; k <= 180; k++) tries.push(k * step, -k * step);
-  const scores = tries.map(score);
-  const best = Math.max(...scores);
-  return tries[scores.findIndex((x) => x >= best - 0.5 * step)];
-}
-
 // --- Weather: planet-wide clouds, rain under them --------------------------------------------
 /** Render world -> Earth-fixed (ECEF) directions (the weather map's axes). */
 const WORLD_TO_ECEF = (() => {
@@ -1169,6 +983,8 @@ const WORLD_TO_ECEF = (() => {
   const [ex, ey, ez] = ([[1e6, 0, 0], [0, 1e6, 0], [0, 0, 1e6]] as const).map((p) => new THREE.Vector3(...ecefToWorld([...p])).sub(c).normalize());
   return new THREE.Matrix3().set(ex.x, ex.y, ex.z, ey.x, ey.y, ey.z, ez.x, ez.y, ez.z);
 })();
+/** The weather where the camera is (Weather.local). */
+type LocalWeather = ReturnType<Weather['local']>;
 const weather = new Weather(EARTH_AXIS_WORLD.clone(), WORLD_TO_ECEF, PAD.latDeg, PAD.lonDeg);
 // The sea near the camera: a mesh rising and falling with the waves, at sea level.
 const oceanSurface = new OceanSurface({ ...seaColourUniforms, uWorldToEcef: { value: WORLD_TO_ECEF } });
@@ -1203,19 +1019,18 @@ const applyWeatherSetting = (morph = false) => {
   weatherToday = sceneWeather ?? (tracker.mission.id !== 'free' ? 'partly' : free);
   weather.configure(weatherToday, SEASON, !sceneWeather && tracker.mission.id !== 'free', undefined, morph);
 };
+/** Free roam's weather pick as a day's weather ('Starbase' rolls one). */
+function freeWeatherPick(): StarbaseWeather {
+  return settings.freeWeather === 'starbase' ? starbaseDay(SEASON, Math.random()) : settings.freeWeather;
+}
 let weatherSetting = settings.freeWeather;
 onSettingsChange((s) => {
   weather.enabled = WEATHER_AVAILABLE && s.clouds;
   if (s.freeWeather !== weatherSetting) {
     weatherSetting = s.freeWeather;
-    if (menu.kind === 'main' && padView !== null && !sceneChanging) {
-      // The menu's pad view: the sky turns into the weather picked.
-      sceneWeather = freeWeatherPick();
-      applyWeatherSetting(true);
-      padCaption();
-    }
-    // (Free roam's: a mission keeps its fair weather.)
-    else if (tracker.mission.id === 'free') applyWeatherSetting();
+    // The menu's pad view, if it's up, takes it: its sky turns into the weather picked
+    // (game/menuBackdrop.ts). (Else free roam's: a mission keeps its fair weather.)
+    if (!backdrop.freeWeatherChanged() && tracker.mission.id === 'free') applyWeatherSetting();
   }
 });
 applyWeatherSetting();
@@ -1244,71 +1059,8 @@ resize();
 
 let lastFrame = performance.now();
 
-// --- Render resolution ---------------------------------------------------------------------
-// The GPU work is mostly per pixel (MSAA scene, atmosphere, bloom), so resolution is the big
-// lever. Auto: start at the display's full density and adjust every ~45 frames to hold 60 fps
-// (down quickly when frames are missed, back up slowly, not retrying a level that failed for a while).
-const NATIVE_PR = Math.min(window.devicePixelRatio || 1, 2);
-const MIN_PR = Math.max(0.6, NATIVE_PR * 0.5);
-const TARGET_MS = 1000 / 60;
-let pixelRatio = NATIVE_PR;
-const frameGaps: number[] = [];
-const frameCpu: number[] = [];
-let goodWindows = 0;
-let failedPr = Infinity;
-let failedUntil = 0;
-
-/** The clouds' resolution levels (pixels per screen point): the governor's first lever. */
-const CLOUD_LEVELS = [1.25, 1.0, 0.8];
-let cloudLevel = 0;
-
-function governResolution(gapMs: number, cpuMs: number, now: number): void {
-  const fixed = settings.renderScale;
-  if (fixed !== 'auto') {
-    pixelRatio = Math.max(0.5, NATIVE_PR * fixed);
-    world.setPixelRatio(pixelRatio);
-    cloudLevel = 0;
-    world.setCloudDensity(CLOUD_LEVELS[0]);
-    return;
-  }
-  if (document.hidden || gapMs > 250) return;
-  frameGaps.push(gapMs);
-  frameCpu.push(cpuMs);
-  if (frameGaps.length < 45) return;
-  const median = (a: number[]) => a.sort((x, y) => x - y)[a.length >> 1];
-  const gap = median(frameGaps);
-  const cpu = median(frameCpu);
-  frameGaps.length = 0;
-  frameCpu.length = 0;
-  if (gap > TARGET_MS * 1.2 && cpu < TARGET_MS * 0.75) {
-    // Missing frames and it's not the scripts: fewer pixels. The clouds' first (soft, they show
-    // a lower resolution least, and they're a third of the frame or more), then the screen's.
-    // (Not retried for a minute: every change of resolution resizes the buffers and restarts the
-    // clouds' history, a visible hitch, so it shouldn't bounce between two levels.)
-    failedUntil = now + 60000;
-    if (cloudLevel < CLOUD_LEVELS.length - 1) cloudLevel++;
-    else {
-      failedPr = pixelRatio;
-      pixelRatio = Math.max(MIN_PR, pixelRatio * 0.85);
-    }
-    goodWindows = 0;
-  } else if (gap < TARGET_MS * 1.08) {
-    // Room to spare: the screen's resolution back first, then the clouds'.
-    const next = Math.min(NATIVE_PR, pixelRatio * 1.12);
-    if (++goodWindows >= 6) {
-      if (next > pixelRatio && !(next >= failedPr && now < failedUntil)) {
-        pixelRatio = next;
-        goodWindows = 0;
-      } else if (next <= pixelRatio && cloudLevel > 0 && now >= failedUntil) {
-        cloudLevel--;
-        goodWindows = 0;
-      }
-    }
-  } else goodWindows = 0;
-  world.setPixelRatio(pixelRatio);
-  world.setCloudDensity(CLOUD_LEVELS[cloudLevel]);
-}
-world.setPixelRatio(pixelRatio);
+// --- Render resolution and frame pacing (render/framePacing.ts) ------------------------------
+const pacing = createFramePacing(world, () => terrain.pendingInView);
 
 /** Below this height (m) a vehicle's shadow on the ground is drawn. */
 const SHADOW_CEILING = 5000;
@@ -1331,9 +1083,11 @@ const siteShadowArea = (sd: THREE.Vector3) => {
 };
 
 /** What the shadows depend on, coarsely: when it changes, the shadow map is redrawn. */
-let shadowKey = '';
+let shadowKey = 0;
 /** The last frame's script time, ms (to tell a CPU-bound frame from a GPU-bound one). */
 let lastCpuMs = 0;
+/** Of it, the drawing (world.render: it waits on the GPU when that's behind), ms. */
+let lastRenderMs = 0;
 /** A frame was drawn while paused behind the pause menu (nothing more to draw until it closes). */
 let frozenFrame = false;
 let shadowAt = 0;
@@ -1342,101 +1096,20 @@ let menuShift = 0;
 /** Tracked vehicle's mid-body (world), where the map view opens. */
 let lastTarget: V3 = [0, 60, 0];
 
-/** Held keys -> the player's attitude / throttle inputs; send any change to the sim. */
-function updatePilot(dt: number): void {
-  const axes = flightAxes();
-  if (pilot.manual) {
-    if (axes.pitch !== pilot.pitch || axes.yaw !== pilot.yaw || axes.roll !== pilot.roll) {
-      setPilot({ pitch: axes.pitch, yaw: axes.yaw, roll: axes.roll });
-    }
-    if (axes.throttle !== 0) setPilot({ throttle: Math.min(1, Math.max(0, pilot.throttle + axes.throttle * THROTTLE_RATE * dt)) });
-  } else if (pilot.pitch || pilot.yaw || pilot.roll) {
-    setPilot({ pitch: 0, yaw: 0, roll: 0 });
-  }
-  if (pilot.target !== trackedId && workerReady()) setPilot({ target: trackedId, ...takeOver() });
-  if (pilotDirty) {
-    send({ type: 'pilot', cmd: { ...pilot } });
-    pilotDirty = false;
-  }
+/** The animation loop: one frame() per refresh (or fewer: see the frame pacing above). */
+function loop(ts: number): void {
+  requestAnimationFrame(loop);
+  pacing.watchRefresh(ts);
+  // (A display faster than the frames can be drawn: every second refresh, evenly spaced.)
+  if (curr && pacing.skip(performance.now() - lastFrame)) return;
+  frame(ts);
 }
 
-function startReplay(): void {
-  if (!curr || menu.isOpen || !replay.available) {
-    if (!replay.available) showToast('Nothing to replay yet');
-    return;
-  }
-  if (photo) endPhoto();
-  liveHeld = { prev, curr };
-  replay.start(performance.now());
-  send({ type: 'pause', value: true });
-  stopDirector();
-}
-
-function endReplay(): void {
-  replay.stop();
-  if (liveHeld) {
-    prev = liveHeld.prev;
-    curr = liveHeld.curr;
-    liveHeld = null;
-  }
-  send({ type: 'pause', value: false });
-}
-
-function startPhoto(): void {
-  if (!curr || menu.isOpen) return;
-  photo = { paused: !paused };
-  if (photo.paused && !replay.active) send({ type: 'pause', value: true });
-  if (replay.active) replay.playing = false;
-  rig.fovOverride = world.camera.fov;
-  stopDirector();
-  document.body.classList.add('photo');
-  showToast('Photo mode · drag and scroll to frame · [ ] zoom · Enter saves · I to leave');
-}
-
-function endPhoto(): void {
-  if (!photo) return;
-  if (photo.paused && !replay.active) send({ type: 'pause', value: false });
-  photo = null;
-  rig.fovOverride = null;
-  document.body.classList.remove('photo');
-}
-
-/** The auto camera's cut, if it makes one now: camera, framing and which vehicle it follows. */
-function runDirector(now: number, snap: Snapshot): void {
-  if (!director.enabled || menu.isOpen || rig.map) {
-    directorEvents.length = 0;
-    return;
-  }
-  const shot = director.update(now / 1000, {
-    missionTime: snap.missionTime,
-    vehicles: snap.vehicles.map((v) => ({
-      id: v.id,
-      status: v.status,
-      altitude: v.telemetry.altitude,
-      speed: Math.hypot(...v.telemetry.vAirEnu),
-      nearPad: v.telemetry.downrange < 60e3,
-    })),
-    events: directorEvents.splice(0),
-    door: !!snap.payload && (snap.payload.door ?? 0) > 0.5,
-    sats: !!snap.payload?.sats.length,
-    manual: pilot.manual,
-    tracked: trackedId,
-  });
-  if (!shot) return;
-  if (shot.track && shot.track !== trackedId && snap.vehicles.some((v) => v.id === shot.track && v.status !== 'destroyed')) {
-    trackedId = shot.track;
-    satFocus = null;
-  }
-  rig.mode = shot.mode;
-  if (shot.orbit) {
-    rig.azimuth = shot.orbit.azimuth;
-    rig.elevation = shot.orbit.elevation;
-    rig.distance = shot.orbit.distance;
-  }
-}
-
-function frame(): void {
-  requestAnimationFrame(frame);
+/**
+ * ts: the refresh this frame is for (the animation frame's own time: steadier than when its callback got to run).
+ * (A sequence of steps, each below with what it needs: the order is the order they must run in.)
+ */
+function frame(ts: number): void {
   if (!curr) return;
   const now = performance.now();
   const frameDt = Math.min(0.1, (now - lastFrame) / 1000);
@@ -1446,42 +1119,100 @@ function frame(): void {
     lastFrame = now;
     return;
   }
-  governResolution(now - lastFrame, lastCpuMs, now);
+  pacing.govern(now - lastFrame, lastCpuMs, lastCpuMs - lastRenderMs, now);
   lastFrame = now;
   // Replaying: the recorded snapshots either side of the playback time, as if just received.
-  if (replay.active) {
-    const r = replay.frame(now);
-    if (r) {
-      const span = 1000 / 30;
-      curr = { snap: r.b, at: now - r.f * span };
-      prev = { snap: r.a, at: curr.at - span };
-    }
-  }
+  views.replayFrame(now);
   gamepad.poll(frameDt);
-  updatePilot(frameDt);
-  // Behind the main menu: its music, not the world's sounds.
+  pilotCtl.update(frameDt);
+  saves.autosave(now);
+  menuMusicStep();
+  // Main menu: the view turns slowly round the pad behind it; the backdrops change.
+  backdrop.tick(frameDt, now);
+  const m = frameMotion(curr, prev, ts, now);
+  const { snap, simTime } = m;
+  syncMeshes(snap.vehicles, simTime);
+  prewarmShaders();
+  views.runDirector(now, snap);
+  const dayAngle = timeOfDayStep(snap, simTime);
+  const watching = watchBlastStep(snap, now);
+  const { placements, target } = placeVehiclesStep(m);
+  const cam = aimCameraStep(m, target, watching, frameDt, now);
+  const missionTarget = mapStep(snap, placements, simTime, now);
+  placeWorldStep(snap, simTime, placements, cam, m);
+  const heard = soundStep(placements, simTime, cam);
+  groundStep(snap, cam, now);
+  shadowStep(snap, placements, target, cam, dayAngle, now);
+  const { camR, camAlt, wx } = seaAndWeatherStep(cam, simTime, frameDt);
+  audioStep(snap, placements, heard, cam, camAlt, simTime, frameDt, wx);
+  skyStep(cam, camR, camAlt, simTime, frameDt, wx, heard, now);
+  menuShiftStep(frameDt);
+  drawStep(snap, missionTarget, now);
+}
+
+/** Behind the main menu: its music, not the world's sounds. */
+function menuMusicStep(): void {
   if ((menu.kind === 'main') !== menuMusic) {
     menuMusic = menu.kind === 'main';
     menuAudio.setMusic(menuMusic);
     audioEngine.setWorldLevel(menuMusic ? 0 : 1, menuMusic ? 0.4 : 1.5);
   }
-  // Main menu: the view turns slowly round the pad behind it.
-  if (menu.kind === 'main' && !rig.map && rig.mode === 'orbit') rig.azimuth += frameDt * 0.035;
-  if (menu.kind === 'main' && padView === null && (sceneTime += frameDt) > (MENU_SCENES[sceneIndex]?.seconds ?? SCENE_SECONDS)) changeScene();
-  if (menu.kind === 'main' && padView !== null && !padAim.sent && now - padAim.start > PAD_GLIDE_MS * 0.45) {
-    padAim.sent = true;
-    send({ type: 'scene', kind: 'pad', pad: padAim.pad });
-    scenesSent++;
-  }
-  if (menu.kind === 'main' && now < sceneHold && sceneIndex >= 0) rig.elevation = MENU_SCENES[sceneIndex].elevation;
-  // Render between the last two snapshots so motion is smooth at any frame rate.
-  const span = prev ? curr.at - prev.at : 0;
-  const alpha = span > 0 ? Math.min(1, (now - curr.at) / span) : 1;
+}
+
+/** What a frame draws the motion from (frameMotion): the snapshots either side of simTime, and how far between. */
+interface FrameMotion {
+  /** The newest snapshot: everything but places, attitudes and simTime comes from it. */
+  snap: Snapshot;
+  from: Snapshot | null;
+  to: Snapshot;
+  alpha: number;
+  simTime: number;
+  placeAt(p: V3 | undefined, q: V3, vel: V3, ahead: number): V3;
+  satPlace(s: { n: number; pos: V3 }): V3;
+  /** A satellite's world position, between snapshots. */
+  satWorld(n: number): V3 | null;
+}
+
+function frameMotion(curr: Received, prev: Received | null, ts: number, now: number): FrameMotion {
+  // Render between snapshots so motion is smooth at any frame rate. Live: where the snapshot
+  // clock is, a steady sim time a couple of snapshots behind the newest, between the two either
+  // side of it (`from`, `to`), so their uneven arrival doesn't show. A replay: between the pair
+  // it gave (made prev and curr above). Only places, attitudes and simTime come from these;
+  // everything else is the newest snapshot's, `snap`.
   const snap = curr.snap;
-  const simTime = prev ? prev.snap.t + (snap.t - prev.snap.t) * alpha : snap.t;
-  syncMeshes(snap.vehicles, simTime);
-  prewarmShaders();
-  runDirector(now, snap);
+  const live = replay.active ? null : motion.sample(Math.min(ts, now));
+  const span = prev ? curr.at - prev.at : 0;
+  const from = live ? live.a : (prev?.snap ?? null);
+  const to = live ? live.b : snap;
+  const alpha = live ? live.alpha : span > 0 ? Math.min(1, (now - curr.at) / span) : 1;
+  const simTime = from ? from.t + (to.t - from.t) * alpha : to.t;
+  /**
+   * Where something is at simTime: between its places in the two snapshots (p, q); or, when it
+   * isn't in the earlier one yet (a stage just separated, a satellite just out), back along its
+   * velocity from the first place it's known (q, `ahead` seconds on), so it doesn't run ahead
+   * of the rest for a frame or two.
+   */
+  const placeAt = (p: V3 | undefined, q: V3, vel: V3, ahead: number): V3 =>
+    p
+      ? [p[0] + (q[0] - p[0]) * alpha, p[1] + (q[1] - p[1]) * alpha, p[2] + (q[2] - p[2]) * alpha]
+      : [q[0] - vel[0] * ahead, q[1] - vel[1] * ahead, q[2] - vel[2] * ahead];
+  /** A satellite out of the bay, in pad ENU at simTime (one just deployed is moving as the ship is). */
+  const shipVel: V3 = snap.vehicles.find((v) => v.id === 'ship')?.telemetry.vAirEnu ?? [0, 0, 0];
+  const satPlace = (s: { n: number; pos: V3 }): V3 => {
+    const q = to === snap ? s : to.payload?.sats.find((x) => x.n === s.n);
+    const p = q && from?.payload?.sats.find((x) => x.n === s.n);
+    return placeAt(p ? p.pos : undefined, (q ?? s).pos, shipVel, (q ? to.t : snap.t) - simTime);
+  };
+  /** A satellite's world position, between snapshots. */
+  const satWorld = (n: number): V3 | null => {
+    const s = snap.payload?.sats.find((x) => x.n === n);
+    return s ? enuToWorld(satPlace(s)) : null;
+  };
+  return { snap, from, to, alpha, simTime, placeAt, satPlace, satWorld };
+}
+
+/** The time of day, from this flight's (or menu scene's) first snapshot on: the day angle. */
+function timeOfDayStep(snap: Snapshot, simTime: number): number {
   // The time of day, from this flight's (or menu scene's) first snapshot on.
   if (!dayRef && workerReady()) {
     dayRef = { t: snap.t, missionTime: snap.missionTime ?? 0 };
@@ -1492,10 +1223,14 @@ function frame(): void {
   const dayOffset = import.meta.env.DEV ? ((window as unknown as { __dayOffset?: number }).__dayOffset ?? 0) : 0;
   const dayAngle = dayPhase + (dayRef ? DAY_RATE * (simTime - dayRef.t) : 0) + dayOffset;
   world.setDay(dayAngle, EARTH_AXIS_WORLD);
+  return dayAngle;
+}
 
+/** The blast the camera is watching, if the tracked vehicle blew up (else on to what's still flying). */
+function watchBlastStep(snap: Snapshot, now: number): Blast | null {
   // The tracked vehicle blew up: watch the explosion for a while (V switches sooner), then go
   // over to whatever is still flying.
-  let watching: { at: V3; radius: number; since: number } | null = null;
+  let watching: Blast | null = null;
   if (workerReady() && !snap.vehicles.some((v) => v.id === trackedId && v.status !== 'destroyed')) {
     const blast = blasts.get(trackedId);
     if (blast && now - blast.since < WATCH_BLAST_MS) watching = blast;
@@ -1505,31 +1240,29 @@ function frame(): void {
         ?? trackedId;
       if (next !== trackedId) {
         trackedId = next;
-        setPilot({ manual: manualVehicles.has(next) });
+        pilotCtl.set({ manual: pilotCtl.manualVehicles.has(next) });
       }
     }
   }
+  return watching;
+}
 
+/** The vehicles placed and turned for this frame (their sonic booms too), and the camera's target on the tracked one. */
+function placeVehiclesStep(m: FrameMotion): { placements: FxVehicle[]; target: CameraTarget | null } {
+  const { snap, from, to, alpha, simTime, placeAt, satWorld } = m;
   const placements: FxVehicle[] = [];
   let target: CameraTarget | null = null;
-  /** A satellite's world position, between snapshots. */
-  const satWorld = (n: number): V3 | null => {
-    const s = snap.payload?.sats.find((x) => x.n === n);
-    if (!s) return null;
-    const q = prev?.snap.payload?.sats.find((x) => x.n === n);
-    return enuToWorld(q ? [q.pos[0] + (s.pos[0] - q.pos[0]) * alpha, q.pos[1] + (s.pos[1] - q.pos[1]) * alpha, q.pos[2] + (s.pos[2] - q.pos[2]) * alpha] : s.pos);
-  };
   if (satFocus !== null && !snap.payload?.sats.some((x) => x.n === satFocus)) satFocus = null;
   const sats = snap.payload?.sats ?? [];
   const camSat = satFocus ?? (sats.length ? sats[sats.length - 1].n : null);
   for (const v of snap.vehicles) {
     const mesh = meshes.get(v.id);
     if (!mesh) continue;
-    const p = prev?.snap.vehicles.find((x) => x.id === v.id);
-    const pos: V3 = p
-      ? [p.pos[0] + (v.pos[0] - p.pos[0]) * alpha, p.pos[1] + (v.pos[1] - p.pos[1]) * alpha, p.pos[2] + (v.pos[2] - p.pos[2]) * alpha]
-      : v.pos;
-    vehicleQuaternion(v.rot, qb);
+    // (Its place and attitude: as the two snapshots the clock is between have them.)
+    const q = to === snap ? v : to.vehicles.find((x) => x.id === v.id);
+    const p = q && from?.vehicles.find((x) => x.id === v.id);
+    const pos = placeAt(p ? p.pos : undefined, (q ?? v).pos, v.telemetry.vAirEnu, (q ? to.t : snap.t) - simTime);
+    vehicleQuaternion((q ?? v).rot, qb);
     if (p) qb.copy(vehicleQuaternion(p.rot, qa).slerp(qb, alpha));
     mesh.root.quaternion.copy(qb);
     mesh.update(v, simTime);
@@ -1573,7 +1306,12 @@ function frame(): void {
       }
     }
   }
+  return { placements, target };
+}
 
+/** Where the camera aims (the tracked vehicle, a satellite, the menu's pad, a blast) and the camera moved there: its place. */
+function aimCameraStep(m: FrameMotion, target: CameraTarget | null, watching: Blast | null, frameDt: number, now: number): V3 {
+  const { snap, satWorld } = m;
   // Dev-only: __debug.focus = [x, y, z] (world) aims the orbit camera at a fixed point instead;
   // __focusSat = n at the nth Starlink deployed.
   const focusSat = import.meta.env.DEV ? (window as unknown as { __focusSat?: number }).__focusSat : undefined;
@@ -1582,7 +1320,7 @@ function frame(): void {
   // (A satellite picked with V: the cameras that follow something follow it.)
   const picked = satFocus !== null && !['bay', 'baytop', 'hull', 'satellite', 'inspect'].includes(rig.mode) ? satWorld(satFocus) : null;
   // (The menu's pad view: on the tower picked, gliding between them.)
-  const padAt = menu.kind === 'main' && padView !== null ? padAimNow(now) : null;
+  const padAt = backdrop.aim(now);
   const aim = padAt ? { center: [padAt.x, padAt.y, padAt.z] as V3, axis: [0, 1, 0] as V3, size: 140 } : picked ? { center: picked, axis: [0, 1, 0] as V3, size: 24 } : focus0 ? { center: focus0, axis: [0, 1, 0] as V3, size: 60 } : (target ?? (watching ? { center: watching.at, axis: [0, 1, 0] as V3, size: watching.radius } : null));
   // Back off far enough to take in the whole fireball.
   if (watching && rig.mode === 'orbit' && !rig.map) rig.distance += (Math.max(rig.distance, watching.radius * 3.2) - rig.distance) * Math.min(1, frameDt * 1.5);
@@ -1590,6 +1328,11 @@ function frame(): void {
   // Nothing left to track (it broke up): stay where it was, watching the debris.
   const cam = rig.update(world.camera, aim ?? { center: lastTarget, axis: [0, 1, 0], size: 124 });
   origin.camera = cam;
+  return cam;
+}
+
+/** The map view, its marks, and the mission's landing target beacon: that target (null in the main menu). */
+function mapStep(snap: Snapshot, placements: FxVehicle[], simTime: number, now: number): MissionTarget | null {
   if (mapView.visible !== rig.map) mapView.setVisible(rig.map);
   const mapVehicles: MapVehicle[] = placements
     .filter((pl) => pl.snap.status !== 'destroyed')
@@ -1612,6 +1355,11 @@ function frame(): void {
   targetMarker.update(origin, now / 1000);
   if (missionTarget) returnMarks.push({ lat: missionTarget.lat, lon: missionTarget.lon, cls: 'mark return', html: `<i></i><span>${missionTarget.label}</span>` });
   mapView.update(origin, world.camera, simTime, mapVehicles, trackedId, returnMarks);
+  return missionTarget;
+}
+
+/** Everything placed about the camera (floating origin), the Moon, the satellites, and the effects. */
+function placeWorldStep(snap: Snapshot, simTime: number, placements: FxVehicle[], cam: V3, m: FrameMotion): void {
   origin.apply(world.statics);
   moon.update(simTime, world.skyRotation, world.sunDir, origin, PAD_UP, buildingUniforms.uNight.value);
   for (const pl of placements) origin.place(pl.mesh.root, pl.world);
@@ -1622,30 +1370,37 @@ function frame(): void {
   // The satellites out of the bay, between snapshots as the vehicles are (they move as fast).
   if (starlink) {
     const cur = snap.payload;
-    const before = prev?.snap.payload;
-    const sats = cur?.sats.map((s) => {
-      const q = before?.sats.find((x) => x.n === s.n);
-      return q ? { ...s, pos: [q.pos[0] + (s.pos[0] - q.pos[0]) * alpha, q.pos[1] + (s.pos[1] - q.pos[1]) * alpha, q.pos[2] + (s.pos[2] - q.pos[2]) * alpha] as V3 } : s;
-    });
+    const sats = cur?.sats.map((s) => ({ ...s, pos: m.satPlace(s) }));
     starlink.update(cur && sats ? { ...cur, sats } : null, origin.camera, enuToWorld, meshes.get('ship')?.root ?? null);
   }
   // Dev-only: __fxMissionTime overrides the countdown clock the effects see (to preview the deluge).
   const fxClock = import.meta.env.DEV ? (window as unknown as { __fxMissionTime?: number }).__fxMissionTime : undefined;
   fx.update(simTime, fxClock ?? snap.missionTime, placements, world.sun, 1);
   ventFx.update(simTime, placements, fx.particles);
+}
 
+/** The engines' sound as heard at the camera (late, with the distance). */
+function soundStep(placements: FxVehicle[], simTime: number, cam: V3): Heard {
   // Sound: every vehicle is a source (silent ones too, so a cut-off is heard late as well).
   for (const pl of placements) {
     const n = vehicleNoise(pl);
     sound.record(pl.snap.id, simTime, n.pos, plumePower(n.thrust, n.pressureRatio));
   }
   sound.prune(simTime);
-  const heard = sound.hear(simTime, cam);
+  return sound.hear(simTime, cam);
+}
+
+/** The globe, the ground round the camera (and the pad's ahead, behind the main menu), the towers. */
+function groundStep(snap: Snapshot, cam: V3, now: number): void {
   globeTiles.update(world.camera, cam);
   terrain.update(world.camera, cam, now / 1000, rig.mode === 'orbit' && !rig.map ? rig.distance : 0);
   framesDrawn++;
   if (menu.kind === 'main') warmPad();
   padRig?.update(snap.missionTime, snap.towers);
+}
+
+/** Night lighting, and the shadow map: where it covers, and whether it needs drawing again. */
+function shadowStep(snap: Snapshot, placements: FxVehicle[], target: CameraTarget | null, cam: V3, dayAngle: number, now: number): void {
   // Shadows: near the ground they cover the whole launch site (both towers and the shadows they
   // cast) and, as a vehicle climbs, the ground its own shadow falls on, straight down the sun's
   // rays from it. Up high only the vehicle itself (its parts shading each other).
@@ -1671,16 +1426,40 @@ function frame(): void {
     shadowFocus.set(focus[0] - cam[0], focus[1] - cam[1], focus[2] - cam[2]);
     world.updateShadow(shadowFocus, 140);
   }
-  const r2 = (x: number) => Math.round(x * 20);
-  const key =
-    `${r2(focus[0])},${r2(focus[1])},${r2(focus[2])}|${Math.round(dayAngle * 2000)}|${meshes.size}|${padRig ? 1 : 0}|${JSON.stringify(snap.towers)}|` +
-    placements.map((pl) => `${r2(pl.world[0])},${r2(pl.world[1])},${r2(pl.world[2])},${r2(pl.mesh.root.quaternion.x * 50)},${r2(pl.mesh.root.quaternion.y * 50)},${r2(pl.mesh.root.quaternion.z * 50)}`).join(';');
+  // (A hash of it all, to 5 cm and a fraction of a degree: no strings built every frame.)
+  let key = 2166136261;
+  const mixIn = (x: number) => {
+    key = Math.imul(key ^ Math.round(x), 16777619);
+  };
+  for (const x of focus) mixIn(x * 20);
+  mixIn(dayAngle * 2000);
+  mixIn(meshes.size * 2 + (padRig ? 1 : 0));
+  for (const tw of snap.towers) {
+    mixIn(tw.top * 20);
+    mixIn(tw.angle * 20);
+    mixIn(tw.slew * 20);
+    mixIn(tw.qd * 20);
+    mixIn((tw.down ? 1 : 0) + (tw.broken.L ? 2 : 0) + (tw.broken.R ? 4 : 0) + (tw.qdBroken ? 8 : 0));
+  }
+  for (const pl of placements) {
+    for (const x of pl.world) mixIn(x * 20);
+    const q = pl.mesh.root.quaternion;
+    mixIn(q.x * 1000);
+    mixIn(q.y * 1000);
+    mixIn(q.z * 1000);
+  }
   if (key !== shadowKey || now - shadowAt > 2000) {
     shadowKey = key;
     shadowAt = now;
     world.shadowsDirty();
   }
+}
 
+/**
+ * The camera's height (and distance from the Earth's centre), the weather there, and the sea round
+ * it (sets camUp and camFromCentre).
+ */
+function seaAndWeatherStep(cam: V3, simTime: number, frameDt: number): { camR: number; camAlt: number; wx: LocalWeather } {
   // Camera altitude above the WGS84 ellipsoid (geocentric radius at the camera's latitude).
   camUp.set(cam[0] - EARTH_CENTER_WORLD[0], cam[1] - EARTH_CENTER_WORLD[1], cam[2] - EARTH_CENTER_WORLD[2]);
   const camR = camUp.length();
@@ -1709,7 +1488,17 @@ function frame(): void {
     sg.east.addScaledVector(sg.up, -sg.east.dot(sg.up)).normalize();
     sg.north.crossVectors(sg.up, sg.east);
     oceanSurface.update(world.renderer, cam, g.h - wl, sg.up, sg.east, sg.north, ground, !rig.map && terrain.ready, terrain, globeTiles, afloatFx.hulls);
+    // What the vehicles reflect from below: sea or land under the camera (eased), the Earth from high up.
+    const gh = terrain.groundHeight(g.lat, g.lon);
+    const overSea = gh === null || gh - PAD.groundAlt < terrain.waterLevelWorld + 0.3 ? 1 : 0;
+    seaUnder += (overSea - seaUnder) * Math.min(1, frameDt * 0.7);
+    world.setSurroundings(seaUnder, camAlt);
   }
+  return { camR, camAlt, wx };
+}
+
+/** The engines' roar, and everything else heard (ambience.ts). */
+function audioStep(snap: Snapshot, placements: FxVehicle[], heard: Heard, cam: V3, camAlt: number, simTime: number, frameDt: number, wx: LocalWeather): void {
   audio.update(heard.level, heard.distance, Math.exp(-Math.max(0, camAlt) / 8500), paused);
   // Everything else you hear: wind, surf, air rush, tower machinery, deluge, venting.
   const mt = snap.missionTime;
@@ -1734,6 +1523,10 @@ function frame(): void {
     vent: heldStack && (snap.phase === 'prelaunch' || snap.phase === 'countdown') ? (vehicleMid.get(heldStack.snap.id) ?? null) : null,
     rain: rig.map ? 0 : wx.rain,
   });
+}
+
+/** The camera's shake, the sky, the clouds, overcast, lightning and rain. */
+function skyStep(cam: V3, camR: number, camAlt: number, simTime: number, frameDt: number, wx: LocalWeather, heard: Heard, now: number): void {
   fx.shake(world.camera, paused || rig.map ? -Infinity : heard.level, now / 1000);
   earthCenterRel.set(EARTH_CENTER_WORLD[0] - cam[0], EARTH_CENTER_WORLD[1] - cam[1], EARTH_CENTER_WORLD[2] - cam[2]);
   world.updateSky(camAlt, camUp, earthCenterRel, camR - camAlt);
@@ -1756,18 +1549,27 @@ function frame(): void {
   }
   if (!paused) rainClock += frameDt;
   rain.update(rig.map ? 0 : wx.rain, cam, camUp, rainClock, wx.sun * Math.min(1, Math.max(0.05, (world.sunDir.dot(camUp) + 0.1) / 0.35)));
-  // Main menu: frame the pad off to the right, clear of the menu (eased in and out).
+}
+
+/** Main menu: frame the pad off to the right, clear of the menu (eased in and out). */
+function menuShiftStep(frameDt: number): void {
   menuShift += ((menu.kind === 'main' ? 1 : 0) - menuShift) * Math.min(1, frameDt * 3);
   if (menuShift > 0.001) {
     const w = window.innerWidth;
     const h = window.innerHeight;
-    const shift = padView !== null ? 0.26 : ((sceneIndex >= 0 ? MENU_SCENES[sceneIndex].shift : undefined) ?? 0.4);
+    const shift = backdrop.shift();
     world.camera.setViewOffset(w, h, -w * shift * menuShift, 0, w, h);
   } else if (world.camera.view) world.camera.clearViewOffset();
+}
+
+/** The frame drawn, then the panels over it; the frame's times kept for the pacing. */
+function drawStep(snap: Snapshot, missionTarget: MissionTarget | null, now: number): void {
   // (Screen scale for effects sized in metres, e.g. the reentry sparks.)
   VehicleMesh.pixelRatio = world.renderer.getPixelRatio();
   VehicleMesh.screenScale = (world.renderer.getContext().drawingBufferHeight / 2) * world.camera.projectionMatrix.elements[5];
+  const renderAt = performance.now();
   world.render();
+  lastRenderMs = performance.now() - renderAt;
   plot.draw();
   flightPanel.update(snap, snap.vehicles.find((v) => v.id === trackedId), missionTarget);
   maneuverPanel.update(snap, trackedId, trajectories.get(trackedId) ?? null, rig.map, warpTo);
@@ -1776,22 +1578,21 @@ function frame(): void {
   lastCpuMs = performance.now() - now;
   frozenFrame = menu.kind === 'pause' && paused;
 }
-requestAnimationFrame(frame);
+requestAnimationFrame(loop);
 
-// Corner buttons: pause menu and full screen (for the mouse; Esc and F do the same).
-{
-  const corner = document.createElement('div');
-  corner.id = 'corner';
-  corner.innerHTML =
-    '<button data-act="pause" title="Pause menu (Esc)"><svg viewBox="0 0 16 16"><rect x="4" y="3" width="2.6" height="10"/><rect x="9.4" y="3" width="2.6" height="10"/></svg></button>' +
-    '<button data-act="fs" title="Full screen (F)"><svg viewBox="0 0 16 16"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/></svg></button>';
-  corner.addEventListener('click', (e) => {
-    const act = (e.target as HTMLElement).closest('button')?.dataset.act;
-    if (act === 'pause' && !menu.isOpen) openPauseMenu();
-    else if (act === 'fs') toggleFullscreen();
-  });
-  document.body.appendChild(corner);
-}
+// Corner buttons; not losing a flight by accident; the keyboard in full screen; the graphics
+// context taken away (ui/windowChrome.ts).
+installWindowChrome({
+  canvas,
+  menu,
+  openPauseMenu,
+  inFlight,
+  askSave: () => void saves.askSave(),
+  send,
+  paused: () => paused,
+  replayActive: () => replay.active,
+  inPhoto: () => views.inPhoto(),
+});
 
 // Start at the main menu (once everything above is set up).
 menu.open('main', { mission: missionUi.selected });

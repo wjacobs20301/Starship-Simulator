@@ -481,6 +481,11 @@
       .mn-row input { width: 110px; font: 600 15px var(--font); letter-spacing: .16em; text-transform: uppercase; color: #fff; text-align: right;
         background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.22); border-radius: 2px; padding: 5px 9px; outline: none; }
       .mn-row input:focus { border-color: #fff; }
+      .mn-slide { display: inline-flex; align-items: center; gap: 10px; }
+      .mn-row .mn-slide input[type=range] { width: 170px; padding: 0; border: none; background: none; accent-color: #fff; cursor: pointer; }
+      .mn-slide output { min-width: 44px; text-align: right; font-size: 12px; letter-spacing: .1em; color: rgba(255,255,255,0.7); font-variant-numeric: tabular-nums; }
+      /* The flight displays' size (Settings: --ui-scale). */
+      #hud-left, #top-center, #log, #webcast, #console, #wc-caption, #return, #shield-panel, #toast, #replay-bar, #corner, .rs-card { zoom: var(--ui-scale, 1); }
       .mn-toggle { width: 42px; height: 22px; border-radius: 11px; border: 1px solid rgba(255,255,255,0.35); background: rgba(255,255,255,0.08);
         position: relative; cursor: pointer; transition: background .3s, border-color .3s; padding: 0; }
       .mn-toggle i { position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: rgba(255,255,255,0.7);
@@ -492,6 +497,37 @@
       .mn-controls .keys { display: grid; grid-template-columns: 72px 1fr; column-gap: 10px; row-gap: 6px; align-items: center;
         margin-bottom: 22px; break-inside: avoid; }
       .mn-controls kbd { margin-right: 3px; }
+      /* The Controls page's keys: each action, the key it's on (a button: press it, then the new key), and back to the default. */
+      .mn-keys { columns: 2; column-gap: 40px; max-width: 760px; margin-bottom: 26px; }
+      .mn-keys-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; max-width: 760px; margin-bottom: 12px; }
+      .mn-keys-head .mn-label { margin: 0; }
+      .mn-keys-head button { font: 600 10.5px var(--font); letter-spacing: .22em; text-transform: uppercase; color: rgba(255,255,255,0.7);
+        background: none; border: 1px solid rgba(255,255,255,0.3); border-radius: 2px; padding: 5px 12px; cursor: pointer; transition: background .25s, color .25s; }
+      .mn-keys-head button:hover { color: #fff; background: rgba(255,255,255,0.08); }
+      .mn-keys-note { max-width: 760px; min-height: 1.5em; margin: -4px 0 10px; font-size: 12px; letter-spacing: .06em; color: var(--warn); }
+      .mn-keys-group { break-inside: avoid; margin-bottom: 18px; }
+      .mn-keys-group .mn-label { margin-bottom: 2px; }
+      .mn-key { display: flex; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.08);
+        font-size: 12px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: rgba(255,255,255,0.82); }
+      .mn-key > span { flex: 1; min-width: 0; }
+      .mn-key .mn-keycap { min-width: 74px; padding: 4px 8px; text-align: center; white-space: nowrap; cursor: pointer; color: #fff;
+        font: 600 11px var(--font); letter-spacing: .12em; text-transform: uppercase;
+        background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.22); border-radius: 2px; transition: background .25s, border-color .25s, color .25s; }
+      .mn-key .mn-keycap:hover { background: rgba(255,255,255,0.16); border-color: rgba(255,255,255,0.55); }
+      .mn-key .mn-keycap kbd { border: none; background: none; padding: 0; min-width: 0; font-size: 11.5px; line-height: 15px; }
+      .mn-key .mn-keycap kbd + kbd::before { content: "/"; margin: 0 5px; color: rgba(255,255,255,0.45); }
+      .mn-key.changed .mn-keycap { border-color: rgba(255,255,255,0.7); }
+      .mn-key.unbound .mn-keycap { color: var(--warn); border-color: var(--warn); }
+      .mn-key .mn-keycap.wait { color: #000; background: #fff; border-color: #fff; letter-spacing: .08em; }
+      .mn-key .mn-key-reset { width: 22px; height: 22px; padding: 0; font: 500 14px/1 var(--font); color: rgba(255,255,255,0.6); cursor: pointer;
+        background: none; border: 1px solid rgba(255,255,255,0.25); border-radius: 50%; transition: background .25s, color .25s, border-color .25s; }
+      .mn-key .mn-key-reset:hover { color: #000; background: #fff; border-color: #fff; }
+      .mn-key .mn-key-reset[hidden] { display: block; visibility: hidden; }
+      .mn-keys-fixed { max-width: 760px; margin: -8px 0 26px; font-size: 11.5px; line-height: 2; letter-spacing: .06em; color: rgba(255,255,255,0.5); }
+      .mn-keys-fixed kbd { margin: 0 4px 0 10px; }
+      .mn-keys-fixed .mn-label { display: inline; margin-right: 2px; }
+      /* A key cap for an action that has no key now. */
+      kbd.unbound { color: var(--warn); border-color: var(--warn); }
       .mn-credits { max-width: 620px; font-size: 13px; line-height: 1.9; letter-spacing: .03em; color: rgba(255,255,255,0.75); }
       .credits a, .mn-credits a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
       /* Menus up: the flight HUD steps back. */
@@ -513,6 +549,7 @@
         .mn-nav { margin-top: 4vh; }
         .mn-missions { grid-template-columns: 1fr; }
         .mn-controls { columns: 1; }
+        .mn-keys { columns: 1; }
       }
 
       /* --- Preparing a mission that starts mid-flight --- */
@@ -556,6 +593,37 @@
         letter-spacing: 0.14em; text-transform: uppercase; transition: opacity 0.3s, transform 0.3s; }
       #toast.on { opacity: 1; transform: translate(-50%, 0); }
       .gp-focus { outline: 1px solid rgba(255, 255, 255, 0.85) !important; outline-offset: 2px; }
+      /* Keyboard focus in the menus and panels (Tab, the arrows). */
+      #menu button:focus-visible, #menu .mn-card:focus-visible, #results button:focus-visible, #maneuver button:focus-visible, #return button:focus-visible {
+        outline: 1px solid rgba(255, 255, 255, 0.85); outline-offset: 2px; }
+      .mn-nav button.arm { color: var(--warn); padding-left: 28px; }
+      .mn-nav button.mn-continue { color: #fff; margin-bottom: 14px; text-align: left; }
+      .mn-nav button.mn-continue small { display: block; margin-top: 4px; font-size: 10.5px; font-weight: 500; letter-spacing: .22em; color: rgba(255,255,255,0.55); }
+      /* Saved flights: the main menu's Continue page, and the pause menu's Save Flight. */
+      .mn-saves { max-width: 640px; animation: pageIn .5s var(--ease) both; }
+      .mn-saves .mn-label { margin-top: 18px; }
+      .mn-save { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.08); }
+      .mn-save-text span { display: block; font-size: 13px; font-weight: 600; letter-spacing: .16em; text-transform: uppercase; }
+      .mn-save-text small { display: block; margin-top: 4px; font-size: 11px; letter-spacing: .08em; color: rgba(255,255,255,0.55); font-variant-numeric: tabular-nums; }
+      .mn-save.bad .mn-save-text span { color: rgba(255,255,255,0.5); }
+      .mn-save-text .mn-save-why { color: var(--warn); letter-spacing: .04em; }
+      .mn-save-acts { display: flex; gap: 6px; flex-shrink: 0; }
+      .mn-save-acts button { font: 600 11px var(--font); letter-spacing: .2em; text-transform: uppercase; color: rgba(255,255,255,0.7); background: none;
+        border: 1px solid rgba(255,255,255,0.3); border-radius: 2px; padding: 7px 12px; cursor: pointer; transition: background .25s, color .25s; white-space: nowrap; }
+      .mn-save-acts button:hover { color: #fff; background: rgba(255,255,255,0.08); }
+      .mn-save-acts button.mn-save-go.first { color: #000; background: #fff; border-color: #fff; }
+      .mn-save-acts button.arm { color: var(--warn); border-color: var(--warn); }
+      .mn-save-new { display: flex; gap: 10px; align-items: stretch; }
+      .mn-save-new input { flex: 1; min-width: 0; font: 500 14px var(--font); letter-spacing: .06em; color: #fff; background: rgba(255,255,255,0.06);
+        border: 1px solid rgba(255,255,255,0.3); border-radius: 2px; padding: 0 12px; }
+      .mn-save-full { color: var(--warn); letter-spacing: .06em; }
+      @media (max-width: 640px) { .mn-save { flex-direction: column; align-items: flex-start; } }
+      /* The graphics context lost (main.ts). */
+      #gl-lost { position: fixed; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.82); }
+      .gl-card { width: min(460px, calc(100vw - 32px)); padding: 22px 26px; background: var(--glass); border-top: 1px solid var(--line-strong); border-radius: 2px; text-align: center; }
+      .gl-title { font-size: 13px; font-weight: 600; letter-spacing: .3em; text-transform: uppercase; }
+      .gl-card p { font-size: 13.5px; line-height: 1.55; color: rgba(255,255,255,0.78); }
+      .gl-card button { font: 600 12px var(--font); letter-spacing: .26em; text-transform: uppercase; color: #000; background: #fff; border: none; border-radius: 2px; padding: 10px 22px; cursor: pointer; }
       /* Instant replay: its bar along the bottom. */
       #replay-bar { position: fixed; left: 50%; bottom: 26px; z-index: 55; transform: translateX(-50%); display: flex; align-items: center; gap: 14px;
         padding: 9px 16px; background: rgba(10, 12, 16, 0.82); border: 1px solid rgba(255, 255, 255, 0.16); font-size: 12px; letter-spacing: 0.1em;
@@ -575,16 +643,18 @@
     <div id="hud-left">
     <div id="top-left" class="hud"><b id="site">STARSHIP V3 · STARBASE PAD 1</b><br /><span id="status"></span></div>
     <div id="help" class="hud hidden">
-      <div class="group">LAUNCH</div>
-      <div class="keys"><span><kbd>Space</kbd></span><em>Launch · stage in flight</em><span><kbd>O</kbd></span><em>Main menu (on the pad)</em><span><kbd>Esc</kbd></span><em>Pause menu</em></div>
-      <div class="group">FLY · <kbd>L</kbd> TO TAKE CONTROL</div>
-      <div class="keys"><span><kbd>W</kbd><kbd>S</kbd></span><em>Pitch</em><span><kbd>A</kbd><kbd>D</kbd></span><em>Yaw</em><span><kbd>Q</kbd><kbd>E</kbd></span><em>Roll</em><span><kbd>⇧</kbd><kbd>Ctrl</kbd></span><em>Throttle up / down</em><span><kbd>Z</kbd><kbd>X</kbd></span><em>Full / cut throttle</em><span><kbd>G</kbd></span><em>Engine set</em><span><kbd>B</kbd></span><em>Deploy Starlinks</em><span><kbd>T</kbd></span><em>SAS on / off</em></div>
-      <div class="group">VIEW</div>
-      <div class="keys"><span><kbd>Tab</kbd></span><em>Map</em><span><kbd>C</kbd><kbd>V</kbd></span><em>Camera · vehicle</em><span><kbd>K</kbd></span><em>Auto camera (webcast)</em><span><kbd>R</kbd></span><em>Instant replay</em><span><kbd>I</kbd></span><em>Photo mode (Enter: save)</em><span><kbd>1–8</kbd><kbd>,</kbd><kbd>.</kbd></span><em>Time warp</em><span><kbd>N</kbd></span><em>Maneuver node</em><span><kbd>P</kbd><kbd>J</kbd></span><em>Plot · event log</em><span><kbd>M</kbd><kbd>H</kbd></span><em>Sound · hide help</em><span><kbd>F</kbd></span><em>Full screen</em></div>
+      <!-- (The key caps marked data-key show the player's own keys: ui/keyLabels.ts writes them in.
+           The groups marked kb are the keyboard's: the menu's Controls page lists those itself.) -->
+      <div class="group kb">LAUNCH</div>
+      <div class="keys kb"><span><kbd data-key="launch">Space</kbd></span><em>Launch · stage in flight</em><span><kbd data-key="mainMenu">O</kbd></span><em>Main menu (on the pad)</em><span><kbd>Esc</kbd></span><em>Pause menu</em></div>
+      <div class="group kb">FLY · <kbd data-key="manual">L</kbd> TO TAKE CONTROL</div>
+      <div class="keys kb"><span><kbd data-key="pitchDown">W</kbd><kbd data-key="pitchUp">S</kbd></span><em>Pitch</em><span><kbd data-key="yawLeft">A</kbd><kbd data-key="yawRight">D</kbd></span><em>Yaw</em><span><kbd data-key="rollLeft">Q</kbd><kbd data-key="rollRight">E</kbd></span><em>Roll</em><span><kbd data-key="throttleUp">⇧</kbd><kbd data-key="throttleDown">Ctrl</kbd></span><em>Throttle up / down</em><span><kbd data-key="throttleFull">Z</kbd><kbd data-key="throttleCut">X</kbd></span><em>Full / cut throttle</em><span><kbd data-key="engines">G</kbd></span><em>Engine set</em><span><kbd data-key="deploy">B</kbd></span><em>Deploy Starlinks</em><span><kbd data-key="sas">T</kbd></span><em>SAS on / off</em></div>
+      <div class="group kb">VIEW</div>
+      <div class="keys kb"><span><kbd data-key="map">Tab</kbd></span><em>Map</em><span><kbd data-key="camera">C</kbd><kbd data-key="vehicle">V</kbd></span><em>Camera · vehicle</em><span><kbd data-key="director">K</kbd></span><em>Auto camera (webcast)</em><span><kbd data-key="replay">R</kbd></span><em>Instant replay</em><span><kbd data-key="photo">I</kbd></span><em>Photo mode (Enter: save)</em><span><kbd>1–8</kbd><kbd data-key="warpDown">,</kbd><kbd data-key="warpUp">.</kbd></span><em>Time warp</em><span><kbd data-key="node">N</kbd></span><em>Maneuver node</em><span><kbd data-key="plot">P</kbd><kbd data-key="log">J</kbd></span><em>Plot · event log</em><span><kbd data-key="mute">M</kbd><kbd data-key="help">H</kbd></span><em>Sound · hide help</em><span><kbd data-key="fullscreen">F</kbd></span><em>Full screen</em></div>
       <div class="group">GAMEPAD</div>
       <div class="keys"><span><kbd>L stick</kbd></span><em>Pitch · yaw</em><span><kbd>LB</kbd><kbd>RB</kbd></span><em>Roll</em><span><kbd>LT</kbd><kbd>RT</kbd></span><em>Throttle down / up</em><span><kbd>R stick</kbd></span><em>Camera (click: zoom)</em><span><kbd>A</kbd></span><em>Launch · stage</em><span><kbd>B</kbd></span><em>SAS</em><span><kbd>X</kbd><kbd>Y</kbd></span><em>Engine set · camera</em><span><kbd>D-pad</kbd></span><em>Warp ↑↓ · vehicle ← · autopilot →</em><span><kbd>View</kbd><kbd>Menu</kbd></span><em>Map · pause</em><span><kbd>L3</kbd></span><em>Deploy Starlinks</em></div>
       <div class="group">TOWER</div>
-      <div class="keys"><span><kbd>↑</kbd><kbd>↓</kbd></span><em>Arms up / down</em><span><kbd>←</kbd><kbd>→</kbd></span><em>Close / open</em><span><kbd>[</kbd><kbd>]</kbd></span><em>Swing round tower</em><span><kbd>U</kbd></span><em>Select pad</em></div>
+      <div class="keys"><span><kbd>↑</kbd><kbd>↓</kbd></span><em>Arms up / down</em><span><kbd>←</kbd><kbd>→</kbd></span><em>Close / open</em><span><kbd>[</kbd><kbd>]</kbd></span><em>Swing round tower</em><span><kbd data-key="armsPad">U</kbd></span><em>Select pad</em></div>
       <div class="credits">
         Launch tower, chopsticks and mount: “Starship Launch Tower &amp; Launch Pad with Functional Chopsticks” by
         <a href="https://www.thingiverse.com/thing:5908857" target="_blank" rel="noopener">MikeNotBrick</a>,

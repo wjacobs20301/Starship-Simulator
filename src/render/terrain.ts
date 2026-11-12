@@ -1,7 +1,9 @@
 // Streamed Starbase terrain: a quadtree over Web Mercator tiles (z10..z18) built by
 // scripts/terrain. Each tile is a 33x33 height grid (with skirts) whose vertices are placed
 // exactly on the curved Earth in the pad's ENU frame (same math as the physics), textured with
-// NAIP imagery. Water (by height) gets a reflective, animated surface in the shader.
+// NAIP imagery. Water (by height) gets a reflective, animated surface in the shader. A tile's
+// heights, vertices and image are made ready in a worker (tileWorker.ts); here they're only
+// wrapped in a mesh.
 
 import * as THREE from 'three';
 import { SEA_GLSL, bindSea, sea as seaState } from './ocean';
@@ -10,7 +12,11 @@ import { TRENCHES } from './launchSite';
 import { DEG, PAD } from '../sim/constants';
 import type { V3 } from '../sim/math';
 import type { FloatingOrigin } from './floatingOrigin';
+import { compressTiles, compressTilesFailed, compressedTileTexture, disposeTileTexture, loadTileTexture } from './tileTexture';
+import { TileArray } from './tileArray';
 import { M_PER_DEG_LAT, M_PER_DEG_LON, horizonDistance, tileXToLon, tileYToLat, toWorld } from './geo';
+import { TERRAIN_GRID, type TileId } from './tileGeometry';
+import { buildTerrainTile } from './tileWorker';
 
 interface Range { x0: number; x1: number; y0: number; y1: number }
 interface TerrainIndex {
@@ -25,9 +31,15 @@ interface TerrainIndex {
 }
 
 const BASE = `${import.meta.env.BASE_URL}terrain/`;
-const GRID = 33; // vertices per tile edge
-/** Tiles kept built (each a 256 px image and a 33 x 33 grid); ~1000 are in use on the ground. */
-const MAX_TILES = 1500;
+const GRID = TERRAIN_GRID; // vertices per tile edge
+/**
+ * Tiles kept built (each a 256 px image, 44 kB on the GPU compressed with its mipmaps, ~350 kB
+ * where it can't be (tileTexture.ts), and a 33 x 33 grid); ~1000 are in use on the ground. Fewer
+ * kept spare on a machine short of memory.
+ */
+const MAX_TILES = ((navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 8) <= 4 ? 1100 : 1500;
+/** A tile that failed to load is tried again this many times (waiting longer each time). */
+const MAX_TRIES = 5;
 const MAX_LOADS = 12;
 /** Split when the tile would be drawn larger than ~1.3 texels per screen pixel. */
 const SPLIT_PIXELS = 256 * 1.3;
@@ -80,10 +92,15 @@ export function setSiteMask(tex: THREE.Texture, rect: [number, number, number, n
  * holes: the tile reaches a flame trench, so it cuts the openings out. Only those tiles use the
  * variant with the discard: a shader that can discard loses the GPU's early depth rejection.
  */
-function makeMaterial(map: THREE.Texture | null, holes: boolean): THREE.MeshStandardMaterial {
+/**
+ * array: the tiles' images as layers of one texture (tileArray.ts), the material shared by every
+ * tile drawn from it (each vertex says which layer; -1: no image, open sea). Else a material of
+ * the tile's own, with its own image (or none).
+ */
+function makeMaterial(map: THREE.Texture | null, holes: boolean, array: THREE.Texture | null = null): THREE.MeshStandardMaterial {
   const mat = new THREE.MeshStandardMaterial({
     map,
-    color: map ? 0xffffff : WATER_COLOR,
+    color: map || array ? 0xffffff : WATER_COLOR,
     roughness: 0.93,
     metalness: 0,
   });
@@ -105,9 +122,10 @@ function makeMaterial(map: THREE.Texture | null, holes: boolean): THREE.MeshStan
     shader.uniforms.uMaskNE = seaMeshUniforms.uMaskNE;
     shader.uniforms.uMaskNN = seaMeshUniforms.uMaskNN;
     shader.uniforms.uMaskNI = seaMeshUniforms.uMaskNI;
+    if (array) shader.uniforms.uTiles = { value: array };
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nattribute float aHeight;\nattribute vec2 aEN;\nattribute float aWaterWeight;\nvarying float vHeight;\nvarying vec2 vEN;\nvarying float vWaterWeight;\nvarying vec3 vSeaRel;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvHeight = aHeight;\nvEN = aEN;\nvWaterWeight = aWaterWeight;\nvSeaRel = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+      .replace('#include <common>', `#include <common>\nattribute float aHeight;\nattribute vec2 aEN;\nattribute float aWaterWeight;\nvarying float vHeight;\nvarying vec2 vEN;\nvarying float vWaterWeight;\nvarying vec3 vSeaRel;${array ? '\nattribute float aLayer;\nvarying float vLayer;\nvarying vec2 vTileUv;' : ''}`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>\nvHeight = aHeight;\nvEN = aEN;\nvWaterWeight = aWaterWeight;\nvSeaRel = (modelMatrix * vec4(transformed, 1.0)).xyz;${array ? '\nvLayer = aLayer;\nvTileUv = uv;' : ''}`);
     shader.fragmentShader = shader.fragmentShader
       .replace(
         '#include <common>',
@@ -123,6 +141,7 @@ uniform vec4 uTrench[${TRENCHES.length}];
 uniform vec2 uTrenchHalf[${TRENCHES.length}];
 uniform sampler2D uSiteMask;
 uniform vec4 uSiteRect;
+${array ? 'uniform sampler2DArray uTiles;\nvarying float vLayer;\nvarying vec2 vTileUv;' : ''}
 varying float vHeight;
 varying vec2 vEN;
 varying float vWaterWeight;
@@ -137,6 +156,7 @@ ${SEA_MESH_GLSL}`,
       .replace(
         '#include <map_fragment>',
         `#include <map_fragment>
+${array ? '// (The tile\'s image: its layer of the shared array; none: open sea.)\ndiffuseColor *= vLayer < -0.5 ? vec4(uWater, 1.0) : texture(uTiles, vec3(vTileUv, vLayer));' : ''}
 ${
   holes
     ? `// The flame trenches are open to the sky (their lining is part of the pad model).
@@ -202,9 +222,17 @@ if (water > 0.001) {
   vec3 vn = normalize((viewMatrix * vec4(gSeaNormal, 0.0)).xyz);
   normal = normalize(mix(normal, vn, water * (1.0 - 0.6 * gSeaFoam)));
 }`,
+      )
+      .replace(
+        '#include <dithering_fragment>',
+        `#include <dithering_fragment>
+// (Water, told to the atmosphere pass in the alpha: a cloud's shadow dims it far less than land.)
+#ifdef OPAQUE
+gl_FragColor.a = 1.0 - 0.5 * water * (1.0 - gSeaFoam);
+#endif`,
       );
   };
-  mat.customProgramCacheKey = () => (holes ? 'terrain-v13-holes' : 'terrain-v13');
+  mat.customProgramCacheKey = () => `terrain-v16${holes ? '-holes' : ''}${array ? '-array' : ''}`;
   return mat;
 }
 
@@ -217,6 +245,13 @@ class Tile {
   lastUsed = 0;
   /** The last frame it was in the camera's view (lastUsed: wanted, in view or not). */
   lastSeen = 0;
+  /** Loads that failed so far, and the frame it may be tried again. */
+  fails = 0;
+  retryAt = 0;
+  /** Its image's layer in the shared array (tileArray.ts); -1: none there (its own texture, or no image). */
+  layer = -1;
+  /** Drawn with a shared material (not to be disposed with the tile). */
+  shared = false;
   /** Ground heights (m above the ellipsoid), GRID x GRID, once built. */
   heights: Float32Array | null = null;
   /** Render-world center (float64) and bounding radius, from the tile corners. */
@@ -244,11 +279,9 @@ export class Terrain {
   private bits: Record<number, { img: Uint8Array; dem: Uint8Array | null }> = {};
   private roots: Tile[] = [];
   private tiles = new Map<string, Tile>();
-  private demCache = new Map<string, Promise<Int16Array | null>>();
   private queue: Tile[] = [];
   private loading = 0;
   private frame = 0;
-  private texLoader = new THREE.TextureLoader();
   private frustum = new THREE.Frustum();
   private projView = new THREE.Matrix4();
   ready = false;
@@ -323,11 +356,17 @@ export class Terrain {
     // moment the camera turns to them.)
     for (const t of this.tiles.values()) if (t.mesh) t.mesh.visible = false;
     this.around.length = 0;
+    let key = around.length;
     for (const t of around) {
       const m = t.mesh!;
       m.visible = t.lastSeen === this.frame;
       this.origin.place(m, t.center);
       this.around.push(m);
+      key = (Math.imul(key, 31) + m.id) | 0;
+    }
+    if (key !== this.aroundKey) {
+      this.aroundKey = key;
+      this.version++;
     }
     this.pump(cameraWorld);
     this.evict();
@@ -338,6 +377,21 @@ export class Terrain {
 
   /** The ground all round the camera at the detail it's seen at, in view or not. */
   private around: THREE.Mesh[] = [];
+
+  /** The tiles' images as one texture, and the materials every tile drawn from it shares (by holes / fading). */
+  private array: TileArray | null = null;
+  private sharedMaterials: (THREE.MeshStandardMaterial | undefined)[] = [];
+  /** The array, made for the first compressed image's size (null: none could be made). */
+  private tileArray(first: { width: number; height: number } | null): TileArray | null {
+    if (!this.array && first && first.width === first.height) {
+      this.array = new TileArray(MAX_TILES + 200, first.width, Math.min(8, this.renderer.capabilities.getMaxAnisotropy()));
+    }
+    return this.array;
+  }
+
+  /** Goes up whenever the set of tiles round the camera changes (the sea's map is redrawn then). */
+  version = 0;
+  private aroundKey = 0;
 
   /**
    * Draw with all the ground round the camera shown, not only what's in view (the sea's map,
@@ -409,7 +463,9 @@ export class Terrain {
             if (seen) k.lastSeen = this.frame;
             this.request(k);
           }
-          if (kids.every((k) => k.state === 'ready' || k.state === 'failed')) {
+          // (All four there: a tile that failed to load is tried again, this one drawn meanwhile.
+          // Going down to the three that did load would leave a hole where the fourth should be.)
+          if (kids.every((k) => k.state === 'ready')) {
             kids.forEach(visit);
             return;
           }
@@ -459,6 +515,7 @@ export class Terrain {
   }
 
   private request(t: Tile): void {
+    if (t.state === 'failed' && t.fails < MAX_TRIES && this.frame >= t.retryAt) t.state = 'idle';
     if (t.state === 'idle' && !this.queue.includes(t)) this.queue.push(t);
   }
 
@@ -475,10 +532,15 @@ export class Terrain {
       t.state = 'loading';
       this.loading++;
       this.build(t)
-        .then(() => (t.state = 'ready'))
+        .then(() => {
+          t.state = 'ready';
+          t.fails = 0;
+        })
         .catch((err) => {
           console.warn(`terrain tile ${t.key} failed`, err);
           t.state = 'failed';
+          // (Again in a few seconds, then longer: 4, 8, 16... s at 60 frames a second.)
+          t.retryAt = this.frame + 120 * 2 ** ++t.fails;
         })
         .finally(() => this.loading--);
     }
@@ -495,18 +557,36 @@ export class Terrain {
       const m = t.mesh!;
       this.group.remove(m);
       m.geometry.dispose();
-      const mat = m.material as THREE.MeshStandardMaterial;
-      mat.map?.dispose();
-      mat.dispose();
+      if (t.shared) this.array?.release(t.layer);
+      else {
+        const mat = m.material as THREE.MeshStandardMaterial;
+        disposeTileTexture(mat.map);
+        mat.dispose();
+      }
+      t.layer = -1;
+      t.shared = false;
       t.mesh = null;
       t.heights = null;
       t.state = 'idle';
     }
+    this.forget();
   }
 
-  /** Heights (m, NAVD88) for a tile at GRID x GRID, from its own or an ancestor's DEM tile. */
-  private async heights(t: Tile): Promise<Float32Array> {
-    const out = new Float32Array(GRID * GRID);
+  /** Drop the records of tiles long out of use (four children at a time, from the leaves up). */
+  private forget(): void {
+    const stale = (t: Tile) => !t.mesh && !t.children && t.state !== 'loading' && t.lastUsed < this.frame - 1800;
+    for (const t of this.tiles.values()) {
+      if (!t.children || !t.children.every(stale)) continue;
+      for (const k of t.children) this.tiles.delete(k.key);
+      t.children = null;
+    }
+  }
+
+  /**
+   * The DEM tile a tile's heights come from: its own, or (finer than the DEM goes, or none there)
+   * the nearest ancestor's. null: none above it (open sea, 0 m).
+   */
+  private demFor(t: Tile): { url: string; at: TileId; grid: number } | null {
     let zd = Math.min(t.z, this.index.demMaxZoom);
     let dx = t.x >> (t.z - zd);
     let dy = t.y >> (t.z - zd);
@@ -516,38 +596,8 @@ export class Terrain {
       dx >>= 1;
       dy >>= 1;
     }
-    if (zd < this.index.minZoom) return out;
-    const dem = await this.dem(zd, dx, dy);
-    if (!dem) return out;
-    const G = this.index.demGrid;
-    const scale = 2 ** (t.z - zd);
-    for (let j = 0; j < GRID; j++) {
-      const gy = ((t.y + j / (GRID - 1)) / scale - dy) * (G - 1);
-      const y0 = Math.min(G - 2, Math.floor(gy));
-      const fy = gy - y0;
-      for (let i = 0; i < GRID; i++) {
-        const gx = ((t.x + i / (GRID - 1)) / scale - dx) * (G - 1);
-        const x0 = Math.min(G - 2, Math.floor(gx));
-        const fx = gx - x0;
-        const h00 = dem[y0 * G + x0], h10 = dem[y0 * G + x0 + 1];
-        const h01 = dem[(y0 + 1) * G + x0], h11 = dem[(y0 + 1) * G + x0 + 1];
-        out[j * GRID + i] = ((h00 * (1 - fx) + h10 * fx) * (1 - fy) + (h01 * (1 - fx) + h11 * fx) * fy) / 100;
-      }
-    }
-    return out;
-  }
-
-  private dem(z: number, x: number, y: number): Promise<Int16Array | null> {
-    const key = `${z}/${x}/${y}`;
-    let p = this.demCache.get(key);
-    if (!p) {
-      p = fetch(`${BASE}dem/${key}.bin`)
-        .then((r) => (r.ok ? r.arrayBuffer() : null))
-        .then((b) => (b ? new Int16Array(b) : null));
-      this.demCache.set(key, p);
-      if (this.demCache.size > 400) this.demCache.delete(this.demCache.keys().next().value!);
-    }
-    return p;
+    if (zd < this.index.minZoom) return null;
+    return { url: `${BASE}dem/${zd}/${dx}/${dy}.bin`, at: { z: zd, x: dx, y: dy }, grid: this.index.demGrid };
   }
 
   /**
@@ -556,102 +606,96 @@ export class Terrain {
    * as that tile shows it (its water is baked in), so the two meet without a seam. (Drawn as
    * open sea, those tiles showed as blue strips along the survey's edge, even over land and
    * flats.) Only where nothing above has imagery is it left to the water shader. Returns the
-   * texture and where the tile sits in it (uv offset and scale).
+   * image's address and where the tile sits in it (uv offset and scale).
    */
-  private async imagery(t: Tile): Promise<{ tex: THREE.Texture | null; off: [number, number]; scale: number }> {
-    if (t.hasImagery) return { tex: await this.texLoader.loadAsync(`${BASE}img/${t.key}.jpg`), off: [0, 0], scale: 1 };
+  private imagery(t: Tile): { url: string | null; off: [number, number]; scale: number } {
+    if (t.hasImagery) return { url: `${BASE}img/${t.key}.jpg`, off: [0, 0], scale: 1 };
     for (let d = 1; t.z - d >= this.index.minZoom; d++) {
       const ax = t.x >> d, ay = t.y >> d;
       if (!this.has('img', t.z - d, ax, ay)) continue;
       const scale = 2 ** -d;
-      const tex = await this.texLoader.loadAsync(`${BASE}img/${t.z - d}/${ax}/${ay}.jpg`);
-      return { tex, off: [(t.x - (ax << d)) * scale, (t.y - (ay << d)) * scale], scale };
+      return { url: `${BASE}img/${t.z - d}/${ax}/${ay}.jpg`, off: [(t.x - (ax << d)) * scale, (t.y - (ay << d)) * scale], scale };
     }
-    return { tex: null, off: [0, 0], scale: 1 };
+    return { url: null, off: [0, 0], scale: 1 };
   }
 
   private async build(t: Tile): Promise<void> {
-    const [hts, { tex, off, scale: texScale }] = await Promise.all([this.heights(t), this.imagery(t)]);
-    t.heights = hts;
+    const { url, off, scale: texScale } = this.imagery(t);
+    const c = t.center;
+    // Skirts hang below the tile edges to hide cracks between detail levels.
+    const drop = Math.max(2, t.size * 0.02);
+    // Tiles reaching into the region's fade band blend with the globe below. (No skirts there:
+    // they showed through the part-transparent ground as dark lines along the tile edges.)
+    const reach = Math.max(Math.abs(c[0]), Math.abs(c[2])) + t.size * 0.75;
+    const fading = reach > REGION_HALF_M - EDGE_FADE_M;
+    // The image: compressed by the worker where the GPU takes that; else loaded here as before,
+    // alongside. (Its failure is the tile's, further down; not unhandled meanwhile.)
+    const compress = compressTiles(this.renderer);
+    const raw = url && !compress ? loadTileTexture(url) : null;
+    raw?.catch(() => {});
+    const built = await buildTerrainTile({
+      shape: {
+        z: t.z,
+        x: t.x,
+        y: t.y,
+        center: c,
+        drop,
+        skirts: !fading,
+        uvOff: off,
+        uvScale: texScale,
+        // Runtime water colour on tiles fine enough to resolve the shoreline (z15+, ~40 m spacing).
+        // Coarser imagery has its water colour baked in by the build; tiles without imagery are sea.
+        // (No imagery anywhere above: all water. A coarser tile's imagery: as that tile draws it.)
+        waterWeight: !url ? 2 : t.z >= 15 && t.hasImagery ? 1 : 0,
+      },
+      dem: this.demFor(t),
+      image: compress ? url : null,
+    }).catch((err) => {
+      // (No tile: nor its image, if that did load.)
+      raw?.then(disposeTileTexture, () => {});
+      throw err;
+    });
+    // Its image: a layer of the shared array where it's compressed (and the tile drawn with the
+    // material every such tile shares); else a texture and a material of its own.
+    const array = compress ? this.tileArray(built.image) : null;
+    const layer = array && built.image ? array.add(built.image) : -1;
+    const shared = !!array && (layer >= 0 || !url);
+    let tex: THREE.Texture | null = null;
+    if (shared) tex = null;
+    else if (built.image) tex = compressedTileTexture(built.image);
+    else if (url) {
+      if (built.imageSkipped) compressTilesFailed();
+      tex = await (raw ?? loadTileTexture(url));
+    }
     if (tex) {
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
       tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
     }
-    const n = GRID * GRID;
-    const skirt = 4 * GRID - 4;
-    const pos = new Float32Array((n + skirt) * 3);
-    const uv = new Float32Array((n + skirt) * 2);
-    const hAttr = new Float32Array(n + skirt);
-    const en = new Float32Array((n + skirt) * 2);
-    // Runtime water colour on tiles fine enough to resolve the shoreline (z15+, ~40 m spacing).
-    // Coarser imagery has its water colour baked in by the build; tiles without imagery are sea.
-    // (No imagery anywhere above: all water. A coarser tile's imagery: as that tile draws it.)
-    const waterWeight = new Float32Array(n + skirt).fill(!tex ? 2 : t.z >= 15 && t.hasImagery ? 1 : 0);
-    const c = t.center;
-    for (let j = 0; j < GRID; j++) {
-      const v = j / (GRID - 1);
-      const lat = tileYToLat(t.y + v, t.z);
-      for (let i = 0; i < GRID; i++) {
-        const u = i / (GRID - 1);
-        const k = j * GRID + i;
-        const h = hts[k];
-        const w = toWorld(lat, tileXToLon(t.x + u, t.z), h);
-        pos.set([w[0] - c[0], w[1] - c[1], w[2] - c[2]], k * 3);
-        uv.set([off[0] + u * texScale, 1 - (off[1] + v * texScale)], k * 2);
-        hAttr[k] = h - PAD.groundAlt;
-        en.set([w[0], -w[2]], k * 2);
-      }
-    }
-    // Skirts hang below the tile edges to hide cracks between detail levels.
-    const drop = Math.max(2, t.size * 0.02);
-    const edge: number[] = [];
-    for (let i = 0; i < GRID; i++) edge.push(i);
-    for (let j = 1; j < GRID; j++) edge.push(j * GRID + GRID - 1);
-    for (let i = GRID - 2; i >= 0; i--) edge.push((GRID - 1) * GRID + i);
-    for (let j = GRID - 2; j >= 1; j--) edge.push(j * GRID);
-    edge.forEach((src, s) => {
-      const k = n + s;
-      pos.set([pos[src * 3], pos[src * 3 + 1] - drop, pos[src * 3 + 2]], k * 3);
-      uv.set([uv[src * 2], uv[src * 2 + 1]], k * 2);
-      hAttr[k] = hAttr[src];
-      en.set([en[src * 2], en[src * 2 + 1]], k * 2);
-    });
-    const idx: number[] = [];
-    for (let j = 0; j < GRID - 1; j++) {
-      for (let i = 0; i < GRID - 1; i++) {
-        const a = j * GRID + i, b = a + 1, d = a + GRID, e = d + 1;
-        idx.push(a, d, b, b, d, e);
-      }
-    }
-    const surfaceCount = idx.length;
-    // Tiles reaching into the region's fade band blend with the globe below. (No skirts there:
-    // they showed through the part-transparent ground as dark lines along the tile edges.)
-    const reach = Math.max(Math.abs(c[0]), Math.abs(c[2])) + t.size * 0.75;
-    const fading = reach > REGION_HALF_M - EDGE_FADE_M;
-    for (let s = 0; s < (fading ? 0 : edge.length); s++) {
-      const a = edge[s], b = edge[(s + 1) % edge.length];
-      const a2 = n + s, b2 = n + ((s + 1) % edge.length);
-      idx.push(a, b, a2, b, b2, a2, a, a2, b, b, a2, b2); // both windings: skirts are seen from either side
-    }
+    t.heights = built.heights;
+    const geo = built.geometry;
     const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
-    g.setAttribute('aHeight', new THREE.BufferAttribute(hAttr, 1));
-    g.setAttribute('aEN', new THREE.BufferAttribute(en, 2));
-    g.setAttribute('aWaterWeight', new THREE.BufferAttribute(waterWeight, 1));
-    // Normals from the surface only (skirt faces would tilt the edge normals and shade every
-    // tile border differently), then copied down onto the skirt.
-    g.setIndex(idx.slice(0, surfaceCount));
-    g.computeVertexNormals();
-    const nrm = g.getAttribute('normal') as THREE.BufferAttribute;
-    edge.forEach((src, s) => nrm.setXYZ(n + s, nrm.getX(src), nrm.getY(src), nrm.getZ(src)));
-    g.setIndex(idx);
+    g.setAttribute('position', new THREE.BufferAttribute(geo.position, 3));
+    g.setAttribute('uv', new THREE.BufferAttribute(geo.uv, 2));
+    g.setAttribute('aHeight', new THREE.BufferAttribute(geo.aHeight, 1));
+    g.setAttribute('aEN', new THREE.BufferAttribute(geo.aEN, 2));
+    g.setAttribute('aWaterWeight', new THREE.BufferAttribute(geo.aWaterWeight, 1));
+    g.setAttribute('normal', new THREE.BufferAttribute(geo.normal, 3));
+    g.setIndex(new THREE.BufferAttribute(geo.index, 1));
     g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), t.radius + drop);
     // (Tile centre in pad east / north: world x = east, z = -north.)
     const holes = TRENCHES.some((tr) => Math.hypot(tr.center[0] - c[0], tr.center[1] + c[2]) < t.size * 0.75 + Math.hypot(tr.half[0], tr.half[1]) + 5);
-    const material = makeMaterial(tex, holes);
-    if (fading) material.transparent = true;
+    let material: THREE.MeshStandardMaterial;
+    if (shared) {
+      g.setAttribute('aLayer', new THREE.BufferAttribute(new Float32Array(geo.position.length / 3).fill(layer), 1));
+      const k = (holes ? 1 : 0) + (fading ? 2 : 0);
+      material = this.sharedMaterials[k] ??= Object.assign(makeMaterial(null, holes, array!.texture), fading ? { transparent: true } : {});
+    } else {
+      material = makeMaterial(tex, holes);
+      if (fading) material.transparent = true;
+    }
+    t.layer = layer;
+    t.shared = shared;
     const mesh = new THREE.Mesh(g, material);
     mesh.receiveShadow = true;
     mesh.frustumCulled = false;

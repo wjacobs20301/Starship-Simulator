@@ -74,6 +74,16 @@ export interface WeatherConfig {
   t0: number;
 }
 
+/** What a model's wind has in mind (WeatherModel.windMemory): plain JSON. */
+export interface WindMemory {
+  /** The lists of systems still in use: the minute each is kept under and the time it was worked out at; and how many lists are held in all. */
+  states: [minute: number, t: number][];
+  statesHeld: number;
+  /** The large-scale wind cells still in use (key; m/s east, north), and how many are held in all. */
+  cells: [key: string, east: number, north: number][];
+  cellsHeld: number;
+}
+
 /** The weather over a point: what the clouds are like there. */
 export interface Sample {
   /** Low / middle cloud cover 0..1 (before the fine detail the renderer adds). */
@@ -111,8 +121,8 @@ export const condensationLevel = (spread: number): number => Math.min(3000, Math
  */
 const SITE_AIR: Record<Exclude<SiteWeather, 'natural'>, { spread: number; mid: number }> = {
   clear: { spread: 14, mid: 0 },
-  fair: { spread: 8, mid: 0.1 },
-  partly: { spread: 6, mid: 0.35 },
+  fair: { spread: 8, mid: 0.06 },
+  partly: { spread: 6, mid: 0.18 },
   mostly: { spread: 4.5, mid: 0.5 },
   overcast: { spread: 3, mid: 0.75 },
   rain: { spread: 2, mid: 0.85 },
@@ -247,6 +257,8 @@ interface Sys {
   ay: number;
   /** Shape (else from the seed): rotation (rad), east-west stretch, front bend, front length. */
   shape?: [number, number, number, number];
+  /** One of the site's own (the weather picked over Starbase): the background's clouds give way to it. */
+  site?: boolean;
 }
 
 interface State {
@@ -395,7 +407,7 @@ export class WeatherModel {
     const at = (dx: number, dy: number): [number, number] => [siteLat + dy / R_EARTH / DEG, siteLon + dx / (R_EARTH * Math.cos(siteLat * DEG)) / DEG];
     const sys = (o: Partial<Sys> & Pick<Sys, 'kind' | 'R' | 'life'>, age: number, dx: number, dy: number): Sys => {
       const [lat, lon] = at(dx, dy);
-      return { tRef: t0, latRef: lat, lonRef: lon, born: t0 - age * o.life, hemi, peak: 1, u: 0, v: 0, recurve: 0, seed: hashInts(this.cfg.seed, 7, o.kind.length), ax: 1, ay: 1, ...o };
+      return { tRef: t0, latRef: lat, lonRef: lon, born: t0 - age * o.life, hemi, peak: 1, u: 0, v: 0, recurve: 0, seed: hashInts(this.cfg.seed, 7, o.kind.length), ax: 1, ay: 1, site: true, ...o };
     };
     // (Each day its own: how strong, where and which way it's going vary with the seed.)
     switch (site) {
@@ -411,7 +423,10 @@ export class WeatherModel {
       case 'partly':
         // A day of fair-weather cumulus over the coast: a field a few hundred km across, in
         // clusters and streets, drifting inland; the global weather all round it.
-        return [sys({ kind: 'cu', R: 320e3, life: 1.5 * DAY, peak: 0.85 + 0.25 * r(), u: -2, v: 0.5, ax: 1.4, ay: 1 }, 0.4, 40e3, -20e3)];
+        // (About a third of the ground covered, seen from above: from the ground, where the
+        // clouds' sides fill the gaps toward the horizon, that's the half of the sky the name
+        // promises. Half covered from above was a grey sky with a few blue holes.)
+        return [sys({ kind: 'cu', R: 320e3, life: 1.5 * DAY, peak: 0.62 + 0.2 * r(), u: -2, v: 0.5, ax: 1.4, ay: 1 }, 0.4, 40e3, -20e3)];
       case 'mostly':
         // Mostly cloudy: a broken deck of stratocumulus and cumulus, lanes of blue between.
         return [sys({ kind: 'sc', R: 380e3, life: 1.5 * DAY, peak: 1, u: -2, v: 0.5, ax: 1.4, ay: 1 }, 0.4, 40e3, -20e3)];
@@ -485,6 +500,21 @@ export class WeatherModel {
     const key = Math.round(t / 60);
     const hit = this.stateCache.get(key);
     if (hit) return hit;
+    const out = this.statesAt(t);
+    if (this.stateCache.size > 64) {
+      this.stateCache.clear();
+      this.stateTimes.clear();
+    }
+    this.stateCache.set(key, out);
+    this.stateTimes.set(key, t);
+    return out;
+  }
+
+  /** The time each remembered list of systems was worked out at (the first asked for in its minute), by its minute. */
+  private stateTimes = new Map<number, number>();
+
+  /** The same, worked out afresh for exactly time t. */
+  private statesAt(t: number): State[] {
     const out: State[] = [];
     const { siteLat, siteLon, t0 } = this.cfg;
     const site = unit(siteLat, siteLon);
@@ -500,8 +530,6 @@ export class WeatherModel {
       const st = this.stateOf(s, t);
       if (st) out.push(st);
     }
-    if (this.stateCache.size > 64) this.stateCache.clear();
-    this.stateCache.set(key, out);
     return out;
   }
 
@@ -611,6 +639,13 @@ export class WeatherModel {
         this.local(st, n);
         const r = Math.hypot(this.lx, this.ly);
         supp = 1 - (1 - supp) * (1 - 0.9 * st.amp * Math.exp(-(r * r) / 0.9));
+      } else if (st.s.site && st.s.kind !== 'low') {
+        // The weather picked over the site is the weather there: its field of cumulus, its deck
+        // or its fog instead of whatever the climate would have had (on top of it, 'partly
+        // cloudy' came out anything from half covered to overcast with the seed).
+        this.local(st, n);
+        const r = Math.hypot(this.lx / st.s.ax, this.ly / st.s.ay);
+        supp = 1 - (1 - supp) * (1 - 0.92 * smooth(1.1, 0.6, r));
       }
     }
 
@@ -1072,6 +1107,44 @@ export class WeatherModel {
       wu = lvl * 0.6 * this.noise.fbm(x + 30, y + 30, tt + 90, 2);
     }
     return [ue, vn, wu];
+  }
+
+  /**
+   * What the wind has in mind at time t, for a saved flight (worker/savedFlight.ts). The wind at a
+   * place and time isn't worked out from scratch each time: the systems are kept per minute and
+   * the large-scale wind per ~5 km / 5 min cell, each as first asked for. So the wind a flight
+   * feels depends, in its last digits, on what it asked before; a flight loaded into a new model
+   * would feel a wind a hair different (parts in a hundred million) and slowly part from the
+   * flight that was saved. With this put back (restoreWindMemory) it is the same to the last digit.
+   *
+   * Only what can still be asked for is written (time runs forward: this minute's systems, this
+   * five minutes' cells, and the ones before, to be safe), plus how many are held in all: the
+   * memories are emptied when full, and that has to happen at the same moment too.
+   */
+  windMemory(t: number): WindMemory {
+    const minute = Math.round(t / 60) - 1;
+    const cell = Math.round(t / 300) - 1;
+    return {
+      states: [...this.stateTimes].filter(([key]) => key >= minute),
+      statesHeld: this.stateCache.size,
+      cells: [...this.windCache].filter(([key]) => Number(key.split(',')[2]) >= cell).map(([key, g]) => [key, g[0], g[1]]),
+      cellsHeld: this.windCache.size,
+    };
+  }
+
+  /** Put back what windMemory wrote (into a model made from the same settings and land mask). */
+  restoreWindMemory(m: WindMemory): void {
+    this.stateCache.clear();
+    this.stateTimes.clear();
+    this.windCache.clear();
+    // (Stand-ins for the ones not written, under keys nothing asks for: only their number matters.)
+    for (let i = m.states.length; i < m.statesHeld; i++) this.stateCache.set(-1 - i, []);
+    for (const [key, t] of m.states) {
+      this.stateCache.set(key, this.statesAt(t));
+      this.stateTimes.set(key, t);
+    }
+    for (let i = m.cells.length; i < m.cellsHeld; i++) this.windCache.set(`gone ${i}`, [0, 0]);
+    for (const [key, u, v] of m.cells) this.windCache.set(key, [u, v]);
   }
 
   // --- Bake ---------------------------------------------------------------------------------

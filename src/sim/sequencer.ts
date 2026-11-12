@@ -145,7 +145,7 @@ export class Mission {
           if (atReserve) this.startStaging(aux, 'Booster MECO');
         } else {
           this.lastTarget = qrot(stack.q, [1, 0, 0]);
-          this.once('reserveWarn', atReserve, () => sim.log('Booster at its return reserve: stage now (Space) to bring it home'));
+          this.once('reserveWarn', atReserve, () => sim.log('Booster at its return reserve: stage now ({key:launch}) to bring it home'));
         }
         break;
       }
@@ -164,7 +164,7 @@ export class Mission {
             sim.separate();
             sim.log('Stage separation');
             sim.shield.shake('staging');
-            this.boosterReturn = new BoosterReturn(sim, (text) => sim.log(text), sim.towers[sim.launchPad], sim.launchPad, sim.boosterOcean);
+            this.boosterReturn = new BoosterReturn(sim, sim.logLine, sim.towers[sim.launchPad], sim.launchPad, sim.boosterOcean);
           }
           break;
         }
@@ -193,7 +193,7 @@ export class Mission {
           if (ship.engines.every((e) => e.throttleCmd <= 0 && e.throttle <= 0.02)) {
             const aps = orbitApsides(ship.r, ship.v);
             this.phase = 'coast';
-            this.shipReentry = new ShipReentry(sim, (text) => sim.log(text));
+            this.shipReentry = new ShipReentry(sim, sim.logLine);
             sim.log(`SECO (manual): ${fmt(norm(aux.vAir) * 3.6)} km/h, alt ${fmt(aux.geo.h / 1000)} km, orbit ${fmt(aps.perigee / 1000)} x ${fmt(aps.apogee / 1000)} km`);
           }
           break;
@@ -225,7 +225,7 @@ export class Mission {
         if (onTarget || (park === null && aps.perigee >= MISSION.targetPerigeeAlt) || low) {
           setThrottle(ship, 'ship', 0);
           this.phase = 'coast';
-          this.shipReentry = new ShipReentry(sim, (text) => sim.log(text));
+          this.shipReentry = new ShipReentry(sim, sim.logLine);
           sim.log(
             `${low ? 'SECO (propellant reserve reached)' : 'SECO'}: ${fmt(norm(aux.vAir) * 3.6)} km/h, ` +
               `alt ${fmt(aux.geo.h / 1000)} km, orbit ${fmt(aps.perigee / 1000)} x ${fmt(aps.apogee / 1000)} km`,
@@ -234,7 +234,7 @@ export class Mission {
           // reach without a burn; otherwise the plain entry profile.
           // (Not from a parking orbit: that's going round, not coming down.)
           if (park === null) {
-            const aim = new ShipReturn(sim, ship, { kind: 'ocean', ...MISSION.splashTarget }, (text) => sim.log(text), false);
+            const aim = new ShipReturn(sim, ship, { kind: 'ocean', ...MISSION.splashTarget }, sim.logLine, false);
             if (aim.phase !== 'lost' && aim.plan.burns.length === 0) this.shipReturn = aim;
           }
         }

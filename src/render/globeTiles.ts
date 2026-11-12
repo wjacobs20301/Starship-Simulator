@@ -7,15 +7,16 @@ import * as THREE from 'three';
 import { DEG } from '../sim/constants';
 import type { V3 } from '../sim/math';
 import type { FloatingOrigin } from './floatingOrigin';
-import { ecefToWorld, horizonDistance, tileXToLon, tileYToLat, toWorld } from './geo';
+import { horizonDistance, tileXToLon, tileYToLat, toWorld } from './geo';
 import { SEA_GLSL, bindSea, sea } from './ocean';
+import { compressTiles, compressTilesFailed, compressedTileTexture, disposeTileTexture, loadTileTexture } from './tileTexture';
+import { buildGlobeTile } from './tileWorker';
 
 const BASE = `${import.meta.env.BASE_URL}globe/tiles/`;
 const SINK_M = -40;
 const MAX_TILES = 400;
 const MAX_LOADS = 8;
 const SPLIT_PIXELS = 256 * 1.2;
-const EARTH_CENTER = ecefToWorld([0, 0, 0]);
 
 /**
  * A tile's material: the Blue Marble, its sea (told by its colour: bluer than it is green or red,
@@ -52,9 +53,17 @@ if (gWater > 0.001) roughnessFactor = mix(roughnessFactor, mix(gSeaRough, 0.9, g
         '#include <normal_fragment_maps>',
         `#include <normal_fragment_maps>
 if (gWater > 0.001) normal = normalize(mix(normal, normalize((viewMatrix * vec4(gSeaNormal, 0.0)).xyz), gWater * (1.0 - 0.6 * gSeaFoam)));`,
+      )
+      .replace(
+        '#include <dithering_fragment>',
+        `#include <dithering_fragment>
+// (Water, told to the atmosphere pass in the alpha: a cloud's shadow dims it far less than land.)
+#ifdef OPAQUE
+gl_FragColor.a = 1.0 - 0.5 * gWater * (1.0 - gSeaFoam);
+#endif`,
       );
   };
-  mat.customProgramCacheKey = () => 'globe-sea-v1';
+  mat.customProgramCacheKey = () => 'globe-sea-v3';
   return mat;
 }
 
@@ -65,6 +74,9 @@ class GlobeTile {
   lastUsed = 0;
   /** The last frame it was in the camera's view (lastUsed: wanted, in view or not). */
   lastSeen = 0;
+  /** Loads that failed so far, and the frame it may be tried again. */
+  fails = 0;
+  retryAt = 0;
   center: V3;
   radius: number;
   size: number;
@@ -92,7 +104,6 @@ export class GlobeTiles {
   private loading = 0;
   private frame = 0;
   private maxZoom = 7;
-  private loader = new THREE.TextureLoader();
   private frustum = new THREE.Frustum();
   private projView = new THREE.Matrix4();
 
@@ -133,7 +144,8 @@ export class GlobeTiles {
           if (seen) k.lastSeen = this.frame;
           this.request(k);
         });
-        if (kids.every((k) => k.state === 'ready' || k.state === 'failed')) {
+        // (All four there: one that failed is tried again, this tile drawn meanwhile, not a hole.)
+        if (kids.every((k) => k.state === 'ready')) {
           kids.forEach(visit);
           return;
         }
@@ -144,10 +156,16 @@ export class GlobeTiles {
     visit(this.root);
     for (const t of this.tiles.values()) if (t.mesh) t.mesh.visible = false;
     this.around.length = 0;
+    let key = visible.length;
     for (const t of visible) {
       t.mesh!.visible = t.lastSeen === this.frame;
       this.origin.place(t.mesh!, t.center);
       this.around.push(t.mesh!);
+      key = (Math.imul(key, 31) + t.mesh!.id) | 0;
+    }
+    if (key !== this.aroundKey) {
+      this.aroundKey = key;
+      this.version++;
     }
     this.pump(cam);
     this.evict();
@@ -155,6 +173,10 @@ export class GlobeTiles {
 
   /** The tiles round the camera at the detail they're seen at, in view or not. */
   private around: THREE.Mesh[] = [];
+
+  /** Goes up whenever the set of tiles round the camera changes (the sea's map is redrawn then). */
+  version = 0;
+  private aroundKey = 0;
 
   /** Draw with all of them shown, not only those in view (the sea's map: oceanSurface.ts). */
   withAllShown(draw: () => void): void {
@@ -179,6 +201,7 @@ export class GlobeTiles {
   }
 
   private request(t: GlobeTile): void {
+    if (t.state === 'failed' && t.fails < 5 && this.frame >= t.retryAt) t.state = 'idle';
     if (t.state === 'idle' && !this.queue.includes(t)) this.queue.push(t);
   }
 
@@ -194,8 +217,15 @@ export class GlobeTiles {
       t.state = 'loading';
       this.loading++;
       this.build(t)
-        .then(() => (t.state = 'ready'))
-        .catch(() => (t.state = 'failed'))
+        .then(() => {
+          t.state = 'ready';
+          t.fails = 0;
+        })
+        .catch((err) => {
+          console.warn(`globe tile ${t.key} failed`, err);
+          t.state = 'failed';
+          t.retryAt = this.frame + 120 * 2 ** ++t.fails;
+        })
         .finally(() => this.loading--);
     }
   }
@@ -211,7 +241,7 @@ export class GlobeTiles {
       this.group.remove(m);
       m.geometry.dispose();
       const mat = m.material as THREE.MeshStandardMaterial;
-      mat.map?.dispose();
+      disposeTileTexture(mat.map);
       mat.dispose();
       (m.userData.seaMask as THREE.Material | undefined)?.dispose();
       m.userData.seaMask = undefined;
@@ -221,42 +251,33 @@ export class GlobeTiles {
   }
 
   private async build(t: GlobeTile): Promise<void> {
-    const tex = await this.loader.loadAsync(`${BASE}${t.key}.jpg`);
+    const url = `${BASE}${t.key}.jpg`;
+    // The image: compressed by the worker where the GPU takes that; else loaded here as before,
+    // alongside. (Its failure is the tile's, further down; not unhandled meanwhile.)
+    const compress = compressTiles(this.renderer);
+    const raw = compress ? null : loadTileTexture(url);
+    raw?.catch(() => {});
+    // The vertices, in the worker (tileGeometry.ts). Low-zoom tiles span a large part of the
+    // globe: more segments keep them round.
+    const built = await buildGlobeTile({
+      shape: { z: t.z, x: t.x, y: t.y, center: t.center, grid: t.z <= 2 ? 129 : 33, height: SINK_M },
+      image: compress ? url : null,
+    }).catch((err) => {
+      // (No tile: nor its image, if that did load.)
+      raw?.then(disposeTileTexture, () => {});
+      throw err;
+    });
+    if (built.imageSkipped) compressTilesFailed();
+    const tex = built.image ? compressedTileTexture(built.image) : await (raw ?? loadTileTexture(url));
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
     tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
-    // Low-zoom tiles span a large part of the globe: more segments keep them round.
-    const grid = t.z <= 2 ? 129 : 33;
-    const pos = new Float32Array(grid * grid * 3);
-    const nrm = new Float32Array(grid * grid * 3);
-    const uv = new Float32Array(grid * grid * 2);
-    const c = t.center;
-    for (let j = 0; j < grid; j++) {
-      const v = j / (grid - 1);
-      const lat = tileYToLat(t.y + v, t.z);
-      for (let i = 0; i < grid; i++) {
-        const u = i / (grid - 1);
-        const k = j * grid + i;
-        const p = toWorld(lat, tileXToLon(t.x + u, t.z), SINK_M);
-        pos.set([p[0] - c[0], p[1] - c[1], p[2] - c[2]], k * 3);
-        const n = [p[0] - EARTH_CENTER[0], p[1] - EARTH_CENTER[1], p[2] - EARTH_CENTER[2]];
-        const l = Math.hypot(n[0], n[1], n[2]);
-        nrm.set([n[0] / l, n[1] / l, n[2] / l], k * 3);
-        uv.set([u, 1 - v], k * 2);
-      }
-    }
-    const idx: number[] = [];
-    for (let j = 0; j < grid - 1; j++) {
-      for (let i = 0; i < grid - 1; i++) {
-        const a = j * grid + i, b = a + 1, d = a + grid, e = d + 1;
-        idx.push(a, d, b, b, d, e);
-      }
-    }
+    const geo = built.geometry;
     const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
-    g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
-    g.setIndex(idx);
+    g.setAttribute('position', new THREE.BufferAttribute(geo.position, 3));
+    g.setAttribute('normal', new THREE.BufferAttribute(geo.normal, 3));
+    g.setAttribute('uv', new THREE.BufferAttribute(geo.uv, 2));
+    g.setIndex(new THREE.BufferAttribute(geo.index, 1));
     const mesh = new THREE.Mesh(g, tileMaterial(tex));
     mesh.frustumCulled = false;
     mesh.visible = false;
