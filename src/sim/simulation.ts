@@ -394,7 +394,9 @@ export class Simulation {
     // A stacked vehicle on the launch pad: its arms are parked high up the tower, clear of the launch.
     this.towers = [new TowerArms(), new TowerArms()];
     this.pilot.set({ target: 'stack', throttle: 1, engines: 0, pitch: 0, yaw: 0, roll: 0 });
-    this.towers[this.launchPad].offset = this.towers[this.launchPad].targetOffset = ARMS.launchOffset;
+    // (The other tower's too: parked at their home height they'd stand across its ship
+    // quick-disconnect arm.)
+    for (const arms of this.towers) arms.offset = arms.targetOffset = ARMS.launchOffset;
     this.mission = new Mission(this);
     this.refreshAux();
   }

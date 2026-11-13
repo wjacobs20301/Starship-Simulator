@@ -16,6 +16,7 @@ import bpy
 from mathutils import Matrix, Vector
 
 from lib import ROOT, MeshBuilder, parent_keep, pivot
+from chopsticks import HINGE_X, QD_DEPTH, QD_KICKER_DROP, QD_TOP, build_arm, build_carriage, build_lattice, build_qd_arm
 
 KIT = os.path.join(ROOT, "art", "source", "tower", "stl", "STLs")
 SCALE = 0.144  # 1 mm at 1:144 -> 0.144 m
@@ -68,7 +69,9 @@ QD_CONTACT_GAP = 0.02
 # kit has the tower square to the rocket and the arms hinged at its centre, so the lattice is
 # turned 45 deg and the arms hinge at the corner instead (their part inside the tower trimmed).
 CARRIAGE_Z = 680.0  # arms straddle the booster's upper section / grid fins
-TOWER_HALF = 52.8  # the lattice's half-width, kit mm (15.2 m)
+TOWER_HALF = 52.8  # the carriage's rails' half-spacing, kit mm: the arms' hinge stands off the lattice's corner
+LATTICE_HALF = 46.0  # the lattice's own half-width, kit mm (measured from the kit's segments: 13.2 m across)
+TOWER_TOP = 145.1  # the lattice's top above the ground, m (approx: from photos)
 CORNER = TOWER_HALF * math.sqrt(2.0)  # tower centre to its corner, kit mm (10.75 m)
 
 
@@ -115,35 +118,62 @@ def build_tower_kit(root, mats, geo, spec):
         obj.data.polygons.foreach_set("use_smooth", [False] * len(obj.data.polygons))
         return obj
 
-    # --- Tower: base block, 7 lattice segments, top segment (a corner toward the rocket) ----
+    # --- Tower: base block and the lattice (a corner toward the rocket) ----
     corner_on = Matrix.Rotation(math.pi / 4, 4, "Z")
     parts = [place("Launch tower/BaseTop.stl", pre + "Tower_Base", mats.concrete, extra=corner_on)]
-    z = BASE_TOP
-    steel = []
-    for i in range(N_SEGMENTS):
-        steel.append(place("Launch tower/MainSegmentBottom.stl", f"Seg{i}A", mats.tower, (0, 0, z), extra=corner_on))
-        steel.append(place("Launch tower/MainSegmentTop.stl", f"Seg{i}B", mats.tower, (0, 0, z), extra=corner_on))
-        z += SEGMENT_PITCH
-    steel.append(place("Launch tower/TopSegmentBottom.stl", "TopA", mats.tower, (0, 0, z), extra=corner_on))
-    steel.append(place("Launch tower/TopSegmentTop.stl", "TopB", mats.tower, (0, 0, z), extra=corner_on))
-    tower = join(steel, pre + "Tower")
+    # (The lattice itself is built, not the kit's seven segments: chopsticks.py's build_lattice
+    # says why. The same outline, so everything hung on it stays where it was.)
+    # The lattice runs to the tower's top (145 m: the arms' tops at a catch are 12 m under the
+    # roof in the long-lens photo): no kit top segment, which was a toy's lattice again. The roof
+    # frame over it is built at runtime with the hoisting rigging (render/towerRigging.ts).
+    bracing, columns, lift, col_r = build_lattice(LATTICE_HALF * s, BASE_TOP * s, TOWER_TOP + 2.0 * s)
+    lattice = bracing.build(pre + "Tower", mats.tower)
+    lattice.data.transform(Matrix.Translation(tower_origin) @ KIT_TO_WORLD @ corner_on)
+    columns = columns.build(pre + "Tower_Columns", mats.tower_column)
+    columns.data.transform(Matrix.Translation(tower_origin) @ KIT_TO_WORLD @ corner_on)
+    lift = lift.build(pre + "Tower_Lift", mats.chopstick)
+    lift.data.transform(Matrix.Translation(tower_origin) @ KIT_TO_WORLD @ corner_on)
+    tower = lattice
     for o in parts + [tower]:
         o.parent = root
+    # (The columns and the lift shaft ride with the tower: it falls as one.)
+    parent_keep(columns, tower)
+    parent_keep(lift, tower)
 
     # --- Carriage and chopsticks ------------------------------------------------
     # The carriage (and the arms' hinge) on the tower's corner toward the rocket.
     hinge = tower_origin + KIT_TO_WORLD @ Vector((0, CORNER * s, CARRIAGE_Z * s))
     inside = KIT_TO_WORLD.to_3x3() @ Vector((0, -1, 0))  # from the corner back into the tower
     carriage = pivot(pre + "Carriage", tuple(hinge), parent=root)
+    # (Turned to face the mount: the arms' hinges, and the colliders' cells, are in its frame.)
+    carriage.rotation_quaternion = KIT_TO_WORLD.to_quaternion()
     # (The kit's carriage plate, where its hand-crank cable hooked on, is left out: the carriage
     # hangs from the travelling block of the hoisting rigging, built at runtime.)
     # Arm "R" lies on the kit's +X side (right of the tower -> mount line) when closed; "L" is its mirror.
     # Opening = rotating L by +angle and R by -angle about the vertical hinge.
-    for tag, mirror in (("R", False), ("L", True)):
-        node = pivot(f"{pre}Chopstick_{tag}", tuple(hinge), parent=carriage)
-        arm = place("Chopsticks/Chopstick.stl", f"{pre}Chopstick_{tag}_Arm", mats.chopstick, (0, 0, CARRIAGE_Z), mirror_x=mirror)
-        trim(arm, hinge, inside)
-        parent_keep(arm, node)
+    # (The arms themselves and the carriage's frame are built, not the kit's: chopsticks.py says
+    # why. The first tower's arms reach ~12 m past the vehicle they hold, the second tower's
+    # shorter design ~6.5 m: approx, from photos.)
+    hang = (ROCKET_DIST - CORNER) * s
+    reach = spec.get("armReach", 12.0 if pre == "Pad1_" else 6.5)
+    arm_frame = Matrix.Translation(hinge) @ KIT_TO_WORLD
+    frame_obj = build_carriage(col_r, CORNER * s).build(pre + "Carriage_Frame", mats.chopstick)
+    frame_obj.data.transform(arm_frame)
+    parent_keep(frame_obj, carriage)
+    for tag, side in (("R", 1), ("L", -1)):
+        # Each arm on its own hinge, HINGE_X either side of the carriage's centre.
+        at = Matrix.Translation(hinge) @ KIT_TO_WORLD @ Matrix.Translation((side * HINGE_X, 0.0, 0.0))
+        node = pivot(f"{pre}Chopstick_{tag}", tuple(at.translation))
+        node.rotation_quaternion = KIT_TO_WORLD.to_quaternion()  # (the carriage's frame: its hinge turns in it)
+        parent_keep(node, carriage)
+        steel, rail = build_arm(hang + reach, hang)
+        flip = Matrix.Diagonal((-1, 1, 1, 1)) if side < 0 else Matrix.Identity(4)
+        for mb, name, mat in ((steel, "Arm", mats.chopstick), (rail, "Rail", mats.arm_rail)):
+            obj = mb.build(f"{pre}Chopstick_{tag}_{name}", mat)
+            obj.data.transform(at @ flip)
+            if side < 0:
+                obj.data.flip_normals()
+            parent_keep(obj, node)
 
     # --- Ship quick-disconnect arm ------------------------------------------------
     # The kit arm is modeled for a longer tower-to-mount distance; shorten its straight run so the
@@ -161,41 +191,27 @@ def build_tower_kit(root, mats, geo, spec):
     qd_hinge_kit = Vector((-CORNER, 0.0))
     to_ship = Vector((0.0, ROCKET_DIST)) - qd_hinge_kit
 
-    def qd_matrix(reach_kit):
-        target = to_ship.normalized() * reach_kit
-        d_tip = tip_kit - root_kit
-        k = target.length / d_tip.length
-        ang = math.atan2(target.y, target.x) - math.atan2(d_tip.y, d_tip.x)
-        extra = (Matrix.Translation((qd_hinge_kit.x, qd_hinge_kit.y, qd_kit_z)) @ Matrix.Rotation(ang, 4, "Z")
-                 @ Matrix.Diagonal((k, k, 1, 1)) @ Matrix.Translation((-root_kit.x, -root_kit.y, 0)))
-        return Matrix.Translation(tower_origin) @ KIT_TO_WORLD @ Matrix.Diagonal((s, s, s, 1)) @ extra
-
-    bpy.ops.wm.stl_import(filepath=os.path.join(KIT, "QD Arm/QD Arm.stl"))
-    arm = bpy.context.selected_objects[0]
-    arm.name = arm.data.name = pre + "ShipQD_Arm"
-    kit_verts = [v.co.copy() for v in arm.data.vertices]
-    reach = to_ship.length - ship_r / s
-
-    def gap(reach_kit):
-        m = qd_matrix(reach_kit)
-        return min(((m @ v).xy - mount.xy).length for v in kit_verts) - ship_r
-
-    for _ in range(4):
-        reach += (gap(reach) - QD_CONTACT_GAP) / s
-    arm.data.transform(qd_matrix(reach))
-    arm.data.materials.clear()
-    arm.data.materials.append(mats.chopstick)
-    arm.data.polygons.foreach_set("use_smooth", [False] * len(arm.data.polygons))
-    print(f"{pre}ShipQD hood gap to the hull: {gap(reach):.3f} m")
-    qd_root = tower_origin + KIT_TO_WORLD @ Vector((qd_hinge_kit.x * s, qd_hinge_kit.y * s, qd_kit_z * s))
+    # (The arm itself is built, not the kit's slim boom: chopsticks.py's build_qd_arm. Its plate
+    # stands QD_CONTACT_GAP off the hull, at the ship's quick-disconnect height.)
+    qd_len = to_ship.length * s - ship_r - QD_CONTACT_GAP
+    qd_frame = (Matrix.Translation(tower_origin) @ KIT_TO_WORLD
+                @ Matrix.Translation((qd_hinge_kit.x * s, qd_hinge_kit.y * s, (qd_kit_z + 35.0) * s))
+                @ Matrix.Rotation(math.atan2(to_ship.y, to_ship.x), 4, "Z"))
+    qd_root = tower_origin + KIT_TO_WORLD @ Vector((qd_hinge_kit.x * s, qd_hinge_kit.y * s, (qd_kit_z + 35.0) * s))
     node = pivot(pre + "ShipQD", tuple(qd_root), parent=root)
-    parent_keep(arm, node)
-    # Its hinge: a post on the tower's corner leg, with brackets top and bottom (fixed to the tower).
+    steel, lines = build_qd_arm(qd_len)
+    for mb, name, mat in ((steel, "Arm", mats.chopstick), (lines, "Lines", mats.tank_white)):
+        obj = mb.build(pre + "ShipQD_" + name, mat)
+        obj.data.transform(qd_frame)
+        parent_keep(obj, node)
+    # Its hinge: a post on the tower's corner leg, from the lower hinge to the upper, with
+    # brackets in to the leg (fixed to the tower); the lines going on down the tower from it.
     hinge_mb = MeshBuilder()
     yaw = Matrix.Rotation(math.atan2(-to_mount.x, to_mount.y) + math.pi / 4, 4, "Z")
-    hinge_mb.add_box(tuple(qd_root + Vector((0, 0, 2.0))), (1.4, 1.4, 9.0), yaw)
+    z_lo, z_hi = -QD_KICKER_DROP - 1.2, QD_TOP + 1.0
+    hinge_mb.add_box(tuple(qd_root + Vector((0, 0, (z_lo + z_hi) / 2))), (1.1, 1.1, z_hi - z_lo), yaw)
     to_leg = (KIT_TO_WORLD.to_3x3() @ Vector((1, 0, 0))).normalized()  # from the hinge in toward the tower
-    for dz in (-2.0, 6.0):
-        hinge_mb.add_box(tuple(qd_root + to_leg * 0.9 + Vector((0, 0, dz))), (2.2, 2.2, 0.8), yaw)
+    for dz in (z_lo + 0.8, QD_TOP - QD_DEPTH, QD_TOP):
+        hinge_mb.add_box(tuple(qd_root + to_leg * 0.9 + Vector((0, 0, dz))), (2.2, 2.2, 0.7), yaw)
     hinge_mb.build(pre + "ShipQD_Hinge", mats.tower, parent=root)
     return tower

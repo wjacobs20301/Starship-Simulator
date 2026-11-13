@@ -24,6 +24,8 @@ const SEGS = 320;
 const NEAR_HALF = 8000;
 const NEAR_SIZE = 2048;
 const FAR_SIZE = 1024;
+/** The coarse map's sizes: each this many times the last. */
+const FAR_RUNG = 1.5;
 /** Drawn below this camera height (m). */
 const MAX_ALT = 6000;
 /** The detailed region (terrain.ts): its water is the terrain's out here (pad east / north, m). */
@@ -130,6 +132,27 @@ float seaWater(vec3 rel) {
 }
 `;
 
+/**
+ * How far to the shore (m; 1e4: none near), from the sharp map's mipmaps: the share of water in
+ * a box of ground is 0.5 + distance / the box's size (for a straight shore), so each level
+ * measures out to half its texel, the finer ones taking over as the shore comes near. (Two
+ * levels alone left the distance in terraces, and the breakers, drawn along its contours, in
+ * rectangular patches.)
+ */
+const SHORE_GLSL = /* glsl */ `
+float seaShoreDist(vec2 muv) {
+  float c = textureLod(uMaskN, muv, 7.0).r;
+  if (c > 0.999) return 1e4;
+  float d = (c - 0.5) * 1000.000;
+  for (int L = 6; L >= 1; L--) {
+    float s = 7.81250 * exp2(float(L));
+    float dl = (textureLod(uMaskN, muv, float(L)).r - 0.5) * s;
+    d = mix(dl, d, smoothstep(0.28 * s, 0.45 * s, abs(d)));
+  }
+  return d;
+}
+`;
+
 /** The terrain's side (terrain.ts): whether the mesh has the water here instead. */
 export const SEA_MESH_GLSL = /* glsl */ `
 uniform sampler2D uMaskN;
@@ -217,34 +240,31 @@ uniform mat3 uToLocal;
 uniform vec3 uCamW;
 varying vec3 vSeaRel;
 varying vec2 vSeaP;
-// (x: distance to the shore (m, 1e4: none near), y: the fetch's peak frequency limit, z: swell's share.)
+// (x: distance to the shore (m, 1e4: none near: the mesh's own, for the waves' heights; the
+// surf takes it afresh at each pixel), y: the fetch's peak frequency limit, z: swell's share.)
 varying vec3 vShore;
 ${SEA_COMMON}
 ${MASK_GLSL}
-// How far to the shore (m; 1e4: none near), from the sharp map's mipmaps: the share of water in
-// a box of ground is 0.5 + distance / the box's size (for a straight shore), so each level
-// measures out to half its texel, the finer ones taking over as the shore comes near. (Two
-// levels alone left the distance in terraces, and the breakers, drawn along its contours, in
-// rectangular patches.)
-float seaShoreDist(vec2 muv) {
-  float c = textureLod(uMaskN, muv, 7.0).r;
-  if (c > 0.999) return 1e4;
-  float d = (c - 0.5) * 1000.000;
-  for (int L = 6; L >= 1; L--) {
-    float s = 7.81250 * exp2(float(L));
-    float dl = (textureLod(uMaskN, muv, float(L)).r - 0.5) * s;
-    d = mix(dl, d, smoothstep(0.28 * s, 0.45 * s, abs(d)));
-  }
-  return d;
-}
-// How far over water upwind (m: 3e4 = open), from here along dir (world).
+${SHORE_GLSL}
+// How far over water upwind (m: 3e4 = open), from here along dir (world): the nearest land
+// among a few points out along it, then closed in on between that one and the last of water.
+// (Left at the points' own distances it went up in jumps, 300 m to 780 m to 2 km, and the mesh
+// drew each jump as a ramp between two of its points: the chop of a bay changed in bands that
+// moved with the camera.)
 float seaFetch(vec3 rel, vec3 dir) {
   float f = 3e4;
   for (int k = 4; k >= 0; k--) {
     float d = 300.0 * pow(2.6, float(k));
     if (seaWater(rel + dir * d) < 0.5) f = d;
   }
-  return f;
+  if (f > 2.9e4) return f;
+  float lo = f > 350.0 ? f / 2.6 : 0.0;
+  for (int k = 0; k < 4; k++) {
+    float mid = 0.5 * (lo + f);
+    if (seaWater(rel + dir * mid) < 0.5) f = mid;
+    else lo = mid;
+  }
+  return max(f, 40.0);
 }`,
         )
         .replace(
@@ -301,7 +321,8 @@ varying vec2 vSeaP;
 varying vec3 vShore;
 ${SEA_COMMON}
 ${SEA_FRAG}
-${MASK_GLSL}`,
+${MASK_GLSL}
+${SHORE_GLSL}`,
         )
         .replace(
           '#include <map_fragment>',
@@ -311,8 +332,15 @@ vec4 seaJ = seaPixel(vSeaP);
 vec2 en = vec2(vSeaRel.x + uCamW.x, -(vSeaRel.z + uCamW.z));
 bool region = max(abs(en.x), abs(en.y)) < ${REGION_INNER}.0;
 float water = 1.0;
-if (uMaskNC.w > 0.0 && maskEdgeN(maskUvN(vSeaRel)) < 0.985) water = textureLod(uMaskN, maskUvN(vSeaRel), 0.0).r;
-else if (region) water = 0.0;
+// (The shore's distance here, at the pixel: carried from the mesh's points it was a zig-zag
+// between them, the breakers' lines kinked along it, and every kink moved as the camera did,
+// the mesh being laid out round the camera.)
+float shoreD = 1e4;
+vec2 muvN = maskUvN(vSeaRel);
+if (uMaskNC.w > 0.0 && maskEdgeN(muvN) < 0.985) {
+  water = textureLod(uMaskN, muvN, 0.0).r;
+  shoreD = seaShoreDist(muvN);
+} else if (region) water = 0.0;
 else water = seaWater(vSeaRel);
 if (water < 0.35) discard;
 seaSurface(vSeaRel, vSeaP, seaJ, vShore.y, vShore.z);
@@ -324,12 +352,16 @@ vec3 terr = pow(mix(pow(uWater, vec3(1.0 / 2.2)), pow(globe, vec3(1.0 / 2.2)), 0
 vec3 col = mix(globe, terr, 1.0 - smoothstep(60000.0, 100000.0, max(abs(en.x), abs(en.y))));
 // Surf: the waves breaking in lines toward the beach, white water at its edge.
 float surf = 0.0;
-float surfW = clamp(40.0 * uSea3.x + 30.0 * uSea3.y * vShore.z, 20.0, 250.0);
-if (vShore.x < surfW + 30.0) {
-  float d = max(vShore.x, 0.0);
+// (The wind's waves only as high as the fetch here lets it raise them: their height goes as the
+// square of the peak's period, and in a lagoon a mile across that's a few inches, not the open
+// Gulf's metres. Every bay and pond had ocean breakers along its banks, lines of them.)
+float surfHs = uSea3.x * (vShore.y > 0.0 ? clamp(pow(8.63 / (max(uSea.x, 1.0) * vShore.y), 2.0), 0.0, 1.0) : 1.0) + uSea3.y * vShore.z;
+float surfW = clamp(40.0 * surfHs, 3.0, 250.0);
+if (surfHs > 0.08 && shoreD < surfW + 30.0) {
+  float d = max(shoreD, 0.0);
   // (Closer together than the swell offshore: waves shorten as the water shoals.)
   float ks = uSea3.z * 2.4;
-  vec2 q = vec2(dot(vSeaP, uSea2.xy), dot(vSeaP, vec2(-uSea2.y, uSea2.x)));
+  vec2 q = seaDownwind(vSeaP);
   float wob = 8.0 * (seaNoise(q / 40.0) - 0.5) + 3.0 * (seaNoise(q / 9.0) - 0.5);
   float phs = (d + wob) * ks - uSea3.w;
   float line = sin(phs);
@@ -353,7 +385,7 @@ if (vShore.x < surfW + 30.0) {
   float brk = max(crest, trail) * inZone;
   float swash = (1.0 - smoothstep(2.0, 10.0 + 0.1 * surfW, d)) * (0.6 + 0.4 * lace);
   float zone = 0.22 * (1.0 - smoothstep(surfW * 0.3, surfW, d)) * lace;
-  surf = clamp(max(max(brk, zone), swash * 0.85) * (0.6 + 0.4 * smoothstep(0.3, 1.2, uSea3.x + uSea3.y * vShore.z)), 0.0, 1.0);
+  surf = clamp(max(max(brk, zone), swash * 0.85) * (0.6 + 0.4 * smoothstep(0.3, 1.2, surfHs)) * smoothstep(0.08, 0.35, surfHs), 0.0, 1.0);
 }
 gSeaFoam = max(gSeaFoam, surf);
 // Round a hull afloat: the water churned white where the waves break on it, thinning outward,
@@ -365,7 +397,7 @@ for (int i = 0; i < 2; i++) {
   vec3 side = dh - hu * dot(dh, hu);
   float rr = length(side) - uHull[i].w;
   if (rr > 40.0) continue;
-  vec2 q = vec2(dot(vSeaP, uSea2.xy), dot(vSeaP, vec2(-uSea2.y, uSea2.x)));
+  vec2 q = seaDownwind(vSeaP);
   float lee = 0.5 + 0.5 * dot(normalize(vec2(dot(side, uSeaE), dot(side, uSeaN)) + 1e-5), uSea2.xy);
   float ring = (1.0 - smoothstep(0.0, 2.5 + 10.0 * lee, rr)) * (0.55 + 0.45 * seaNoise(q / 1.2 + float(i) * 7.0));
   float trail = (1.0 - smoothstep(0.0, 35.0, rr)) * lee * smoothstep(0.55, 0.8, seaNoise(vec2(q.x / 6.0, q.y / 1.5)));
@@ -393,7 +425,7 @@ gl_FragColor.a = 1.0 - 0.5 * (1.0 - gSeaFoam);
 #endif`,
       );
     };
-    mat.customProgramCacheKey = () => 'sea-mesh-v5';
+    mat.customProgramCacheKey = () => 'sea-mesh-v7';
     this.mesh = new THREE.Mesh(g, mat);
     this.mesh.name = 'Sea';
     this.mesh.frustumCulled = false;
@@ -453,9 +485,14 @@ gl_FragColor.a = 1.0 - 0.5 * (1.0 - gSeaFoam);
     if (terrain) TERRAIN_MASK.uniforms.uWL.value = terrain.waterLevelWorld;
     const ver = (terrain ? terrain.version : -1) * 65536 + globe.version;
     const moved = (mk: SeaMask, frac: number) => Math.hypot(ground[0] - mk.centre[0], ground[1] - mk.centre[1], ground[2] - mk.centre[2]) > mk.half * frac;
-    if (!this.near.valid || moved(this.near, 0.15) || (this.near.ver !== ver && this.frame - this.near.at > 15)) this.draw(renderer, this.near, NEAR_HALF, cam, ground, up, east, north, terrain, globe, ver);
-    else if (!this.far.valid || moved(this.far, 0.1) || Math.abs(this.far.half - outer) > 0.3 * outer || (this.far.ver !== ver && this.frame - this.far.at > 90)) {
-      this.draw(renderer, this.far, outer, cam, ground, up, east, north, terrain, globe, ver);
+    // (The coarse map's size: one of a ladder of sizes, the next up from the disc's reach, kept
+    // till the disc outgrows it or would fit one two rungs down: the same map again and again
+    // while the camera climbs, not a new one of another scale each time.)
+    let farHalf = this.far.half;
+    if (!this.far.valid || outer > farHalf || outer < farHalf / (FAR_RUNG * FAR_RUNG)) farHalf = 12e3 * FAR_RUNG ** Math.ceil(Math.log(outer / 12e3) / Math.log(FAR_RUNG) + 1e-9);
+    if (!this.near.valid || moved(this.near, 0.15) || (this.near.ver !== ver && this.frame - this.near.at > 15)) this.draw(renderer, this.near, NEAR_HALF, NEAR_HALF / 8, cam, ground, terrain, globe, ver);
+    else if (!this.far.valid || moved(this.far, 0.1) || farHalf !== this.far.half || (this.far.ver !== ver && this.frame - this.far.at > 90)) {
+      this.draw(renderer, this.far, farHalf, farHalf / 32, cam, ground, terrain, globe, ver);
     }
     for (const [mk, C, E, N, I] of [
       [this.near, u.uMaskNC, u.uMaskNE, u.uMaskNN, u.uMaskNI],
@@ -468,23 +505,30 @@ gl_FragColor.a = 1.0 - 0.5 * (1.0 - gSeaFoam);
     }
   }
 
+  /**
+   * Draw a map afresh round the camera: `half` its half size, its centre the point of a grid
+   * `grid` apart on the sea's plane (ocean.ts) nearest the ground under the camera, its axes
+   * the plane's. (Laid wherever the camera stood, on the axes there, each new map had its
+   * texels across the shore somewhere else than the last: the shore's distance, read off the
+   * map, shifted a few metres at every redraw, and the surf's lines with it: a jump along the
+   * whole beach each time the camera had moved on or a tile had come in. On a grid of whole
+   * texels of the coarsest level read, the same shore comes out the same every time.)
+   */
   private draw(
     renderer: THREE.WebGLRenderer,
     mk: SeaMask,
     half: number,
+    grid: number,
     cam: V3,
     ground: V3,
-    up: THREE.Vector3,
-    east: THREE.Vector3,
-    north: THREE.Vector3,
     terrain: SeaSource | null,
     globe: SeaSource,
     ver: number,
   ): void {
     mk.ver = ver;
-    mk.centre = [...ground] as V3;
-    mk.E.copy(east);
-    mk.N.copy(north);
+    const up = sea.onGrid(ground, grid, mk.centre, mk.E, mk.N, this.v);
+    const centre = mk.centre;
+    const north = mk.N;
     mk.half = half;
     mk.at = this.frame;
     mk.valid = true;
@@ -495,9 +539,9 @@ gl_FragColor.a = 1.0 - 0.5 * (1.0 - gSeaFoam);
     c.bottom = -half;
     c.near = 1;
     c.far = 4e5;
-    c.position.set(ground[0] - cam[0] + up.x * 2e5, ground[1] - cam[1] + up.y * 2e5, ground[2] - cam[2] + up.z * 2e5);
+    c.position.set(centre[0] - cam[0] + up.x * 2e5, centre[1] - cam[1] + up.y * 2e5, centre[2] - cam[2] + up.z * 2e5);
     c.up.copy(north);
-    c.lookAt(ground[0] - cam[0], ground[1] - cam[1], ground[2] - cam[2]);
+    c.lookAt(centre[0] - cam[0], centre[1] - cam[1], centre[2] - cam[2]);
     c.updateProjectionMatrix();
     c.updateMatrixWorld();
 

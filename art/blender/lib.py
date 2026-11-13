@@ -497,7 +497,10 @@ class Materials:
         self.grid_fin = material("GridFin", (0.55, 0.55, 0.56), metallic=0.9, roughness=0.45, double_sided=True)
         self.tower = material("TowerSteel", (0.28, 0.29, 0.31), metallic=0.7, roughness=0.6)
         self.tower_light = material("TowerSteelLight", (0.55, 0.56, 0.58), metallic=0.8, roughness=0.5)
+        # The towers' corner columns: galvanized, lighter than the bracing between them.
+        self.tower_column = material("TowerColumn", (0.36, 0.37, 0.39), metallic=0.6, roughness=0.6)
         self.chopstick = material("Chopstick", (0.12, 0.12, 0.13), metallic=0.6, roughness=0.55)
+        self.arm_rail = material("ArmRail", (0.74, 0.7, 0.6), metallic=0.2, roughness=0.7)
         self.concrete = material("Concrete", (1, 1, 1), metallic=0.0, roughness=0.9, textures=concrete)
         self.tank_white = material("TankWhite", (0.86, 0.87, 0.88), metallic=0.3, roughness=0.45)
         self.pipe = material("Pipe", (0.7, 0.71, 0.73), metallic=1.0, roughness=0.3)

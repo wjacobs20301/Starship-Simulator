@@ -7,6 +7,7 @@
 
 import * as THREE from 'three';
 import { SEA_GLSL, bindSea, sea as seaState } from './ocean';
+import { FAR_SHADOW_GLSL, bindFarShadow } from './farShadows';
 import { SEA_MESH_GLSL, seaMeshUniforms } from './oceanSurface';
 import { TRENCHES } from './launchSite';
 import { DEG, PAD } from '../sim/constants';
@@ -115,6 +116,7 @@ function makeMaterial(map: THREE.Texture | null, holes: boolean, array: THREE.Te
     shader.uniforms.uTrench = uniforms.uTrench;
     shader.uniforms.uTrenchHalf = uniforms.uTrenchHalf;
     shader.uniforms.uSiteMask = uniforms.uSiteMask;
+    bindFarShadow(shader);
     shader.uniforms.uSiteRect = uniforms.uSiteRect;
     bindSea(shader, seaState);
     shader.uniforms.uMaskN = seaMeshUniforms.uMaskN;
@@ -141,6 +143,12 @@ uniform vec4 uTrench[${TRENCHES.length}];
 uniform vec2 uTrenchHalf[${TRENCHES.length}];
 uniform sampler2D uSiteMask;
 uniform vec4 uSiteRect;
+float siteVHash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+float siteVNoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(siteVHash(i), siteVHash(i + vec2(1.0, 0.0)), f.x), mix(siteVHash(i + vec2(0.0, 1.0)), siteVHash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
 ${array ? 'uniform sampler2DArray uTiles;\nvarying float vLayer;\nvarying vec2 vTileUv;' : ''}
 varying float vHeight;
 varying vec2 vEN;
@@ -151,7 +159,8 @@ varying float vWaterWeight;
 float waterMask() { return 1.0 - smoothstep(uWaterLevel - 0.12, uWaterLevel + 0.05, vHeight); }
 varying vec3 vSeaRel;
 ${SEA_GLSL}
-${SEA_MESH_GLSL}`,
+${SEA_MESH_GLSL}
+${FAR_SHADOW_GLSL}`,
       )
       .replace(
         '#include <map_fragment>',
@@ -180,7 +189,14 @@ diffuseColor.rgb = mix(diffuseColor.rgb, sea, water * (0.92 * min(vWaterWeight, 
 // over the aerial photo of the buildings themselves.
 vec2 siteUv = (vEN - uSiteRect.xy) * uSiteRect.zw;
 if (siteUv.x > 0.0 && siteUv.y > 0.0 && siteUv.x < 1.0 && siteUv.y < 1.0) {
-  vec2 site = texture2D(uSiteMask, siteUv).rg * (1.0 - water);
+  vec3 site = texture2D(uSiteMask, siteUv).rgb * (1.0 - water);
+  // The launch site's fill (blue): compacted caliche spreading out from the slab and thinning
+  // into the flats, its edge frayed, not a line.
+  if (site.b > 0.003) {
+    float fray = site.b + 0.75 * (siteVNoise(vEN / 17.0) - 0.5) + 0.3 * (siteVNoise(vEN / 4.5 + 7.0) - 0.5);
+    vec3 fill = vec3(0.6, 0.535, 0.41) * (0.88 + 0.2 * siteVNoise(vEN / 3.1 + 1.0)) * (0.9 + 0.2 * siteVNoise(vEN / 40.0 + 5.0));
+    diffuseColor.rgb = mix(diffuseColor.rgb, fill, smoothstep(0.4, 0.62, fray) * (0.82 + 0.18 * siteVNoise(vEN / 9.0 + 2.0)));
+  }
   if (site.r + site.g > 0.003) {
     vec2 slab = floor(vEN / 7.5);
     float n = fract(sin(dot(slab, vec2(12.9898, 78.233))) * 43758.5453);
@@ -188,7 +204,9 @@ if (siteUv.x > 0.0 && siteUv.y > 0.0 && siteUv.x < 1.0 && siteUv.y < 1.0) {
     vec2 jd = abs(fract(vEN / 7.5 + 0.5) - 0.5) * 7.5;
     vec2 jw = max(fwidth(vEN), vec2(1e-3));
     float joint = max((1.0 - smoothstep(0.08 - jw.x, 0.08 + jw.x, jd.x)) * min(1.0, 0.08 / jw.x), (1.0 - smoothstep(0.08 - jw.y, 0.08 + jw.y, jd.y)) * min(1.0, 0.08 / jw.y));
-    vec3 concrete = vec3(0.43, 0.43, 0.41) * (0.92 + 0.07 * n + 0.06 * n2) * (1.0 - 0.25 * joint);
+    // (Warm and pale, its joints faint, as the launch site's: blue-grey with every joint
+    // drawn it was a tiled floor.)
+    vec3 concrete = vec3(0.5, 0.47, 0.41) * (0.95 + 0.04 * n + 0.05 * n2) * (1.0 - 0.12 * joint) * (0.9 + 0.2 * siteVNoise(vEN / 21.0 + 3.0));
     vec3 lawn = vec3(0.12, 0.16, 0.07) * (0.85 + 0.2 * n2);
     diffuseColor.rgb = mix(diffuseColor.rgb, concrete, site.r);
     diffuseColor.rgb = mix(diffuseColor.rgb, lawn, site.g * (1.0 - site.r));
@@ -226,13 +244,16 @@ if (water > 0.001) {
       .replace(
         '#include <dithering_fragment>',
         `#include <dithering_fragment>
+// (The buildings' and towers' shadows where the shadow map doesn't reach: farShadows.ts. Faint
+// on water, which shows the sky.)
+gl_FragColor.rgb *= 1.0 - farShadow(vEN) * (1.0 - 0.7 * water);
 // (Water, told to the atmosphere pass in the alpha: a cloud's shadow dims it far less than land.)
 #ifdef OPAQUE
 gl_FragColor.a = 1.0 - 0.5 * water * (1.0 - gSeaFoam);
 #endif`,
       );
   };
-  mat.customProgramCacheKey = () => `terrain-v16${holes ? '-holes' : ''}${array ? '-array' : ''}`;
+  mat.customProgramCacheKey = () => `terrain-v18${holes ? '-holes' : ''}${array ? '-array' : ''}`;
   return mat;
 }
 

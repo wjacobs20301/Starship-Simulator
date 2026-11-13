@@ -320,7 +320,9 @@ export class PadLights {
     s.shadow.camera.near = 2;
     s.shadow.camera.far = 250;
     s.shadow.bias = -0.0005;
-    s.shadow.normalBias = 0.05;
+    // (A texel of this map is 0.2 to 0.3 m across at the vehicle: a normal bias of 5 cm left the
+    // hull, lit at a slant, in a wood grain of its own shadow.)
+    s.shadow.normalBias = 0.3;
     s.position.copy(from);
     s.target.position.copy(to);
     this.group.add(s, s.target);
@@ -336,7 +338,12 @@ export class PadLights {
     u.uPixelRatio.value = renderer.getPixelRatio();
     u.uScale.value = renderer.domElement.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
     this.lampMat.emissiveIntensity = 3 * night;
-    for (const s of this.spots) s.intensity = s.userData.candela * night;
+    for (const s of this.spots) {
+      s.intensity = s.userData.candela * night;
+      // (Their shadow maps drawn only while they're lit, and once to begin with: by day each
+      // was a pass over the whole pad for a light that's off.)
+      s.shadow.autoUpdate = night > 0 || s.shadow.map === null;
+    }
     lampUniforms.uLampNight.value = night;
     this.group.updateWorldMatrix(true, false);
     lampUniforms.uLampOrigin.value.setFromMatrixPosition(this.group.matrixWorld);

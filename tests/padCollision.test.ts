@@ -27,7 +27,11 @@ describe('tower and chopstick collisions', () => {
     while ((sim.mission.missionTime ?? -99) < 480 && sim.find('booster')?.status !== 'caught') sim.step();
     expect(sim.find('booster')!.status).toBe('caught');
     expect(sim.events.some((e) => /struck|hit the|wrecked|destroyed/.test(e.text))).toBe(false);
-    expect(sim.towers[0].angle).toBeGreaterThan(10);
+    // (Stopped on the hull, a fraction of a degree short of shut: the arms lie parallel either
+    // side of a booster, each on its own hinge, their rails under its catch pins, as the real
+    // ones do. The print kit's stubby arms, both on one hinge, met it at 10+ deg.)
+    expect(sim.towers[0].angle).toBeGreaterThan(0);
+    expect(sim.towers[0].angle).toBeLessThan(1);
     expect(sim.towers[0].contact).toBe(true);
     expect(sim.health.get('booster')?.damage ?? 0).toBe(0);
   });
@@ -102,7 +106,9 @@ describe('tower and chopstick collisions', () => {
 
   it('flying into the tower wrecks the tower', { timeout: 120_000 }, () => {
     // East face of Pad 1's tower lattice is at e = -25.4: start just clear of it, moving west.
-    const { sim, b } = fly((s) => ({ cg: [-25.4 + 5, 0, 60 + s.aux.get('booster')!.mp.xcg], vel: [-6, 0, 0] }));
+    // (Its base 40 m up: its top, 71 m higher, passes under the arms' roots on the carriage up at
+    // the catch height, so it's the tower it meets.)
+    const { sim, b } = fly((s) => ({ cg: [-25.4 + 5, 0, 40 + s.aux.get('booster')!.mp.xcg], vel: [-6, 0, 0] }));
     expect(b.status).toBe('destroyed');
     expect(sim.towers[0].down).toBe(true);
     expect(sim.events.some((e) => /Pad 1 tower destroyed/.test(e.text))).toBe(true);

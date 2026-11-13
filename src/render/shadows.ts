@@ -8,6 +8,7 @@ import { MOUNTS, TOWERS } from '../sim/padCollision';
 import type { Snapshot } from '../sim/simulation';
 import type { CameraTarget } from './cameras';
 import { setBuildingNight } from './facilities';
+import { updateFarShadows } from './farShadows';
 import type { FxVehicle } from './fx/launchFx';
 import type { PadLights } from './padLights';
 import type { World } from './scene';
@@ -48,6 +49,8 @@ export function createShadows(deps: ShadowsDeps): Shadows {
     return siteShadow;
   };
 
+  /** The vehicles on or near the ground just now (for the far shadows). */
+  const standing: THREE.Object3D[] = [];
   /** What the shadows depend on, coarsely: when it changes, the shadow map is redrawn. */
   let shadowKey = 0;
   let shadowAt = 0;
@@ -61,6 +64,8 @@ export function createShadows(deps: ShadowsDeps): Shadows {
     setBuildingNight(sd.y);
     padLights.update(now / 1000, world.renderer, world.camera);
     const fh = Math.max(0, focus[1]);
+    // (Where the shadow map has the ground, for the far shadows to keep out of.)
+    let mapped: { x: number; z: number; r: number } | null = null;
     if (fh < SHADOW_CEILING && sd.y > 0.08) {
       const gx = focus[0] - (sd.x * fh) / sd.y;
       const gz = focus[2] - (sd.z * fh) / sd.y;
@@ -70,9 +75,11 @@ export function createShadows(deps: ShadowsDeps): Shadows {
       if (d < site.r + 400) {
         shadowFocus.set(site.x - cam[0], -cam[1], site.z - cam[2]);
         world.updateShadow(shadowFocus, Math.max(site.r, d + 80), reach);
+        mapped = { x: site.x, z: site.z, r: Math.min(700, Math.max(site.r, d + 80)) };
       } else {
         shadowFocus.set(gx - cam[0], -cam[1], gz - cam[2]);
         world.updateShadow(shadowFocus, 160, reach);
+        mapped = { x: gx, z: gz, r: 160 };
       }
     } else {
       shadowFocus.set(focus[0] - cam[0], focus[1] - cam[1], focus[2] - cam[2]);
@@ -105,6 +112,20 @@ export function createShadows(deps: ShadowsDeps): Shadows {
       shadowAt = now;
       world.shadowsDirty();
     }
+    // The buildings' and towers' shadows on the ground everywhere else (by the towers alone:
+    // a vehicle's own shadow is the map's).
+    // (And a vehicle's while it stands on the ground or hangs near it: a stack on the pad seen
+    // from the production site, a booster in the arms from a few km up. One in flight is the
+    // map's, which follows it.)
+    let towerKey = 7;
+    for (const tw of snap.towers) towerKey = Math.imul(towerKey ^ Math.round(tw.top * 4 + tw.angle * 2 + tw.slew + tw.qd + (tw.down ? 999 : 0)), 16777619);
+    standing.length = 0;
+    for (const pl of placements) {
+      if (pl.world[1] > 400 || Math.abs(pl.world[0]) > 6000 || Math.abs(pl.world[2]) > 4000) continue;
+      standing.push(pl.mesh.root);
+      towerKey = Math.imul(towerKey ^ Math.round(pl.world[0] * 2 + pl.world[1] * 2 * 3 + pl.world[2] * 2 * 7), 16777619);
+    }
+    updateFarShadows(world.renderer, sd, cam, Math.min(1, world.sun.intensity / 2.6), mapped, towerKey, now, standing);
   }
 
   return { shadowStep };

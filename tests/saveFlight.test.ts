@@ -249,7 +249,9 @@ describe('the save format', () => {
 });
 
 describe('a flight saved and loaded flies on exactly as the original', () => {
-  it('on the pad before launch: the countdown, ignition and liftoff', () => {
+  // (Two seconds alone; the default five were not always enough with every core busy on the
+  // rest of the suite.)
+  it('on the pad before launch: the countdown, ignition and liftoff', { timeout: 30_000 }, () => {
     const sim = new Simulation();
     sim.configure({ parkingAlt: 275e3 });
     sim.reset();

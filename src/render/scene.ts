@@ -2,6 +2,7 @@
 // Pad 1 / Pad 2 models. The 200 km region around Starbase is streamed by terrain.ts.
 
 import * as THREE from 'three';
+import { farShadowCasters } from './farShadows';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
@@ -10,6 +11,7 @@ import { SceneAtmospherePass } from './atmosphere';
 import { AutoExposurePass } from './exposure';
 import { StarSky } from './stars';
 import { TowerRigging } from './towerRigging';
+import { weatherPads } from './padDetail';
 import type { FloatingOrigin } from './floatingOrigin';
 import { createGlobe } from './globe';
 import { Pivot } from './models';
@@ -129,10 +131,13 @@ export interface TowerView {
 
 /** How far a wrecked arm sags off its hinge, and how far a felled tower goes over, rad. */
 const ARM_SAG = THREE.MathUtils.degToRad(62);
+const UP = new THREE.Vector3(0, 1, 0);
 const TOWER_FALL = THREE.MathUtils.degToRad(84);
 
 interface ArmRig {
   pivot: Pivot;
+  /** Where its hinge stands in its parent's frame (the arms': either side of the carriage's centre). */
+  home: THREE.Vector3;
   /** Axis (pivot-local) about which the arm sags: tip goes down. */
   sagAxis: THREE.Vector3;
   sag: number;
@@ -161,6 +166,9 @@ export class PadRig {
 
   constructor(model: THREE.Object3D) {
     model.updateMatrixWorld(true);
+    // (The surfaces' wear, placed by where each stands now: before the towers go into their
+    // toppling groups.)
+    weatherPads(model);
     this.towers = ['Pad1_', 'Pad2_'].map((p) => {
       const need = (name: string) => {
         const n = model.getObjectByName(name);
@@ -188,7 +196,7 @@ export class PadRig {
         const local = node.worldToLocal(tip);
         local.y = 0;
         const sagAxis = new THREE.Vector3(0, 1, 0).cross(local.normalize()).normalize();
-        return { pivot: new Pivot(node), sagAxis, sag: 0 };
+        return { pivot: new Pivot(node), home: node.position.clone(), sagAxis, sag: 0 };
       };
       const arm = (side: 'L' | 'R') => rigOf(`${p}Chopstick_${side}`, `${p}Chopstick_${side}_Arm`);
       const qd = rigOf(`${p}ShipQD`, `${p}ShipQD_Arm`);
@@ -220,6 +228,9 @@ export class PadRig {
         arm.sag = broken ? arm.sag + (ARM_SAG - arm.sag) * Math.min(1, dt * 2.5) : 0;
         arm.pivot.pose(hinge, this.tmpQ.setFromAxisAngle(arm.sagAxis, arm.sag));
       };
+      // Each arm swings on its own hinge; a slew carries both, hinges and all, round the
+      // carriage's centre (as the sim has it: padCollision.ts armColumns).
+      for (const arm of [rig.left, rig.right]) arm.pivot.node.position.copy(arm.home).applyAxisAngle(UP, slew);
       pose(rig.left, a + slew, !!state.broken?.L);
       pose(rig.right, -a + slew, !!state.broken?.R);
       // The ship QD arm: swung by the sim; bent down off its hinge when a vehicle wrecks it.
@@ -510,6 +521,7 @@ export function createWorld(canvas: HTMLCanvasElement, origin: FloatingOrigin): 
     },
     addPad(model: THREE.Object3D) {
       add(model, [0, 0, 0]);
+      farShadowCasters.push(model);
       return new PadRig(model);
     },
   };

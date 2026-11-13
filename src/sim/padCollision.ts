@@ -53,24 +53,26 @@ const toEnu = (x: number, y: number, z: number): V3 => [x, -z, y];
 /** Carriage yaw (rotation about up) from its quaternion. */
 const yawOf = (q: number[]) => 2 * Math.atan2(q[1], q[3]);
 
-/** Hinge position (pad ENU) at the carriage's home height, per pad. */
+/** The carriage's centre, midway between the arms' hinges (pad ENU), at its home height, per pad. */
 const HINGES: V3[] = PAD_COLLIDERS.map((p) => toEnu(p.carriage.pos[0], p.carriage.pos[1], p.carriage.pos[2]));
 
 /**
  * Columns [x, z, y0, y1] given in a hinge's frame (turning about glTF y) placed in pad ENU: flat
- * array of [e, n, uBottom, uTop] per column, the hinge at `pos` (glTF) with yaw `yaw`, swung by
- * `th` (rad), raised by `lift` (m).
+ * array of [e, n, uBottom, uTop] per column. The hinge stands at `hinge` [x, z] in the frame of
+ * its carriage, which is at `pos` (glTF) with yaw `yaw`; the columns are swung by `th` (rad)
+ * about the hinge, then hinge and all by `slew` (rad) about the carriage; raised by `lift` (m).
  */
-function placeColumns(cols: number[][], pos: number[], yaw: number, th: number, lift: number): Float64Array {
+function placeColumns(cols: number[][], pos: number[], yaw: number, th: number, lift: number, hinge: number[] = [0, 0], slew = 0): Float64Array {
   const [cx, cy, cz] = pos;
   const c1 = Math.cos(th), s1 = Math.sin(th);
-  const c2 = Math.cos(yaw), s2 = Math.sin(yaw);
+  const c2 = Math.cos(yaw + slew), s2 = Math.sin(yaw + slew);
   const out = new Float64Array(cols.length * 4);
   for (let i = 0; i < cols.length; i++) {
     const [x, z, y0, y1] = cols[i];
-    // Swing about the hinge, then the hinge's yaw (both about y; glTF rotation sense).
-    const xa = x * c1 + z * s1;
-    const za = -x * s1 + z * c1;
+    // Swing about the hinge, out to where the hinge is, then the carriage's turn (all about y;
+    // glTF rotation sense).
+    const xa = x * c1 + z * s1 + hinge[0];
+    const za = -x * s1 + z * c1 + hinge[1];
     const xw = xa * c2 + za * s2 + cx;
     const zw = -xa * s2 + za * c2 + cz;
     out[i * 4] = xw;
@@ -83,12 +85,13 @@ function placeColumns(cols: number[][], pos: number[], yaw: number, th: number, 
 
 /**
  * One arm's columns in pad ENU at this carriage offset (m) and opening (deg): flat array of
- * [e, n, uBottom, uTop] per column. L turns by +angle, R by -angle (as the model is animated).
+ * [e, n, uBottom, uTop] per column. Each arm turns on its own hinge, L by +angle and R by -angle
+ * (as the model is animated); a slew carries both, hinges and all, round the carriage's centre.
  */
 export function armColumns(pad: number, side: ArmSide, offset: number, angleDeg: number, slewDeg = 0): Float64Array {
   const p = PAD_COLLIDERS[pad];
-  const th = (((side === 'L' ? 1 : -1) * angleDeg + slewDeg) * Math.PI) / 180;
-  return placeColumns(p.arms[side], p.carriage.pos, yawOf(p.carriage.rot), th, offset);
+  const th = ((side === 'L' ? 1 : -1) * angleDeg * Math.PI) / 180;
+  return placeColumns(p.arms[side], p.carriage.pos, yawOf(p.carriage.rot), th, offset, p.hinges[side], (slewDeg * Math.PI) / 180);
 }
 
 /** The ship QD arm's columns in pad ENU at this swing (deg, as the model is animated). */

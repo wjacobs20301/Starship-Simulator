@@ -6,6 +6,7 @@ import { FloatingOrigin, enuToWorld } from './render/floatingOrigin';
 import { type ModelLibrary, loadModels } from './render/models';
 import { applyShipSerial } from './render/decals';
 import { buildingUniforms, loadFacilities } from './render/facilities';
+import { farShadowCasters } from './render/farShadows';
 import { rocketGarden } from './render/rocketGarden';
 import { loadSouthPadre } from './render/southPadre';
 import { createLaunchSite } from './render/launchSite';
@@ -146,6 +147,7 @@ facilitiesLoaded
     lampLightAll(g);
     world.scene.add(g);
     world.statics.push(g);
+    farShadowCasters.push(g);
     origin.place(g, [0, 0, 0]);
     farCull.add(g, origin.camera);
   })
@@ -172,6 +174,7 @@ loadModels(world.renderer, (f) => (loadingBar.style.transform = `scaleX(${f})`))
         const garden = rocketGarden(lib, g.userData.garden ?? []);
         world.scene.add(garden);
         world.statics.push(garden);
+        farShadowCasters.push(garden);
         origin.place(garden, [0, 0, 0]);
         farCull.add(garden, origin.camera);
       })

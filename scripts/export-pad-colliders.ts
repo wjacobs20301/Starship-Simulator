@@ -1,5 +1,5 @@
 // Collision shapes for the towers and chopsticks, from the built pad model (public/models/pad.glb):
-// each arm as vertical columns (plan-view cells with a height range) in its hinge's frame, and the
+// each arm as vertical columns (plan-view cells with a height range) in its own hinge's frame, and the
 // tower lattice, base and plinth as boxes. Writes src/sim/padColliders.ts for the physics.
 //
 //   npx tsx scripts/export-pad-colliders.ts      (after rebuilding the pad model)
@@ -30,13 +30,37 @@ const mul = (a: M4, b: M4): M4 => {
 };
 const apply = (m: M4, p: number[]) => [0, 1, 2].map((k) => m[k] * p[0] + m[4 + k] * p[1] + m[8 + k] * p[2] + m[12 + k]);
 
-/** Mesh vertices of a node and its descendants, in the frame of `frame` (a local matrix chain). */
-function points(n: Node, m: M4, out: number[][] = []): number[][] {
+/**
+ * Points over the surface of a node's mesh and its descendants', in the frame of `frame` (a local
+ * matrix chain): its vertices, and points across every triangle no further apart than half a
+ * cell. (The vertices alone did for the print kit's finely meshed arms; a beam built as a box has
+ * eight, one at each end, and a 30 m arm of such beams was a few posts with air between: the
+ * booster went through it.)
+ */
+function points(n: Node, m: M4, dense = true, out: number[][] = []): number[][] {
   for (const prim of n.getMesh()?.listPrimitives() ?? []) {
     const pos = prim.getAttribute('POSITION')!;
-    for (let i = 0; i < pos.getCount(); i++) out.push(apply(m, pos.getElement(i, [])));
+    const v: number[][] = [];
+    for (let i = 0; i < pos.getCount(); i++) v.push(apply(m, pos.getElement(i, [])));
+    for (const p of v) out.push(p);
+    if (!dense) continue;
+    const idx = prim.getIndices();
+    const count = idx ? idx.getCount() : v.length;
+    const at = (i: number) => v[idx ? idx.getScalar(i) : i];
+    for (let t = 0; t + 2 < count; t += 3) {
+      const [a, b, c] = [at(t), at(t + 1), at(t + 2)];
+      const edge = Math.max(Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]), Math.hypot(c[0] - a[0], c[1] - a[1], c[2] - a[2]), Math.hypot(c[0] - b[0], c[1] - b[1], c[2] - b[2]));
+      const k = Math.ceil(edge / (CELL / 2));
+      if (k < 2) continue;
+      for (let i = 0; i <= k; i++) {
+        for (let j = 0; j <= k - i; j++) {
+          const [u, w] = [i / k, j / k];
+          out.push([0, 1, 2].map((d) => a[d] + (b[d] - a[d]) * u + (c[d] - a[d]) * w));
+        }
+      }
+    }
   }
-  for (const c of n.listChildren()) points(c, mul(m, c.getMatrix() as M4), out);
+  for (const c of n.listChildren()) points(c, mul(m, c.getMatrix() as M4), dense, out);
   return out;
 }
 
@@ -60,7 +84,8 @@ function columns(pts: number[][]): number[][] {
  */
 function box(name: string): { e: number; n: number; a: number; b: number; yaw: number; u0: number; u1: number } {
   const n = node(name);
-  const pts = points(n, n.getWorldMatrix() as M4).map(([x, y, z]) => [x, -z, y]);
+  // (Its corners are enough for a box round it.)
+  const pts = points(n, n.getWorldMatrix() as M4, false).map(([x, y, z]) => [x, -z, y]);
   let best = { area: Infinity, yaw: 0, lo: [0, 0], hi: [0, 0] };
   for (let d = 0; d < 90; d += 0.25) {
     const yaw = (d * Math.PI) / 180;
@@ -100,10 +125,16 @@ const pads = ['Pad1', 'Pad2'].map((p) => {
     // Pivot-local: the arm mesh node's transform relative to its pivot (the pivot turns about its Y).
     return columns(points(pivot, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]));
   };
+  // Each arm's own hinge, in the carriage's frame (x, z).
+  const hinge = (side: 'L' | 'R') => {
+    const t = node(`${p}_Chopstick_${side}`).getTranslation();
+    return [Math.round(t[0] * 1000) / 1000, Math.round(t[2] * 1000) / 1000];
+  };
   const qd = node(`${p}_ShipQD`);
   return {
     carriage: { pos: carriage.getWorldTranslation().map((v) => Math.round(v * 1000) / 1000), rot: carriage.getWorldRotation() },
     arms: { L: arm('L'), R: arm('R') },
+    hinges: { L: hinge('L'), R: hinge('R') },
     qd: {
       pos: qd.getWorldTranslation().map((v) => Math.round(v * 1000) / 1000),
       rot: qd.getWorldRotation(),
@@ -121,6 +152,8 @@ export interface PadCollider {
   carriage: { pos: number[]; rot: number[] };
   /** Each arm as vertical columns [x, z, yMin, yMax] in its hinge's frame (it turns about y). */
   arms: { L: number[][]; R: number[][] };
+  /** Each arm's hinge [x, z] in the carriage's frame: either side of its centre. */
+  hinges: { L: number[]; R: number[] };
   /** The ship quick-disconnect arm: its hinge (position, rotation) and columns in the hinge's frame. */
   qd: { pos: number[]; rot: number[]; columns: number[][] };
   /**

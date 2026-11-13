@@ -1366,7 +1366,25 @@ const CLOUD_GLSL = /* glsl */ `
           // (Out to ~250 m and ~500 m from a surface, not 150 and 300: over a cumulus's thin
           // top, seen from the side, the ray runs level through wisps for a long way, and the
           // long steps between came down in gaps: blue specks through the cloud's crown.)
-          t += inCloud || gMargin > -0.2 ? dS : gMargin > -0.4 ? 2.0 * dIn : max(clearStep(t, muv), skip);
+          // (And the long step through clear air, where no cloud is near: never down past the
+          // layer's top here from above it (nor up past its base from below), and inside the
+          // layer never through more than a tenth of its depth. The margin above tells how near
+          // a cloud is only from inside the layer's profile, and not at all in its thin top,
+          // where nothing can be: looking down on a field from a few km up, a ray came into
+          // the layer and on to the clouds' crowns in one stride of 100-odd m of height, into
+          // a crown from one pixel and clean over it from the next: a fringe of dots along
+          // every cloud's far edge, and streaks down its top where the rays went in at
+          // different depths.)
+          float stepFar = max(clearStep(t, muv), skip);
+          if (skip <= 0.0 && w.x >= 0.02 && w.z > w.y) {
+            float hS = rp - uRc;
+            if (hS >= w.z) {
+              if (muv < -0.02) stepFar = min(stepFar, (hS - w.z) / -muv + dS);
+            } else if (hS <= w.y) {
+              if (muv > 0.02) stepFar = min(stepFar, (w.y - hS) / muv + dS);
+            } else stepFar = min(stepFar, max(2.0 * dIn, 0.1 * (w.z - w.y) / max(abs(muv), 0.05)));
+          }
+          t += inCloud || gMargin > -0.2 ? dS : gMargin > -0.4 ? 2.0 * dIn : stepFar;
           tMarch = min(t, tB);
         }
         low = vec4(C, T);
@@ -1538,7 +1556,8 @@ const ATMO_COMMON = /* glsl */ `
 const fragment = /* glsl */ `
   uniform sampler2D tColor;
   uniform sampler2D tCloudTex;   // the cloud pass: light and transmittance
-  uniform sampler2D tCloudDist;  // and the clouds' distance, km
+  uniform sampler2D tCloudDist;  // and the clouds' distance, km (this frame's samples; their shadows in .gb)
+  uniform sampler2D tCloudFar;   // the clouds' distance at their full resolution, km
   uniform vec2 uCloudTexel;      // the half-resolution pass's texel, uv
   uniform vec2 uFullSize;        // the clouds' own resolution (the screen's or less)
   uniform float uLocalSun;       // the scene's sunlight already dimmed by cloud over the camera, 0..1
@@ -1650,6 +1669,42 @@ const fragment = /* glsl */ `
     return vec4(clamp(r.rgb, vec3(0.0), mid.rgb * 1.5 + 0.02), clamp(r.a, 0.0, 1.0));
   }
 
+  // The clouds at a screen pixel (sky: nothing solid there), and how far off (tf, m): from the
+  // four of the clouds' own pixels round it, those on its side of the skyline only. (The clouds
+  // are drawn coarser than the screen: at the skyline a row of land took a share of the cloud
+  // in the sky above it, a pale line along the top of the land, and the sky's lowest row a
+  // share of the land's "no cloud"; and the test that should have kept the sky's clouds off the
+  // land went by this frame's samples, so the line came and went with every frame.) Away from
+  // any edge: the smooth filter's.
+  vec4 cloudsHere(vec2 uv, bool sky, out float tf) {
+    vec2 sp = uv * uFullSize - 0.5;
+    vec2 b = floor(sp);
+    vec2 f = sp - b;
+    vec4 sum = vec4(0.0);
+    float wsum = 0.0;
+    bool edge = false;
+    tf = 1e30;
+    float tAny = 1e30;
+    for (int j = 0; j < 2; j++) {
+      for (int i = 0; i < 2; i++) {
+        vec2 tuv = (clamp(b + vec2(float(i), float(j)), vec2(0.0), uFullSize - 1.0) + 0.5) / uFullSize;
+        float dk = 1000.0 * texture2D(tCloudFar, tuv).r;
+        tAny = min(tAny, dk);
+        if ((texture2D(tDepth, tuv).x <= 0.0) != sky) {
+          edge = true;
+          continue;
+        }
+        tf = min(tf, dk);
+        float w = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y) + 0.01;
+        sum += w * texture2D(tCloudTex, tuv);
+        wsum += w;
+      }
+    }
+    if (tf > 1e29) tf = tAny;
+    if (!edge) return cloudTexAt(uv);
+    return wsum > 0.0 ? sum / wsum : (sky ? cloudTexAt(uv) : vec4(0.0, 0.0, 0.0, 1.0));
+  }
+
   void main() {
     vec4 col = texture2D(tColor, vUv);
     vec3 ro;
@@ -1699,13 +1754,10 @@ const fragment = /* glsl */ `
     float tCloud = 1e30;
     vec4 cl = vec4(0.0, 0.0, 0.0, 1.0);
     if (uClouds > 0.5) {
-      vec4 c4 = cloudTexAt(vUv);
-      // (The clouds' distance from the half-resolution pass: the nearest of the four around, so
-      // at a cloud's edge it's the cloud's, not a blend with the sky's "none" behind it that
-      // changes from frame to frame, and the haze in front of the edge with it.)
-      vec2 o = 0.5 * uCloudTexel;
-      float tf = 1000.0 * min(min(texture2D(tCloudDist, vUv + vec2(o.x, o.y)).r, texture2D(tCloudDist, vUv + vec2(-o.x, o.y)).r),
-                              min(texture2D(tCloudDist, vUv + vec2(o.x, -o.y)).r, texture2D(tCloudDist, vUv - o).r));
+      // (And their distance: the nearest of the clouds' pixels round this one, each its own
+      // ray's, so at a cloud's edge it's the cloud's, not a blend with the sky's "none" behind it.)
+      float tf;
+      vec4 c4 = cloudsHere(vUv, sky, tf);
       if (c4.a < 0.999 && !(sceneDist < tf * 0.97)) {
         cl = c4;
         tCloud = tf;
@@ -1910,9 +1962,17 @@ const cloudFragment = /* glsl */ `
 const resolveFragment = /* glsl */ `
   in vec2 vUv;
   layout(location = 0) out vec4 outColor;
+  // The clouds' distance at this pixel, km: its own ray's, kept from the frame it was drawn in
+  // (as its light is), for the atmosphere pass. (That pass took it from this frame's samples
+  // alone, one ray of each 2x2 block and a different one each frame: at the skyline, where one
+  // row is land and the next sky, the distance it got for a pixel changed with which row had
+  // been drawn, and the haze in front of the clouds with it: a line along the horizon that
+  // flickered, frame on, frame off.)
+  layout(location = 1) out vec4 outFar;
   uniform sampler2D tCur;      // this frame's samples (half resolution)
   uniform sampler2D tCurDist;  // their distance, km
   uniform sampler2D tHist;     // the history (full resolution)
+  uniform sampler2D tHistDist; // and its clouds' distance, km
   uniform vec2 uSub;
   uniform vec2 uFullSize;
   uniform vec2 uHalfSize;
@@ -1977,8 +2037,10 @@ const resolveFragment = /* glsl */ `
     vec3 v = uPrevView * (rd * d + uCamMove);
     vec2 uvPrev = ((v.xy / max(-v.z, 1e-6)) / uPrevTanHalf - uPrevProjOff) * 0.5 + 0.5;
     bool ok = uHistOk > 0.5 && v.z < 0.0 && all(greaterThanEqual(uvPrev, vec2(0.0))) && all(lessThanEqual(uvPrev, vec2(1.0)));
+    float dHere = texelFetch(tCurDist, min(h, hMax), 0).r;
     if (!ok) {
       outColor = fresh ? here : cur;
+      outFar = vec4(fresh ? dHere : d / 1000.0, 0.0, 0.0, 1.0);
       return;
     }
     vec4 h0 = histAt(uvPrev);
@@ -1994,6 +2056,10 @@ const resolveFragment = /* glsl */ `
     float fade = max(bad, 0.15 * smoothstep(0.5, 4.0, par));
     // (A pixel's new sample blended in, not swapped: steadier.)
     outColor = fresh ? mix(hist, here, max(0.2, fade)) : mix(hist, cur, fade);
+    // (The distance: this frame's where it's this pixel's own, or the history was wrong; else
+    // the history's, the nearest pixel's (a blend across a cloud's edge is the place of nothing).)
+    float dHist = texelFetch(tHistDist, clamp(ivec2(uvPrev * uFullSize), ivec2(0), ivec2(uFullSize) - 1), 0).r;
+    outFar = vec4(fresh ? dHere : (bad > 0.5 ? d / 1000.0 : dHist), 0.0, 0.0, 1.0);
   }
 `;
 
@@ -2016,6 +2082,8 @@ export class SceneAtmospherePass extends Pass {
     tNoise: { value: null as THREE.Texture | null },
     tCloudTex: FX_SHARED.tCloudTex,
     tCloudDist: FX_SHARED.tCloudDist,
+    /** The clouds' distance at their full resolution, km (the history's: each pixel its own ray's). */
+    tCloudFar: { value: null as THREE.Texture | null },
     uCloudTexel: { value: new THREE.Vector2(1, 1) },
     uLocalSun: { value: 1 },
     uHazeMin: { value: 8 },
@@ -2049,6 +2117,7 @@ export class SceneAtmospherePass extends Pass {
     tCur: { value: null as THREE.Texture | null },
     tCurDist: { value: null as THREE.Texture | null },
     tHist: { value: null as THREE.Texture | null },
+    tHistDist: { value: null as THREE.Texture | null },
     uSub: this.uniforms.uSub,
     uFullSize: this.uniforms.uFullSize,
     uHalfSize: { value: new THREE.Vector2(1, 1) },
@@ -2062,8 +2131,8 @@ export class SceneAtmospherePass extends Pass {
     uPrevProjOff: { value: new THREE.Vector2() },
   };
   private resolveQuad: FullScreenQuad;
-  /** The clouds at full resolution, two (this frame's and the last's, swapped each frame). */
-  private history = [0, 1].map(() => new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, depthBuffer: false }));
+  /** The clouds at full resolution (light + transmittance; and their distance), two (this frame's and the last's, swapped each frame). */
+  private history = [0, 1].map(() => new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, count: 2, depthBuffer: false }));
   private frame = 0;
   private prevCenter = new THREE.Vector3();
   private histValid = false;
@@ -2072,6 +2141,19 @@ export class SceneAtmospherePass extends Pass {
   private cloudQuad: FullScreenQuad;
   private cloudTarget = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, count: 2, depthBuffer: false });
   private clearColor = new THREE.Color();
+  /** For the shadow map's own pass (see render): a target of one pixel, an eye that sees the casters' layer and nothing in it. */
+  private shadowOnly = new THREE.WebGLRenderTarget(1, 1);
+  private shadowEye = (() => {
+    const c = new THREE.PerspectiveCamera(1, 1, 1, 2);
+    c.position.set(0, 1e9, 0);
+    c.lookAt(0, 2e9, 0);
+    c.updateMatrixWorld();
+    // (The near solids' layer: everything that casts. Not the background's: its tiles are never
+    // culled, and all of the ground was drawn into this pass's one pixel, 1.4 million triangles
+    // each time the map was due.)
+    c.layers.set(NEAR_LAYER);
+    return c;
+  })();
   /** The background (see BG_LAYER) is drawn here, with its depth. */
   private sceneTarget: THREE.WebGLRenderTarget;
   /**
@@ -2190,9 +2272,18 @@ export class SceneAtmospherePass extends Pass {
     const clearAlpha = renderer.getClearAlpha();
     const scene = this.sceneTarget;
 
-    // 1. The background (terrain, the globe, the Moon, stars), with depth, over black (space).
-    // (The shadow map, drawn here, has everything in it: the shadow camera sees layer 0.)
+    // 0. The shadow map, when it's due, by itself: drawn with a camera that sees the layer of
+    // everything that casts, and looks at nothing. (three draws into the shadow map only what the camera of the pass it's
+    // drawn in can see, by its layers: left to the background's pass below, the map had the
+    // background in it and nothing else, no tower, tank or vehicle, and nothing on the pad cast
+    // a shadow at all.)
     const fxAny = this.sortLayers();
+    if (renderer.shadowMap.enabled && (renderer.shadowMap.autoUpdate || renderer.shadowMap.needsUpdate)) {
+      renderer.setRenderTarget(this.shadowOnly);
+      renderer.render(this.scene, this.shadowEye);
+    }
+
+    // 1. The background (terrain, the globe, the Moon, stars), with depth, over black (space).
     renderer.autoClear = false;
     renderer.setClearColor(0x000000, 1);
     cam.layers.set(BG_LAYER);
@@ -2234,12 +2325,14 @@ export class SceneAtmospherePass extends Pass {
       const [prev, next] = f % 2 ? [this.history[0], this.history[1]] : [this.history[1], this.history[0]];
       r.tCur.value = this.cloudTarget.textures[0];
       r.tCurDist.value = this.cloudTarget.textures[1];
-      r.tHist.value = prev.texture;
+      r.tHist.value = prev.textures[0];
+      r.tHistDist.value = prev.textures[1];
       r.uHistOk.value = this.histValid ? 1 : 0;
       r.uCamMove.value.copy(this.prevCenter).sub(u.uCenter.value);
       renderer.setRenderTarget(next);
       this.resolveQuad.render(renderer);
-      u.tCloudTex.value = next.texture;
+      u.tCloudTex.value = next.textures[0];
+      u.tCloudFar.value = next.textures[1];
       u.tCloudDist.value = this.cloudTarget.textures[1];
       // (This frame's view, for the next.)
       this.prevCenter.copy(u.uCenter.value);

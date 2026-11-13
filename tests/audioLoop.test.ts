@@ -1,8 +1,22 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { brown, pink, seamlessLoop, white } from '../src/audio/engine';
 
 // The looping noise under the engines, wind and surf: it must not dip or click where it wraps.
 describe('seamless noise loops', () => {
+  // (The same noise every run: drawn fresh each time, a 50 ms window of pink noise strayed past
+  // the limits below once in a few hundred runs, and the suite failed for nothing.)
+  beforeEach(() => {
+    let seed = 0x2f6e2b1;
+    vi.spyOn(Math, 'random').mockImplementation(() => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
   const rate = 48000;
   const length = rate * 4;
   const join = rate / 4;

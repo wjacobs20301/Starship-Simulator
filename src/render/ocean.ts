@@ -29,6 +29,8 @@ export const SEA_N = BANDS * PER_BAND + 2;
 const STEP = 8000;
 /** Beyond this from the anchor's plane origin, a new plane (rare: the pattern jumps). */
 const REPLANE = 1.5e6;
+/** The noise's own anchors go back to nothing past this (m: single floats still tell a ripple's cell out here). */
+const NOISE_WRAP = 48e3;
 /** The sea the wind blows over, m. */
 const FETCH = 300e3;
 
@@ -115,17 +117,18 @@ function seaNoise(x: number, y: number): number {
   const a = seaHash(ix, iy), b = seaHash(ix + 1, iy), c = seaHash(ix, iy + 1), d = seaHash(ix + 1, iy + 1);
   return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
 }
-function seaWarp(x: number, y: number): [number, number] {
+// (x, y: the point on the plane; nx, ny: the same point where the noise is reckoned from.)
+function seaWarp(x: number, y: number, nx: number, ny: number): [number, number] {
   return [
-    x + 7 * (seaNoise(x / 43, y / 43) - 0.5) + 2.5 * (seaNoise(x / 13 + 5.1, y / 13 + 5.1) - 0.5),
-    y + 7 * (seaNoise(x / 37 + 11.3, y / 37 + 11.3) - 0.5) + 2.5 * (seaNoise(x / 11 + 2.7, y / 11 + 2.7) - 0.5),
+    x + 7 * (seaNoise(nx / 43, ny / 43) - 0.5) + 2.5 * (seaNoise(nx / 13 + 5.1, ny / 13 + 5.1) - 0.5),
+    y + 7 * (seaNoise(nx / 37 + 11.3, ny / 37 + 11.3) - 0.5) + 2.5 * (seaNoise(nx / 11 + 2.7, ny / 11 + 2.7) - 0.5),
   ];
 }
 
-function seaWarpB(x: number, y: number): [number, number] {
+function seaWarpB(x: number, y: number, nx: number, ny: number): [number, number] {
   return [
-    x + 7 * (seaNoise(x / 39 + 23.7, y / 39 + 23.7) - 0.5) + 2.5 * (seaNoise(x / 12 + 17.9, y / 12 + 17.9) - 0.5),
-    y + 7 * (seaNoise(x / 47 + 41.1, y / 47 + 41.1) - 0.5) + 2.5 * (seaNoise(x / 14 + 29.3, y / 14 + 29.3) - 0.5),
+    x + 7 * (seaNoise(nx / 39 + 23.7, ny / 39 + 23.7) - 0.5) + 2.5 * (seaNoise(nx / 12 + 17.9, ny / 12 + 17.9) - 0.5),
+    y + 7 * (seaNoise(nx / 47 + 41.1, ny / 47 + 41.1) - 0.5) + 2.5 * (seaNoise(nx / 14 + 29.3, ny / 14 + 29.3) - 0.5),
   ];
 }
 
@@ -150,8 +153,10 @@ export class SeaState {
     uSea: { value: new THREE.Vector4() },
     /** The wind's heading on the plane (x, y), streaks (0..1), how much darker the sea. */
     uSea2: { value: new THREE.Vector4() },
-    /** The camera from the (moved) anchor, world axes: a fragment's plane point is dot(rel + this, E / N). */
+    /** The camera from the (moved) anchor, on the plane (x, y; m): a fragment's plane point is this + (rel . E, rel . N). */
     uSeaOff: { value: new THREE.Vector3() },
+    /** Where the noise is reckoned from, added to a plane point: the warps' (x, y), the foam's (z, w: down and across the wind). */
+    uSeaNo: { value: new THREE.Vector4() },
     uSeaE: { value: new THREE.Vector3(1, 0, 0) },
     uSeaN: { value: new THREE.Vector3(0, 0, -1) },
     /** The Earth's centre from the camera (world). */
@@ -168,6 +173,19 @@ export class SeaState {
   private N = new THREE.Vector3(0, 0, -1);
   /** The anchor's step on the plane (m). */
   private shift: [number, number] = [0, 0];
+  /**
+   * The noise's own anchor (the waves' warps, the foam's patches, the surf's lace), from the
+   * anchor above: noise can't be folded as a train's phase is, so each step of the anchor had
+   * every whitecap and every crest's wander jump at once, wherever the camera crossed a line
+   * (which might run through the pad: the plane's origin is wherever the camera first was).
+   * These take the steps up instead, so the noise stays where it was on the water. The warps'
+   * on the plane's axes; the foam's down and across the wind (as its noise is laid), added up
+   * step by step so a turn of the wind turns the patches about the anchor, not about a point
+   * far off. (Wrapped, a jump, past NOISE_WRAP: tens of km on.)
+   */
+  private noiseOff: [number, number] = [0, 0];
+  private foamOff: [number, number] = [0, 0];
+  private stepped: [number, number] = [0, 0];
   private swellH = 0.6;
   private swellTh = Math.PI - 0.3;
   private v = new THREE.Vector3();
@@ -201,17 +219,21 @@ export class SeaState {
       this.E.copy(east);
       this.N.copy(north);
       this.shift = [0, 0];
+      this.noiseOff = [0, 0];
+      this.foamOff = [0, 0];
     }
     // The camera on the plane, and the anchor's step nearest it.
     const ce = dx * this.E.x + dy * this.E.y + dz * this.E.z;
     const cn = dx * this.N.x + dy * this.N.y + dz * this.N.z;
-    this.shift = [Math.round(ce / STEP) * STEP, Math.round(cn / STEP) * STEP];
+    const was = this.shift;
+    // (A step only once well past the line between two: a camera circling on a line doesn't
+    // step back and forth.)
+    const stepTo = (c: number, at: number) => (Math.abs(c - at) > 0.6 * STEP ? Math.round(c / STEP) * STEP : at);
+    this.shift = [stepTo(ce, was[0]), stepTo(cn, was[1])];
     const [se, sn] = this.shift;
-    u.uSeaOff.value.set(
-      cam[0] - this.origin[0] - se * this.E.x - sn * this.N.x,
-      cam[1] - this.origin[1] - se * this.E.y - sn * this.N.y,
-      cam[2] - this.origin[2] - se * this.E.z - sn * this.N.z,
-    );
+    this.stepped = [se - was[0], sn - was[1]];
+    // (On the plane, reckoned here in float64: the shader adds only a fragment's own few km.)
+    u.uSeaOff.value.set(ce - se, cn - sn, 0);
     u.uSeaE.value.copy(this.E);
     u.uSeaN.value.copy(this.N);
     u.uSeaCentre.value.set(centre[0] - cam[0], centre[1] - cam[1], centre[2] - cam[2]);
@@ -233,6 +255,15 @@ export class SeaState {
     }
     const U = Math.max(0.3, this.wind.length());
     const thW = Math.atan2(this.wind.y, this.wind.x);
+    // The noise's anchors take up the anchor's step.
+    {
+      const [de, dn] = this.stepped;
+      const wrap = (x: number) => (Math.abs(x) > NOISE_WRAP ? 0 : x);
+      const cw = Math.cos(thW), sw = Math.sin(thW);
+      this.noiseOff = [wrap(this.noiseOff[0] + de), wrap(this.noiseOff[1] + dn)];
+      this.foamOff = [wrap(this.foamOff[0] + de * cw + dn * sw), wrap(this.foamOff[1] - de * sw + dn * cw)];
+      u.uSeaNo.value.set(this.noiseOff[0], this.noiseOff[1], this.foamOff[0], this.foamOff[1]);
+    }
     // (The waves' size: fully developed up to what ~300 km of sea lets the wind raise (JONSWAP's
     // peak for that fetch): as the spectrum of a lighter wind, its tail and the whitecaps the
     // wind's own.)
@@ -299,8 +330,8 @@ export class SeaState {
     // here, then its height.)
     let qx = px, qy = py;
     for (let it = 0; it < 3; it++) {
-      const wa = seaWarp(qx, qy);
-      const wb = seaWarpB(qx, qy);
+      const wa = seaWarp(qx, qy, qx + this.noiseOff[0], qy + this.noiseOff[1]);
+      const wb = seaWarpB(qx, qy, qx + this.noiseOff[0], qy + this.noiseOff[1]);
       let cx = 0, cy = 0;
       for (let i = 0; i < SEA_N; i++) {
         const w = W[i];
@@ -315,8 +346,8 @@ export class SeaState {
       qx = px - cx;
       qy = py - cy;
     }
-    const wa = seaWarp(qx, qy);
-    const wb = seaWarpB(qx, qy);
+    const wa = seaWarp(qx, qy, qx + this.noiseOff[0], qy + this.noiseOff[1]);
+    const wb = seaWarpB(qx, qy, qx + this.noiseOff[0], qy + this.noiseOff[1]);
     let h = 0, se = 0, sn = 0, rate = 0;
     for (let i = 0; i < SEA_N; i++) {
       const w = W[i];
@@ -335,6 +366,25 @@ export class SeaState {
     out.slope.copy(this.E).multiplyScalar(se).addScaledVector(this.N, sn);
     out.rate = rate;
     return out;
+  }
+
+  /**
+   * The point of a grid `grid` apart on the plane nearest `world` (float64), kept at world's own
+   * height off the plane: into `out`, with the plane's axes into E and N. Returns the plane's
+   * normal (in `normal`). For what's laid out round the camera but must stay put on the water
+   * (the sea mesh's maps of the shore, oceanSurface.ts).
+   */
+  onGrid(world: V3, grid: number, out: V3, E: THREE.Vector3, N: THREE.Vector3, normal: THREE.Vector3): THREE.Vector3 {
+    const dx = world[0] - this.origin[0], dy = world[1] - this.origin[1], dz = world[2] - this.origin[2];
+    const e = dx * this.E.x + dy * this.E.y + dz * this.E.z;
+    const n = dx * this.N.x + dy * this.N.y + dz * this.N.z;
+    const de = Math.round(e / grid) * grid - e, dn = Math.round(n / grid) * grid - n;
+    out[0] = world[0] + de * this.E.x + dn * this.N.x;
+    out[1] = world[1] + de * this.E.y + dn * this.N.y;
+    out[2] = world[2] + de * this.E.z + dn * this.N.z;
+    E.copy(this.E);
+    N.copy(this.N);
+    return normal.crossVectors(this.E, this.N).normalize();
   }
 
   /** The swell for the place: some long waves from far-off storms, its own heading and height. */
@@ -364,6 +414,7 @@ uniform vec4 uSea;
 uniform vec4 uSea2;
 uniform vec4 uSea3;
 uniform vec3 uSeaOff;
+uniform vec4 uSeaNo;
 uniform vec3 uSeaE;
 uniform vec3 uSeaN;
 uniform vec3 uSeaCentre;
@@ -379,23 +430,31 @@ float seaNoise(vec2 p) {
   return mix(mix(seaHash(i), seaHash(i + vec2(1.0, 0.0)), u.x), mix(seaHash(i + vec2(0.0, 1.0)), seaHash(i + vec2(1.0, 1.0)), u.x), u.y);
 }
 vec2 seaPlane(vec3 rel) {
-  vec3 w = rel + uSeaOff;
-  return vec2(dot(w, uSeaE), dot(w, uSeaN));
+  return vec2(dot(rel, uSeaE), dot(rel, uSeaN)) + uSeaOff.xy;
 }
 // (Where the waves are reckoned from: the plane warped a few metres, slowly, so the shorter
 // crests wander and break up as a real chop's do instead of running in straight parallel rows;
 // the long waves hardly move.)
+// (The noise is reckoned from its own anchor, p + uSeaNo.xy: it stays put on the water when the
+// plane's anchor steps on with the camera.)
 vec2 seaWarp(vec2 p) {
-  return p + 7.0 * vec2(seaNoise(p / 43.0) - 0.5, seaNoise(p / 37.0 + 11.3) - 0.5) + 2.5 * vec2(seaNoise(p / 13.0 + 5.1) - 0.5, seaNoise(p / 11.0 + 2.7) - 0.5);
+  vec2 n = p + uSeaNo.xy;
+  return p + 7.0 * vec2(seaNoise(n / 43.0) - 0.5, seaNoise(n / 37.0 + 11.3) - 0.5) + 2.5 * vec2(seaNoise(n / 13.0 + 5.1) - 0.5, seaNoise(n / 11.0 + 2.7) - 0.5);
 }
 // A second warp, for every other train: trains all bent the same way keep their crossings in
 // step, a regular lattice over the whole sea (it looked woven). (SeaState's seaWarpB is the same.)
 vec2 seaWarpB(vec2 p) {
-  return p + 7.0 * vec2(seaNoise(p / 39.0 + 23.7) - 0.5, seaNoise(p / 47.0 + 41.1) - 0.5) + 2.5 * vec2(seaNoise(p / 12.0 + 17.9) - 0.5, seaNoise(p / 14.0 + 29.3) - 0.5);
+  vec2 n = p + uSeaNo.xy;
+  return p + 7.0 * vec2(seaNoise(n / 39.0 + 23.7) - 0.5, seaNoise(n / 47.0 + 41.1) - 0.5) + 2.5 * vec2(seaNoise(n / 12.0 + 17.9) - 0.5, seaNoise(n / 14.0 + 29.3) - 0.5);
 }
 // And a fine one for the chop (waves under ~9 m): short waves are the least regular of all.
 vec2 seaFine(vec2 p) {
-  return 0.9 * vec2(seaNoise(p / 3.3 + 3.1) - 0.5, seaNoise(p / 2.9 + 8.4) - 0.5) + 0.35 * vec2(seaNoise(p / 1.1 + 6.7) - 0.5, seaNoise(p / 0.9 + 1.9) - 0.5);
+  vec2 n = p + uSeaNo.xy;
+  return 0.9 * vec2(seaNoise(n / 3.3 + 3.1) - 0.5, seaNoise(n / 2.9 + 8.4) - 0.5) + 0.35 * vec2(seaNoise(n / 1.1 + 6.7) - 0.5, seaNoise(n / 0.9 + 1.9) - 0.5);
+}
+// A plane point down and across the wind, where the foam's noise is laid (its own anchor too).
+vec2 seaDownwind(vec2 p) {
+  return vec2(dot(p, uSea2.xy), dot(p, vec2(-uSea2.y, uSea2.x))) + uSeaNo.zw;
 }
 // Smooth noise without the square cells value noise shows once it's cut at a threshold (foam's
 // lace, the surf): gradient noise, ~0..1.
@@ -511,7 +570,7 @@ void seaSurface(vec3 rel, vec2 p, vec4 J, float wpLim, float swellK) {
   // threshold's for that share of the sea); each a bright lacy patch, with older, thinner foam
   // round it; in a gale, streaks down the wind. All fade to their average where too fine to draw.
   vec2 wd = uSea2.xy;
-  vec2 q = vec2(dot(p, wd), dot(p, vec2(-wd.y, wd.x)));
+  vec2 q = seaDownwind(p);
   vec2 dq = vec2(seaReach(J, wd), seaReach(J, vec2(-wd.y, wd.x)));
   float L = clamp(uSea.x * uSea.x * 0.035, 2.0, 18.0);
   // (How well drawn: patches, their lace, the streaks across the wind.)

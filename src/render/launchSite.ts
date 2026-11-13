@@ -9,22 +9,11 @@
 
 import * as THREE from 'three';
 import { PAD, PAD2, type Trench } from '../sim/constants';
+import { FAR_SHADOW_GLSL, bindFarShadow } from './farShadows';
 import { M_PER_DEG_LAT, M_PER_DEG_LON } from './geo';
+import { SITE_EDGE, SITE_OUTLINE } from './siteOutline';
 
-/** Launch-site outline, (east, north) m, counter-clockwise. Traced over the imagery / OSM. */
-export const SITE_OUTLINE: [number, number][] = [
-  [-445, -18],
-  [-285, -18],
-  [-78, -22],
-  [-78, -82],
-  [130, -82],
-  [130, 118],
-  [60, 136],
-  [-55, 166],
-  [-200, 205],
-  [-334, 228],
-  [-445, 212],
-];
+export { SITE_OUTLINE };
 
 /** A pad's flame-trench opening in the ground, pad-local metres. */
 export interface TrenchOpening {
@@ -70,7 +59,7 @@ export function insideTrench(t: TrenchOpening, e: number, n: number): boolean {
 /** Top of the concrete above the pad ground level, m. */
 export const SLAB_TOP = 0.3;
 /** Width of the sloped fill edge around the slab, m. */
-const EDGE = 4;
+const EDGE = SITE_EDGE;
 const EDGE_DROP = 3;
 
 /** Render world (x = E, y = U, z = -N) from pad-local east/north/up. */
@@ -98,8 +87,10 @@ function concreteTexture(): { map: THREE.CanvasTexture; rough: THREE.CanvasTextu
   // Base tone per slab: pours differ slightly.
   for (let i = 0; i < TILE / SLAB; i++) {
     for (let j = 0; j < TILE / SLAB; j++) {
-      const v = 176 + Math.round((rnd() - 0.5) * 18);
-      g.fillStyle = `rgb(${v},${v - 2},${v - 6})`;
+      // (Warm and pale, as the site's concrete and compacted caliche are from the air; the pours
+      // nearly alike: at 18 levels apart and blue-grey it was a bathroom floor.)
+      const v = 190 + Math.round((rnd() - 0.5) * 8);
+      g.fillStyle = `rgb(${v},${v - 5},${v - 17})`;
       g.fillRect(i * SLAB * px, j * SLAB * px, SLAB * px, SLAB * px);
       const rv = 205 + Math.round((rnd() - 0.5) * 20);
       gr.fillStyle = `rgb(${rv},${rv},${rv})`;
@@ -128,7 +119,7 @@ function concreteTexture(): { map: THREE.CanvasTexture; rough: THREE.CanvasTextu
     g.fillRect(x - rad, y - rad, rad * 2, rad * 2);
   }
   // Tyre tracks: long faint strokes.
-  g.strokeStyle = 'rgba(40,38,36,0.06)';
+  g.strokeStyle = 'rgba(40,38,36,0.03)';
   for (let i = 0; i < 18; i++) {
     g.lineWidth = 6 + rnd() * 8;
     g.beginPath();
@@ -139,7 +130,7 @@ function concreteTexture(): { map: THREE.CanvasTexture; rough: THREE.CanvasTextu
     g.stroke();
   }
   // Sawn joints between slabs (dark, and rougher).
-  g.fillStyle = 'rgba(60,58,55,0.8)';
+  g.fillStyle = 'rgba(70,66,58,0.4)';
   gr.fillStyle = 'rgb(255,255,255)';
   for (let i = 0; i <= TILE / SLAB; i++) {
     const p = Math.round(i * SLAB * px);
@@ -164,7 +155,11 @@ export function createLaunchSite(): THREE.Group {
   const { map, rough } = concreteTexture();
   // Large-scale tone variation in world space so the tiling doesn't show from the air.
   const mat = new THREE.MeshStandardMaterial({ map, roughnessMap: rough, roughness: 0.95, metalness: 0 });
+  // (Each pad's mount, and which way its trench runs: in the render world's x, z.)
+  const pads = TRENCHES.map((t) => new THREE.Vector4(t.center[0], -t.center[1], t.axis[0], -t.axis[1]));
   mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uPads = { value: pads };
+    bindFarShadow(shader);
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nvarying vec2 vSiteXZ;')
       .replace('#include <uv_vertex>', '#include <uv_vertex>\nvSiteXZ = position.xz;');
@@ -173,6 +168,8 @@ export function createLaunchSite(): THREE.Group {
         '#include <common>',
         `#include <common>
         varying vec2 vSiteXZ;
+        uniform vec4 uPads[${TRENCHES.length}];
+        ${FAR_SHADOW_GLSL}
         float siteHash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
         float siteNoise(vec2 p) {
           vec2 i = floor(p), f = fract(p);
@@ -183,11 +180,49 @@ export function createLaunchSite(): THREE.Group {
       .replace(
         '#include <map_fragment>',
         `#include <map_fragment>
-        float big = 0.6 * siteNoise(vSiteXZ / 90.0) + 0.4 * siteNoise(vSiteXZ / 23.0 + 5.0);
-        diffuseColor.rgb *= 0.86 + 0.24 * big;`,
+        vec2 P = vSiteXZ;
+        // (How much ground a pixel spans, m: the fine grain and the tyre tracks fade to their
+        // average once finer than the pixels, not sparkle.)
+        float sitePx = max(length(dFdx(P)), length(dFdy(P)));
+        float fineK = 1.0 - smoothstep(0.25, 1.2, sitePx);
+        float trackK = 1.0 - smoothstep(0.6, 3.0, sitePx);
+        float big = 0.6 * siteNoise(P / 90.0) + 0.4 * siteNoise(P / 23.0 + 5.0);
+        // Round each pad: how far, and the soot. The exhaust comes out of both ends of the
+        // trench and fans out over the ground there; round the mount itself, years of grime.
+        float padD = 1e9;
+        float soot = 0.0;
+        for (int i = 0; i < ${TRENCHES.length}; i++) {
+          vec2 d = P - uPads[i].xy;
+          float u = dot(d, uPads[i].zw);
+          float v = dot(d, vec2(-uPads[i].w, uPads[i].z));
+          float r = length(d);
+          padD = min(padD, r);
+          float out2 = max(abs(u) - 40.0, 0.0);
+          float fan = step(40.0, abs(u)) * exp(-pow(v / (13.0 + 0.3 * out2), 2.0)) * exp(-out2 / 55.0);
+          soot = max(soot, max(0.85 * fan, 0.45 * exp(-r * r / 1500.0)));
+        }
+        // Compacted caliche away from the pads and the tank farm, in patches: paler, no joints,
+        // its tyre tracks; poured concrete elsewhere (the texture).
+        float patches = 0.6 * siteNoise(P / 55.0 + 3.0) + 0.4 * siteNoise(P / 17.0 + 9.0);
+        float gravel = smoothstep(0.4, 0.58, patches) * smoothstep(60.0, 115.0, padD);
+        vec3 caliche = vec3(0.6, 0.535, 0.41) * (0.9 + 0.2 * siteNoise(P / 3.1 + 1.0)) * mix(1.0, 0.88 + 0.24 * siteNoise(P * 2.3), fineK);
+        float track = siteNoise(vec2(P.x / 46.0 + 7.0, P.y / 1.3)) * 0.6 + 0.4 * siteNoise(vec2(P.x / 1.6, P.y / 38.0 + 3.0));
+        caliche *= 1.0 - 0.14 * smoothstep(0.52, 0.75, track) * trackK;
+        diffuseColor.rgb = mix(diffuseColor.rgb, caliche, gravel);
+        // Stains: where water stands and oil drips, darker blotches of every size.
+        float stain = siteNoise(P / 8.0 + 21.0) * siteNoise(P / 29.0 + 4.0);
+        diffuseColor.rgb *= 1.0 - 0.28 * smoothstep(0.3, 0.55, stain);
+        diffuseColor.rgb *= 0.88 + 0.22 * big;
+        diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(0.3, 0.29, 0.28), clamp(soot, 0.0, 0.85) * (0.65 + 0.35 * siteNoise(P / 5.0 + 13.0)));`,
+      )
+      .replace(
+        '#include <dithering_fragment>',
+        `#include <dithering_fragment>
+        // (The towers' and tanks' shadows where the shadow map doesn't reach: farShadows.ts.)
+        gl_FragColor.rgb *= 1.0 - farShadow(vec2(vSiteXZ.x, -vSiteXZ.y));`,
       );
   };
-  mat.customProgramCacheKey = () => 'site-concrete-v1';
+  mat.customProgramCacheKey = () => 'site-concrete-v3';
 
   // Slab top: the outline, UVs in world metres / TILE.
   const shape = new THREE.Shape(SITE_OUTLINE.map(([e, n]) => new THREE.Vector2(e, n)));
@@ -241,7 +276,7 @@ export function createLaunchSite(): THREE.Group {
   edge.setAttribute('position', new THREE.Float32BufferAttribute(edgePos, 3));
   edge.setAttribute('uv', new THREE.Float32BufferAttribute(edgeUv, 2));
   edge.computeVertexNormals();
-  const edgeMat = new THREE.MeshStandardMaterial({ color: 0xb8ad98, roughness: 1, metalness: 0, side: THREE.DoubleSide });
+  const edgeMat = new THREE.MeshStandardMaterial({ color: 0xc6baa0, roughness: 1, metalness: 0, side: THREE.DoubleSide });
 
   const slab = new THREE.Mesh(top, mat);
   slab.receiveShadow = true;

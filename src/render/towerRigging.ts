@@ -7,8 +7,8 @@
 //
 // Where it is (photos of the towers): all on the FRONT, the face toward the launch mount. The
 // falls hang outside that face, straight above the carriage, from the crown at the top, which
-// sits in a clad shroud that caps the tower and overhangs its front (an open steel frame, the
-// roof section's "appendage" of 2021, is kept as an option). The dead and fast lines go inside the
+// hangs in an open frame under the roof where it overhangs the tower's front (a bare girder
+// frame on the roof, the roof section's "appendage" of 2021, is kept as an option). The dead and fast lines go inside the
 // tower and leave it through the back face one section (Pad 1) or two (Pad 2) above the base.
 //
 // Sizes approximate (from photos). Built at runtime in the tower's (toppling) group, so the
@@ -30,10 +30,10 @@ const SHACKLE_H = 0.8;
 /** The carriage's header beam across the tower's front face (the block hangs the carriage by it), m. */
 const HEADER_H = 1.4;
 /**
- * Crown housing under the roof out front (height), how far the roof runs out past the tower's
- * front face, and its front edge's width as a fraction of the tower's (it tapers, 45 deg), m.
+ * The open frame under the roof out front that carries the crown block (its depth), and how far
+ * the roof runs out past the tower's front face, m.
  */
-const CROWN_H = 8;
+const CROWN_H = 3.2;
 const CROWN_OUT = 6;
 /**
  * The roof's plan (tower standing corner-on to the mount): it keeps the tower's back and side
@@ -42,13 +42,13 @@ const CROWN_OUT = 6;
  */
 const ROOF_PULL = 0.45;
 const ROOF_TIP_CLIP = 1.5;
-/** Kit lattice section pitch, m (for where the lines leave the tower). */
-const SECTION = 18.3;
+/** The lattice's section pitch (two bays), m (for where the lines leave the tower). */
+const SECTION = 14.2;
 
 export interface RiggingSpec {
   /** Rope passes between the blocks (lines = 2 x passes). */
   passes: number;
-  /** A clad shroud over the tower top, or the open steel frame (Pad 1's roof section in 2021). */
+  /** The roof with the crown hung in a frame under its nose, or the bare girders of Pad 1's roof section in 2021. */
   housing: boolean;
   /** Tower sections above the base where the fast and dead lines leave the tower. */
   exitSection: number;
@@ -101,15 +101,18 @@ export class TowerRigging {
     // segment and the base are wider).
     const topBox = new THREE.Box3();
     {
-      const m = tower as THREE.Mesh;
-      const pos = m.geometry.getAttribute('position');
+      // (Every mesh of it: the bracing, and the columns that ride with it.)
       const v = new THREE.Vector3();
       tower.updateMatrixWorld(true);
-      for (let i = 0; i < pos.count; i++) {
-        v.fromBufferAttribute(pos, i).applyMatrix4(tower.matrixWorld);
-        fall.worldToLocal(v);
-        if (v.y > towerBox.max.y - 40 && v.y < towerBox.max.y - 20) topBox.expandByPoint(v);
-      }
+      tower.traverse((o) => {
+        if (!(o instanceof THREE.Mesh)) return;
+        const pos = o.geometry.getAttribute('position');
+        for (let i = 0; i < pos.count; i++) {
+          v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld);
+          fall.worldToLocal(v);
+          if (v.y > towerBox.max.y - 40 && v.y < towerBox.max.y - 20) topBox.expandByPoint(v);
+        }
+      });
     }
     const frameBox = local(frame);
     const towerC = topBox.getCenter(new THREE.Vector3());
@@ -133,7 +136,6 @@ export class TowerRigging {
     const width = (n - 1) * SHEAVE_PITCH;
     const steel = new THREE.MeshStandardMaterial({ color: 0x55595e, metalness: 0.8, roughness: 0.45 });
     const dark = new THREE.MeshStandardMaterial({ color: 0x2b2d30, metalness: 0.7, roughness: 0.5 });
-    const cladding = new THREE.MeshStandardMaterial({ color: 0x9a9da1, metalness: 0.6, roughness: 0.5 });
     const rope = new THREE.MeshStandardMaterial({ color: 0x232426, metalness: 0.6, roughness: 0.5 });
     const sheaveGeo = new THREE.CylinderGeometry(SHEAVE_D / 2, SHEAVE_D / 2, 0.16, 24);
     sheaveGeo.rotateZ(Math.PI / 2);
@@ -147,7 +149,7 @@ export class TowerRigging {
     // --- Crown: sheaves at the top of the front face, in a housing or on an open frame ---------
     const fallsOut = half + FALLS_OUT;
     // (Under the housing the crown block hangs below its platform.)
-    this.crownAxle = at(fallsOut, spec.housing ? top - CROWN_H - 0.9 : top + 2.4, hs);
+    this.crownAxle = at(fallsOut, spec.housing ? top - CROWN_H + 1.0 : top + 2.4, hs);
     const crown = new THREE.Group();
     crown.position.copy(at(0, top));
     this.group.add(crown);
@@ -175,23 +177,34 @@ export class TowerRigging {
         geo.translate(0, y0, 0);
         return new THREE.Mesh(geo, mat);
       };
-      crown.add(prism(housingOutline, -CROWN_H, 0, cladding));
       crown.add(prism(roofOutline, 0, 0.25, dark));
-      // Ribs up the housing's outer walls (its first three edges; the last two run inside the tower).
+      // Under the nose, an open frame the depth of the crown block (no cladding: the long-lens
+      // photo of the Flight 5 catch and the close ones of 2023 show sky through the tower's top,
+      // and no box on it): a bottom chord round the nose's three outer edges, posts down to it,
+      // a diagonal in each panel.
+      const frameSteel = new THREE.MeshStandardMaterial({ color: 0x6f7378, metalness: 0.7, roughness: 0.5 });
+      const strut = (a: THREE.Vector3, b: THREE.Vector3, size: number) => {
+        const d = b.clone().sub(a);
+        const m = new THREE.Mesh(new THREE.BoxGeometry(size, d.length(), size), frameSteel);
+        m.position.copy(a).add(b).multiplyScalar(0.5);
+        m.quaternion.setFromUnitVectors(this.up, d.normalize());
+        crown.add(m);
+      };
       for (let i = 0; i < 3; i++) {
         const [x0, z0] = housingOutline[i];
         const [x1, z1] = housingOutline[i + 1];
         const len = Math.hypot(x1 - x0, z1 - z0);
-        const n = Math.max(1, Math.round(len / 1.1));
+        const n = Math.max(1, Math.round(len / 3.2));
+        const at2 = (k: number, y: number) => new THREE.Vector3(x0 + ((x1 - x0) * k) / n, y, z0 + ((z1 - z0) * k) / n);
+        strut(at2(0, -CROWN_H), at2(n, -CROWN_H), 0.4);
         for (let k = 0; k <= n; k++) {
-          const r = new THREE.Mesh(new THREE.BoxGeometry(0.14, CROWN_H, 0.14), dark);
-          r.position.set(x0 + ((x1 - x0) * k) / n, -CROWN_H / 2, z0 + ((z1 - z0) * k) / n);
-          crown.add(r);
+          strut(at2(k, 0), at2(k, -CROWN_H), 0.3);
+          if (k < n) strut(at2(k, k % 2 ? -CROWN_H : 0), at2(k + 1, k % 2 ? 0 : -CROWN_H), 0.22);
         }
-        const band = new THREE.Mesh(new THREE.BoxGeometry(len, 0.4, 0.25), steel);
-        band.position.set((x0 + x1) / 2, -CROWN_H + 0.2, (z0 + z1) / 2);
-        band.rotation.y = Math.atan2(-(z1 - z0), x1 - x0);
-        crown.add(band);
+      }
+      // (And across under it, the two beams the crown block's axle hangs from.)
+      for (const sx of [-1, 1]) {
+        strut(new THREE.Vector3(hs + sx * (width / 2 + 0.6), -CROWN_H, half - 1.5), new THREE.Vector3(hs + sx * (width / 2 + 0.6), -CROWN_H, zClip), 0.45);
       }
       // The roof's beam grid (light grey steel): the perimeter, beams both ways every ~3 m
       // clipped to the outline, and X bracing in the whole bays.
@@ -245,8 +258,6 @@ export class TowerRigging {
           }
         }
       }
-      // Its underside: a grating deck the crown block hangs through.
-      crown.add(prism(housingOutline, -CROWN_H - 0.25, -CROWN_H, dark));
     } else {
       // Open steel frame: girders on the roof section, cantilevered over the front, with struts.
       for (const s of [-1, 1]) {
