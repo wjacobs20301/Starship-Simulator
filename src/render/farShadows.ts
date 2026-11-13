@@ -44,7 +44,10 @@ float farShadow(vec2 en) {
   if (uFarShadowK <= 0.0) return 0.0;
   vec2 uv = (en - uFarShadowRect.xy) * uFarShadowRect.zw;
   if (uv.x <= 0.0 || uv.y <= 0.0 || uv.x >= 1.0 || uv.y >= 1.0) return 0.0;
-  float s = texture2D(uFarShadow, uv).r;
+  // (Four taps half a texel apart: an edge a couple of metres soft, as a tall thing's is by the
+  // time it reaches the ground, not the map's own stairs.)
+  vec2 h = vec2(${(0.5 / SIZE[0]).toFixed(7)}, ${(0.5 / SIZE[1]).toFixed(7)});
+  float s = 0.25 * (texture2D(uFarShadow, uv + h).r + texture2D(uFarShadow, uv - h).r + texture2D(uFarShadow, uv + vec2(h.x, -h.y)).r + texture2D(uFarShadow, uv + vec2(-h.x, h.y)).r);
   if (uFarShadowNear.z > 0.0) s *= smoothstep(0.88, 1.0, length(en - uFarShadowNear.xy) / uFarShadowNear.z);
   return s * uFarShadowK;
 }`;
@@ -63,6 +66,10 @@ const target = new THREE.WebGLRenderTarget(SIZE[0], SIZE[1], {
   magFilter: THREE.LinearFilter,
   generateMipmaps: true,
   depthBuffer: false,
+  // (Each texel the share of it in shadow, from four points in it. With one, a mast's shadow,
+  // narrower than a texel, fell on some texels' middles and missed others': a row of dots; a
+  // tower's lattice was specks, and every edge a staircase.)
+  samples: 4,
 });
 const camera = new THREE.OrthographicCamera(-RECT.w / 2, RECT.w / 2, RECT.h / 2, -RECT.h / 2, 1, 4000);
 const flat = new THREE.ShaderMaterial({
@@ -76,6 +83,11 @@ const flat = new THREE.ShaderMaterial({
       m = m * instanceMatrix;
       #endif
       vec4 wp = m * vec4(position, 1.0);
+      // (Each thing a third of a metre stouter: a floodlight mast is under half a texel wide, and
+      // its shadow, a real one a dark line across the concrete, came out a faint smear.)
+      vec3 out3 = mat3(m) * normal;
+      float ol = length(out3);
+      if (ol > 1e-5) wp.xyz += out3 * (0.35 / ol);
       // (Down the sun's rays to the ground: where this point's shadow falls.)
       wp.xz -= uSlide * max(wp.y - uGround, 0.0);
       wp.y = uGround;
