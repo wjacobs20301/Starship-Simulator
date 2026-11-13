@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildGlobeGeometry, buildTerrainGeometry, tileHeights } from '../src/render/tileGeometry';
+import { buildGlobeGeometry, buildTerrainGeometry, tileHeights, DEM_MARGIN, cleanDem, demCellSize } from '../src/render/tileGeometry';
 import { toWorld, tileXToLon, tileYToLat } from '../src/render/geo';
 import type { FromTileWorker, TerrainTileJob, TileJob, ToTileWorker } from '../src/worker/tileProtocol';
 import { decodeBc1, psnr } from './bc1Reference';
@@ -119,7 +119,8 @@ describe('tile worker', () => {
     const { msg } = await worker.send(job);
     if (!msg.ok || msg.result.kind !== 'terrain') throw new Error('no tile');
     const r = msg.result;
-    const heights = tileHeights(job.shape, DEM, job.dem!.at, G);
+    // (The DEM tile made ready first, as the worker does: with no neighbours known, here.)
+    const heights = tileHeights(job.shape, cleanDem(DEM, [], G, demCellSize(job.dem!.at, G)), job.dem!.at, G, DEM_MARGIN);
     expect([...r.heights]).toEqual([...heights]);
     const geo = buildTerrainGeometry(job.shape, heights);
     for (const k of Object.keys(geo) as (keyof typeof geo)[]) expect([...r.geometry[k]], k).toEqual([...geo[k]]);

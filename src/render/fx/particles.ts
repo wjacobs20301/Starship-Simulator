@@ -59,7 +59,11 @@ const vertex = /* glsl */ `
   varying float vSeed;
   varying vec3 vWorld;
   varying float vAge;
+  varying vec3 vTurn;
+  varying float vHigh;
   void main() {
+    vTurn = vec3(1.0, 0.0, 0.0);
+    vHigh = 1.0;
     float age = uTime - aTime.x;
     float life = aTime.y;
     int kind = int(aKind.x + 0.5);
@@ -98,12 +102,16 @@ const vertex = /* glsl */ `
       mv.xy += across * c.x * wide * 0.6 + along * c.y * (size + sl * streak);
     } else {
       float rot = aKind.y * 6.2832 + age * (aKind.y - 0.5) * 0.3;
-      c = vec2(c.x * cos(rot) - c.y * sin(rot), c.x * sin(rot) + c.y * cos(rot));
+      vTurn.xy = vec2(cos(rot), sin(rot));
+      c = vec2(c.x * vTurn.x - c.y * vTurn.y, c.x * vTurn.y + c.y * vTurn.x);
       mv.xy += c * size;
     }
     gl_Position = projectionMatrix * mv;
     #include <logdepthbuf_vertex>
     vUv = position.xy + 0.5;
+    vTurn.z = f;
+    // (How high in its cloud, for one on the ground: 0 at the ground, 1 a few puffs up.)
+    if (uGround > 0.5) vHigh = clamp(p.y / max(2.5 * size, 20.0), 0.0, 1.0);
     vAlpha = dl.z * smoothstep(0.0, 0.08, f) * (1.0 - smoothstep(0.55, 1.0, f));
     // Water that has come down onto the ground is spent: only a faint splash remains.
     if (landed && streak > 0.0) vAlpha *= 0.25;
@@ -132,6 +140,9 @@ const fragment = /* glsl */ `
   varying vec3 vWorld;
   varying float vAge;
   varying float vStreak;
+  // (The puff's turn on the screen: cos, sin; how far through its life it is.)
+  varying vec3 vTurn;
+  varying float vHigh;
   void main() {
     #include <logdepthbuf_fragment>
     int kind = int(vKind + 0.5);
@@ -155,14 +166,32 @@ const fragment = /* glsl */ `
       gl_FragColor = vec4(col, a);
       return;
     }
-    // One of four puff shapes in a 2x2 atlas.
+    // One of four puff shapes in a 2x2 atlas, either way round.
     vec2 cell = vec2(step(0.5, fract(vSeed * 7.13)), step(0.5, fract(vSeed * 3.71)));
-    vec4 puff = texture2D(uPuff, (vUv + cell) * 0.5);
-    float a = puff.a * vAlpha;
+    float flip = step(0.5, fract(vSeed * 13.37));
+    vec2 puv = vec2(mix(vUv.x, 1.0 - vUv.x, flip), vUv.y);
+    vec4 puff = texture2D(uPuff, (puv + cell) * 0.5);
+    // It thins from its edges inward as it ages, the lumps of its middle the last to go: breaking
+    // up into wisps, not one round shape fading all at once.
+    float gone = 0.5 * pow(vTurn.z, 1.8);
+    float a = puff.a * smoothstep(gone, gone + 0.3, puff.b + 0.05) * vAlpha;
     if (a < 0.004) discard;
-    // Cheap volume lighting: the puff's baked normal-ish shading (g channel) toward the sun.
-    float lit = mix(0.55, 1.0, puff.g) * (0.6 + 0.4 * uSunDir.y);
-    vec3 col = uColor[kind] * (uAmbient + uSunColor * lit);
+    // Lit as the lumpy thing it is: its surface's slope (the texture's, turned as the puff is)
+    // against the sun, as the camera sees it. Sunlit on the sun's side, in its own shade on the
+    // other; the sky lights the rest, more from above. (No glow at its thin edges with the sun
+    // behind: that drew a bright line round every puff, each one cut out of the cloud.)
+    vec3 n = vec3(puff.rg * 2.0 - 1.0, 0.0);
+    n.x *= 1.0 - 2.0 * flip;
+    n.xy = vec2(n.x * vTurn.x - n.y * vTurn.y, n.x * vTurn.y + n.y * vTurn.x);
+    n.z = sqrt(max(0.04, 1.0 - dot(n.xy, n.xy)));
+    vec3 sunV = normalize(mat3(viewMatrix) * uSunDir);
+    vec3 upV = normalize(mat3(viewMatrix) * vec3(0.0, 1.0, 0.0));
+    float facing = clamp((dot(n, sunV) + 0.45) / 1.45, 0.0, 1.0);
+    // (And as part of its cloud: down among the others little sun gets in, and less sky.)
+    float deep = mix(0.55, 1.0, vHigh);
+    float lit = mix(0.5, 1.0, facing) * deep * (0.6 + 0.4 * max(uSunDir.y, 0.0));
+    float sky = (0.88 + 0.12 * dot(n, upV)) * mix(0.8, 1.0, vHigh);
+    vec3 col = uColor[kind] * (uAmbient * sky + uSunColor * lit) * mix(1.0, 0.9, smoothstep(0.55, 0.95, puff.b));
     // Orange glow from nearby running engines.
     vec3 glow = vec3(0.0);
     for (int i = 0; i < 2; i++) {
@@ -174,42 +203,83 @@ const fragment = /* glsl */ `
   }
 `;
 
-/** Four soft, lumpy puffs in a 2x2 atlas: alpha = density, g = top-lit shading. */
+/**
+ * Four puffs in a 2x2 atlas: billowing smoke, not a ball. a: how thick it is; b: how deep into
+ * it (the lumps of its middle high, its wisps low: what's left as it thins); r, g: its surface's
+ * slope across and up (0.5: facing the camera), to light it by.
+ *
+ * (They were clusters of round blobs shaded from the top: lit the same from every side and all
+ * of a shape, a launch's exhaust was a pile of cotton wool.)
+ */
 function puffTexture(): THREE.DataTexture {
-  const N = 128;
+  const N = 256;
   const W = N * 2;
   const data = new Uint8Array(W * W * 4);
-  let seed = 7;
-  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  // Smooth noise on a lattice of hashed values, and sums of it.
+  const hash = (x: number, y: number, s: number): number => {
+    let h = (x * 374761393 + y * 668265263 + s * 2147483629) | 0;
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  };
+  const noise = (x: number, y: number, s: number): number => {
+    const xi = Math.floor(x), yi = Math.floor(y);
+    const fx = x - xi, fy = y - yi;
+    const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
+    const a = hash(xi, yi, s), b = hash(xi + 1, yi, s), c = hash(xi, yi + 1, s), d = hash(xi + 1, yi + 1, s);
+    return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+  };
+  /** Billows: rounded lumps, finer ones on the larger. */
+  const billow = (x: number, y: number, s: number): number => {
+    let sum = 0, amp = 0.5, f = 1;
+    for (let o = 0; o < 5; o++) {
+      // (Rounded: creased where two lumps meet, it lit like crumpled paper.)
+      const v = noise(x * f, y * f, s + o * 17);
+      sum += amp * v * v * (3 - 2 * v);
+      amp *= 0.5;
+      f *= 2.03;
+    }
+    return sum / 0.96875;
+  };
+  const height = new Float32Array(N * N);
   for (let cell = 0; cell < 4; cell++) {
-    // Each puff is a cluster of soft blobs.
-    const blobs = Array.from({ length: 14 }, () => {
-      const a = rnd() * Math.PI * 2;
-      const r = Math.sqrt(rnd()) * 0.26;
-      return { x: 0.5 + r * Math.cos(a), y: 0.5 + r * Math.sin(a), s: 0.1 + rnd() * 0.14 };
-    });
     const ox = (cell % 2) * N;
     const oy = Math.floor(cell / 2) * N;
+    const seed = 101 + cell * 37;
     for (let j = 0; j < N; j++) {
       for (let i = 0; i < N; i++) {
-        const u = (i + 0.5) / N;
-        const v = (j + 0.5) / N;
-        let d = 0;
-        let top = 0;
-        for (const b of blobs) {
-          const q = ((u - b.x) ** 2 + (v - b.y) ** 2) / (b.s * b.s);
-          const w = Math.exp(-q * 2);
-          d += w;
-          // Lit side: the part of each blob facing +v (texture v up = world up).
-          top += w * (0.5 + 0.5 * Math.max(-1, Math.min(1, (v - b.y) / b.s)));
+        const x = ((i + 0.5) / N) * 2 - 1;
+        const y = ((j + 0.5) / N) * 2 - 1;
+        // (Its outline pushed in and out, so no two are round the same way.)
+        const wx = x + 0.4 * (noise(x * 1.7 + 3, y * 1.7, seed + 5) - 0.5);
+        const wy = y + 0.4 * (noise(x * 1.7, y * 1.7 + 9, seed + 6) - 0.5);
+        const r = Math.hypot(wx, wy);
+        const body = 1 - THREE.MathUtils.smoothstep(r, 0.0, 0.98);
+        height[j * N + i] = body * (0.6 + 0.4 * billow(x * 2.2 + 11, y * 2.2 + 7, seed));
+      }
+    }
+    for (let j = 0; j < N; j++) {
+      for (let i = 0; i < N; i++) {
+        const x = ((i + 0.5) / N) * 2 - 1;
+        const y = ((j + 0.5) / N) * 2 - 1;
+        const h = height[j * N + i];
+        const hx = height[j * N + Math.min(N - 1, i + 1)] - height[j * N + Math.max(0, i - 1)];
+        const hy = height[Math.min(N - 1, j + 1) * N + i] - height[Math.max(0, j - 1) * N + i];
+        // (The slope of its lumps, on a ball's: facing out toward its rim.)
+        let nx = -hx * N * 0.04 + 0.3 * x;
+        let ny = -hy * N * 0.04 + 0.3 * y;
+        const nl = Math.hypot(nx, ny);
+        if (nl > 0.96) {
+          nx *= 0.96 / nl;
+          ny *= 0.96 / nl;
         }
-        const edge = Math.max(0, 1 - ((u - 0.5) ** 2 + (v - 0.5) ** 2) / 0.25);
-        const alpha = Math.min(1, d * 0.55) * edge;
+        // (Nothing at the quad's edge, whatever the noise says.)
+        const rim = 1 - THREE.MathUtils.smoothstep(Math.hypot(x, y), 0.82, 0.99);
         const k = ((oy + j) * W + ox + i) * 4;
-        data[k] = 255;
-        data[k + 1] = Math.round(255 * Math.min(1, d > 0 ? top / d : 0));
-        data[k + 2] = 255;
-        data[k + 3] = Math.round(255 * alpha);
+        data[k] = Math.round(255 * (nx * 0.5 + 0.5));
+        data[k + 1] = Math.round(255 * (ny * 0.5 + 0.5));
+        data[k + 2] = Math.round(255 * Math.min(1, h * 1.15));
+        // (Thick only well inside: a soft edge, so a crowd of them is one cloud and not a pile.)
+        data[k + 3] = Math.round(255 * THREE.MathUtils.smoothstep(h, 0.02, 0.58) * rim);
       }
     }
   }

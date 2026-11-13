@@ -9,7 +9,11 @@ export interface TerrainTileJob {
   kind: 'terrain';
   shape: TerrainTileShape;
   /** The DEM tile its heights come from (its own or an ancestor's), or null: open sea, 0 m. */
-  dem: { url: string; at: TileId; grid: number } | null;
+  /**
+   * (ring: the eight DEM tiles round that one, by rows from the north-west, null where there's
+   * none: its water is cleaned and its shores smoothed with them in view. Left out: none known.)
+   */
+  dem: { url: string; at: TileId; grid: number; ring?: (string | null)[] } | null;
   /** Its image to compress (address), or null: none, or the page loads it itself (uncompressed). */
   image: string | null;
 }

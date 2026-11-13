@@ -607,7 +607,7 @@ export class Terrain {
    * The DEM tile a tile's heights come from: its own, or (finer than the DEM goes, or none there)
    * the nearest ancestor's. null: none above it (open sea, 0 m).
    */
-  private demFor(t: Tile): { url: string; at: TileId; grid: number } | null {
+  private demFor(t: Tile): { url: string; at: TileId; grid: number; ring: (string | null)[] } | null {
     let zd = Math.min(t.z, this.index.demMaxZoom);
     let dx = t.x >> (t.z - zd);
     let dy = t.y >> (t.z - zd);
@@ -618,7 +618,12 @@ export class Terrain {
       dy >>= 1;
     }
     if (zd < this.index.minZoom) return null;
-    return { url: `${BASE}dem/${zd}/${dx}/${dy}.bin`, at: { z: zd, x: dx, y: dy }, grid: this.index.demGrid };
+    // (And the tiles round it, for the worker to clean its water with: tileGeometry.ts, cleanDem.)
+    const ring: (string | null)[] = [];
+    for (let oy = -1; oy <= 1; oy++) {
+      for (let ox = -1; ox <= 1; ox++) if (ox || oy) ring.push(this.has('dem', zd, dx + ox, dy + oy) ? `${BASE}dem/${zd}/${dx + ox}/${dy + oy}.bin` : null);
+    }
+    return { url: `${BASE}dem/${zd}/${dx}/${dy}.bin`, at: { z: zd, x: dx, y: dy }, grid: this.index.demGrid, ring };
   }
 
   /**

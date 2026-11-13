@@ -4,32 +4,50 @@
 // of this ran between frames, a dozen tiles at a time while the ground streamed in.
 
 import { type Bc1Image, bc1Sizes, encodeBc1Mipmaps } from '../render/bc1';
-import { buildGlobeGeometry, buildTerrainGeometry, flatHeights, tileHeights } from '../render/tileGeometry';
-import type { FromTileWorker, TileJob, TileResult, ToTileWorker } from './tileProtocol';
+import { DEM_MARGIN, buildGlobeGeometry, buildTerrainGeometry, cleanDem, demCellSize, flatHeights, tileHeights } from '../render/tileGeometry';
+import type { FromTileWorker, TerrainTileJob, TileJob, TileResult, ToTileWorker } from './tileProtocol';
 
 // --- Heights -------------------------------------------------------------------------------
 
 /**
- * DEM tiles lately fetched (33 kB each): the finest tiles all take their heights from the same
- * few. (Each worker has its own; the page sends tiles sharing a DEM tile to the same worker.)
+ * DEM tiles lately fetched (33 kB each) and made ready (cleanDem: each with its neighbours, so
+ * most are fetched for several): the finest tiles all take their heights from the same few.
+ * (Each worker has its own; the page sends tiles sharing a DEM tile to the same worker.)
  */
+const rawCache = new Map<string, Promise<Int16Array | null>>();
 const demCache = new Map<string, Promise<Int16Array | null>>();
+const RAW_CACHE = 320;
 const DEM_CACHE = 160;
 
-function dem(url: string): Promise<Int16Array | null> {
-  let p = demCache.get(url);
+/** Kept in a cache while it's being fetched and after, unless it failed: then it's tried again. */
+function cached(cache: Map<string, Promise<Int16Array | null>>, max: number, key: string, make: () => Promise<Int16Array | null>): Promise<Int16Array | null> {
+  let p = cache.get(key);
   if (!p) {
-    p = fetch(url)
-      .then((r) => (r.ok ? r.arrayBuffer() : null))
-      .then((b) => (b ? new Int16Array(b) : null));
-    demCache.set(url, p);
-    // (One that failed isn't kept: the tile is tried again, and so must the fetch be.)
+    p = make();
+    cache.set(key, p);
     p.catch(() => {
-      if (demCache.get(url) === p) demCache.delete(url);
+      if (cache.get(key) === p) cache.delete(key);
     });
-    if (demCache.size > DEM_CACHE) demCache.delete(demCache.keys().next().value!);
+    if (cache.size > max) cache.delete(cache.keys().next().value!);
   }
   return p;
+}
+
+/** A DEM tile as it is on the server (null: none there). */
+function rawDem(url: string, grid: number): Promise<Int16Array | null> {
+  return cached(rawCache, RAW_CACHE, url, () =>
+    fetch(url)
+      .then((r) => (r.ok ? r.arrayBuffer() : null))
+      .then((b) => (b && b.byteLength === grid * grid * 2 ? new Int16Array(b) : null)),
+  );
+}
+
+/** A DEM tile ready for the meshes (tileGeometry.ts, cleanDem), DEM_MARGIN cells of margin round it. */
+function dem(d: NonNullable<TerrainTileJob['dem']>): Promise<Int16Array | null> {
+  return cached(demCache, DEM_CACHE, d.url, async () => {
+    const [centre, ...ring] = await Promise.all([rawDem(d.url, d.grid), ...(d.ring ?? []).map((u) => (u ? rawDem(u, d.grid) : null))]);
+    return centre ? cleanDem(centre, ring, d.grid, demCellSize(d.at, d.grid)) : null;
+  });
 }
 
 // --- Imagery -------------------------------------------------------------------------------
@@ -113,7 +131,7 @@ async function build(job: TileJob): Promise<TileResult> {
   // (The image's failure is the tile's, but not unhandled while the heights are waited for.)
   image?.catch(() => {});
   const d = job.dem;
-  const heights = d ? tileHeights(job.shape, await dem(d.url), d.at, d.grid) : flatHeights();
+  const heights = d ? tileHeights(job.shape, await dem(d), d.at, d.grid, DEM_MARGIN) : flatHeights();
   const img = await image;
   return { kind: 'terrain', heights, geometry: buildTerrainGeometry(job.shape, heights), image: img, imageSkipped: !!job.image && !img };
 }
