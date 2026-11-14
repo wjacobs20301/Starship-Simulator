@@ -81,7 +81,7 @@ export class ReturnPanel {
           : `<div class="rt-buttons">` +
             (warpTo?.target === 'next'
               ? `<button data-act="stopwarp" class="warping">■ Stop warp · ${fmt(warpTo.at - s.t)} to go</button>`
-              : s.waitUntil !== null && s.waitUntil - s.t > 60
+              : s.waitUntil !== null && s.waitUntil - s.t > 20
                 ? `<button data-act="warp">⏩ Warp to ${r.phase === 'burn' ? 'next burn' : 'entry'} (${fmt(s.waitUntil - s.t)})</button>`
                 : '') +
             `<button data-act="cancel">✕ Cancel</button></div>`);

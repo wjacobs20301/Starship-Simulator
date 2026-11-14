@@ -135,6 +135,55 @@ describe('ship return from an orbit the player flew', () => {
     expect(ship.status).toBe('caught');
   });
 
+  it('a warp ahead to the next burn runs to ten seconds before it, the ship lined up, with no stop on the way', { timeout: 300_000 }, () => {
+    const sim = new Simulation();
+    sim.launch();
+    while (sim.mission.phase !== 'coast') sim.step();
+    orbit(200, 200, 26.5, 180, 40)(sim);
+    sim.commandReturn({ kind: 'tower', pad: -1 });
+    const ship = sim.find('ship')!;
+    const burnIn = () => {
+      const n = sim.nodeSnapshot()!;
+      return n.t - n.burnTime / 2 - sim.t;
+    };
+    // As the game's warp-to does it (worker/sim.worker.ts): toward waitUntil as fast as the time
+    // left allows, on rails where they're allowed, until two seconds short of it.
+    const warpTo = () => {
+      for (let i = 0; i < 3e6; i++) {
+        const left = sim.waitUntil === null ? 0 : sim.waitUntil - sim.t;
+        if (left <= 2) return;
+        if (left > 75 && sim.railsAllowed()) sim.railsStep(Math.min(left - 60, 2000));
+        else sim.step();
+      }
+    };
+    // Every burn on the way home (a phasing burn or two, then the deorbit burn, with its
+    // touch-up ten minutes ahead, which used to end the warp eleven minutes out).
+    let burns = 0;
+    while (sim.mission.shipReturn?.phase === 'burn' && burns < 6) {
+      // (A moment for the autopilot to say what it's waiting for; propellant it won't need goes
+      // overboard first, at normal speed.)
+      for (let i = 0; i < 200_000 && (i < 50 || /^venting/.test(sim.mission.shipReturn.status)); i++) sim.step();
+      const far = burnIn();
+      if (far > 120) {
+        warpTo();
+        const left = burnIn();
+        expect(left, sim.mission.shipReturn.status).toBeGreaterThan(5);
+        expect(left, sim.mission.shipReturn.status).toBeLessThan(14);
+        // Pointed along the burn: it lights on time.
+        expect(sim.burnLead()).toBe(10);
+      }
+      burns++;
+      const before = sim.events.length;
+      for (let i = 0; i < 60_000 && sim.node && sim.mission.shipReturn?.phase === 'burn'; i++) sim.step();
+      // (On to the next burn's wait.)
+      for (let i = 0; i < 300 && !sim.node && sim.mission.shipReturn?.phase === 'burn'; i++) sim.step();
+      expect(sim.events.length).toBeGreaterThan(before);
+    }
+    expect(burns).toBeGreaterThan(0);
+    expect(sim.events.some((e) => /burns complete/.test(e.text))).toBe(true);
+    expect(ship.status).toBe('flight');
+  });
+
   it('a refusal says why, for the return panel', { timeout: 60_000 }, () => {
     const sim = new Simulation();
     sim.launch();

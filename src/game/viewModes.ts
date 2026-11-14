@@ -2,7 +2,7 @@
 // and the auto camera (render/director.ts) cutting between shots. (Moved out of main.ts: its
 // startReplay / endReplay, startPhoto / endPhoto, runDirector / stopDirector and the keys for them.)
 
-import type { CameraRig } from '../render/cameras';
+import { type CameraRig, SAT_CAMERA_AGE } from '../render/cameras';
 import type { Director } from '../render/director';
 import type { World } from '../render/scene';
 import type { Snapshot } from '../sim/simulation';
@@ -130,7 +130,7 @@ export function createViewModes(deps: ViewModesDeps): ViewModes {
       })),
       events: directorEvents.splice(0),
       door: !!snap.payload && (snap.payload.door ?? 0) > 0.5,
-      sats: !!snap.payload?.sats.length,
+      sats: !!snap.payload?.sats.some((x) => x.age > SAT_CAMERA_AGE),
       manual: deps.manual(),
       tracked: deps.tracked(),
     });

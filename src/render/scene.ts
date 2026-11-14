@@ -7,6 +7,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import type { V3 } from '../sim/math';
+import { armSwing } from '../sim/padCollision';
 import { SceneAtmospherePass } from './atmosphere';
 import { AutoExposurePass } from './exposure';
 import { StarSky } from './stars';
@@ -131,7 +132,6 @@ export interface TowerView {
 
 /** How far a wrecked arm sags off its hinge, and how far a felled tower goes over, rad. */
 const ARM_SAG = THREE.MathUtils.degToRad(62);
-const UP = new THREE.Vector3(0, 1, 0);
 const TOWER_FALL = THREE.MathUtils.degToRad(84);
 
 interface ArmRig {
@@ -221,18 +221,16 @@ export class PadRig {
       const state = towers[i] ?? { offset: 0, angle: 28 };
       rig.carriage.position.y = rig.home + state.offset;
       rig.rigging.update();
-      const a = THREE.MathUtils.degToRad(state.angle);
-      const slew = THREE.MathUtils.degToRad(state.slew ?? 0);
       // A wrecked arm sags off its hinge (quickly, with a little overshoot-free easing).
       const pose = (arm: ArmRig, hinge: number, broken: boolean) => {
         arm.sag = broken ? arm.sag + (ARM_SAG - arm.sag) * Math.min(1, dt * 2.5) : 0;
         arm.pivot.pose(hinge, this.tmpQ.setFromAxisAngle(arm.sagAxis, arm.sag));
       };
-      // Each arm swings on its own hinge; a slew carries both, hinges and all, round the
-      // carriage's centre (as the sim has it: padCollision.ts armColumns).
-      for (const arm of [rig.left, rig.right]) arm.pivot.node.position.copy(arm.home).applyAxisAngle(UP, slew);
-      pose(rig.left, a + slew, !!state.broken?.L);
-      pose(rig.right, -a + slew, !!state.broken?.R);
+      // Each arm swings on its own hinge, fixed to the carriage; swung to one side, both turn
+      // that way, each by what keeps it against the vehicle (as the sim has it: padCollision.ts
+      // armSwing).
+      pose(rig.left, armSwing(i, 'L', state.angle, state.slew ?? 0), !!state.broken?.L);
+      pose(rig.right, armSwing(i, 'R', state.angle, state.slew ?? 0), !!state.broken?.R);
       // The ship QD arm: swung by the sim; bent down off its hinge when a vehicle wrecks it.
       pose(rig.qd, THREE.MathUtils.degToRad(state.qd ?? 0), !!state.qdBroken);
       // A felled tower goes over like a falling mast: slowly at first, then faster.

@@ -118,6 +118,14 @@ const HOVER_FAR = 15;
 const HOVER_CLOSE_SPEED = 6;
 /** Clearance kept between the booster's base and the arms' rails while outside the corridor, m. */
 const ARMS_CLEARANCE = 5;
+/** The catch fittings wait this far above the rails until the arms have closed on the hull, m. */
+const RAIL_WAIT = 2;
+/** The arms' opening as they wait for a booster on its landing burn, deg (each ~8 m clear of where the hull comes down). */
+const CATCH_READY_DEG = 40;
+/** How far a booster the closed arms hold may lean and still land its fittings on the rails, rad. */
+const HELD_TILT = 6 * DEG;
+/** The fittings can be set on the rails from no further under them than this, m: lower, they've missed. */
+const RAIL_MISS = 0.75;
 /**
  * Landing-burn start: the latest moment the burn (simulated ahead, landingPlan.ts) never needs
  * more than this fraction of the engines' thrust. The rest is margin for the unexpected and for
@@ -669,8 +677,20 @@ export class BoosterReturn {
           const go = inCorridor && (aboveArms > 15 || (off < 1.8 - 0.6 * spare && drift < 0.9 - 0.3 * spare));
           // (Quicker while well above them: hovering burns ~1 t/s, more than a windy day leaves.)
           // (Slowing steadily to the last 12 m, which it takes at ~2-3 m/s while the arms close.)
-          const vDown = aboveArms > 12 ? Math.sqrt(2.7 * 2.7 + 2 * TERMINAL_DECEL * (aboveArms - 12)) : clamp(0.1 * aboveArms + 1.5, 1.5, 4);
-          const vzCmd = go ? -Math.min(TERMINAL_SPEED, vDown) : !inCorridor && clear < 0 ? clamp(-0.5 * clear, 0.5, 3) : 0;
+          // (And the fittings stay RAIL_WAIT above the rails until both arms are on the hull: an arm
+          // that meets an off-centre booster first closes the rest of the way slowly, and the
+          // booster, still sinking, went down past the rails before there was anything to land on.)
+          const waitArms = !this.arms.contact && !this.arms.disabled;
+          const vSettle = clamp(0.1 * aboveArms + 1.5, 1.5, 4);
+          const vDown = aboveArms > 12 ? Math.sqrt(2.7 * 2.7 + 2 * TERMINAL_DECEL * (aboveArms - 12)) : waitArms ? Math.min(vSettle, Math.max(0, aboveArms - RAIL_WAIT)) : vSettle;
+          const vzCmd =
+            waitArms && inCorridor && aboveArms < RAIL_WAIT
+              ? clamp(RAIL_WAIT - aboveArms, 0, 2)
+              : go
+                ? -Math.min(TERMINAL_SPEED, vDown)
+                : !inCorridor && clear < 0
+                  ? clamp(-0.5 * clear, 0.5, 3)
+                  : 0;
           // Position loop well inside the attitude loop's bandwidth.
           // (Speeding up and slowing gently: a sudden change of thrust swings the booster sideways
           // on its tilt, and the position loop chases that swing round the corridor.)
@@ -848,7 +868,12 @@ export class BoosterReturn {
     const fins = finPos[2];
     const offset = Math.hypot(finPos[0], finPos[1]);
     const armTop = this.arms.top;
-    if (!this.closing && settled && fins < armTop + 12 && fins > armTop - 1 && offset < CAPTURE_RADIUS && norm(velPad) < 5) {
+    // On its way down to them: from wide open (as for a launch) in to the opening they wait at,
+    // still well clear of the hull's way in, and half as far from closed.
+    if (!this.closing && fins > armTop + 40 && fins < armTop + 600 && this.arms.targetAngle > CATCH_READY_DEG + 0.01) this.arms.command({ angle: CATCH_READY_DEG });
+    // (From 25 m up: wide open, they take ten seconds to close, and the booster is down to the
+    // rails in less from any lower.)
+    if (!this.closing && settled && fins < armTop + 25 && fins > armTop - 1 && offset < CAPTURE_RADIUS && norm(velPad) < 8) {
       this.closing = true;
       this.arms.command({ angle: 0 });
       this.log('Chopsticks closing');
@@ -863,18 +888,34 @@ export class BoosterReturn {
       // The closing arms push the booster to the centre: a couple of metres off still catches.
       // Closed = both arms pressed against the booster (they stop there, padCollision.ts).
       const closed = this.arms.contact && !this.arms.moving;
-      if (closed && offset < CAPTURE_RADIUS && Math.abs(velPad[2]) < 2.5 && tilt < 3 * DEG && roll < 8 * DEG) {
+      // (And only fittings at the rails land on them: arms closed on the hull of a booster that
+      // has sunk past them hold nothing. It used to count, and the booster jumped up into them.)
+      const below = fins < armTop - RAIL_MISS;
+      // (Held by the arms near its top, it leans a few degrees as its engines go on steering: the
+      // fittings still come down on the rails. Under 3 deg only, it went on down past them until
+      // it had straightened up.)
+      if (closed && !below && offset < CAPTURE_RADIUS && Math.abs(velPad[2]) < 2.5 && tilt < HELD_TILT && roll < 8 * DEG) {
         setThrottle(booster, 'booster', 0);
         this.phase = 'caught';
         booster.status = 'caught';
         booster.caughtPad = this.pad;
         booster.catchPin = CATCH.finBottom;
         this.log(`Booster caught! (${offset.toFixed(2)} m off center, ${Math.abs(velPad[2]).toFixed(1)} m/s)`);
-      } else if (fins < armTop - 1.5 && offset < 12 && this.arms.contact) {
+      } else if (below && offset < 12 && this.arms.contact) {
         setThrottle(booster, 'booster', 0);
         this.phase = 'lost';
         booster.status = 'destroyed';
-        this.log(roll >= 8 * DEG ? `Booster's catch fittings missed the rails (rolled ${(roll / DEG).toFixed(0)}° off)` : 'Booster struck the chopsticks');
+        const why =
+          roll >= 8 * DEG
+            ? `Booster's catch fittings missed the rails (rolled ${(roll / DEG).toFixed(0)}° off)`
+            : !(closed && offset < CAPTURE_RADIUS)
+              ? 'Booster struck the chopsticks'
+              : Math.abs(velPad[2]) >= 2.5
+                ? `Booster came down onto the chopsticks too fast (${Math.abs(velPad[2]).toFixed(1)} m/s)`
+                : tilt >= HELD_TILT
+                  ? `Booster came down past the chopsticks leaning ${(tilt / DEG).toFixed(0)}°`
+                  : 'Booster came down past the chopsticks: they closed with its catch fittings already under the rails';
+        this.log(why);
       }
     }
   }
@@ -898,7 +939,8 @@ export class BoosterReturn {
     if (this.phase === 'caught' || this.phase === 'lost' || this.ocean) return;
     const g = this.catchGeometry(booster, aux);
     const offset = Math.hypot(g.finPos[0], g.finPos[1]);
-    const settled = offset < CAPTURE_RADIUS && Math.abs(g.velPad[2]) < 3 && Math.hypot(g.velPad[0], g.velPad[1]) < 1.5;
+    // (Coming down at a steady few m/s and nearly on the line: the arms start in.)
+    const settled = offset < CAPTURE_RADIUS && Math.abs(g.velPad[2]) < 5 && Math.hypot(g.velPad[0], g.velPad[1]) < 1.5;
     this.checkCatch(booster, g.finPos, g.velPad, g.axisPad, settled);
   }
 

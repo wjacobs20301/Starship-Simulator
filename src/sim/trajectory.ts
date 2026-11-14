@@ -54,6 +54,10 @@ export interface EntryModel {
    * cross(up, velocity) for positive angles (the side the entry guidance steers with).
    */
   bank?: number;
+  /** The bank against air speed, rad (a profile flown: one bank down to some speed, another below it). */
+  bankAt?: (speed: number) => number;
+  /** The drag area's multiplier against air speed (pitched up, a body drags more). */
+  dragAt?: (speed: number) => number;
 }
 
 /** r, v: ECI state at time t (s); mass in kg. */
@@ -170,7 +174,7 @@ function coastAccel(r: V3, v: V3, alt: number, model: EntryModel, mass: number):
   if (rho <= 0) return g;
   const va = airRelativeVelocity(r, v);
   const speed = norm(va);
-  const k = (-0.5 * rho * speed * dragArea) / mass;
+  const k = (-0.5 * rho * speed * dragArea * (model.dragAt ? model.dragAt(speed) : 1)) / mass;
   const withDrag = add(g, scale(va, k));
   const ld = liftToDrag?.(speed) ?? 0;
   if (ld <= 0 || speed < 1) return withDrag;
@@ -181,7 +185,8 @@ function coastAccel(r: V3, v: V3, alt: number, model: EntryModel, mass: number):
   const ln = norm(lift);
   if (ln < 1e-6) return withDrag;
   lift = scale(lift, 1 / ln);
-  if (model.bank) lift = add(scale(lift, Math.cos(model.bank)), scale(cross(lift, u), Math.sin(model.bank)));
+  const bank = model.bankAt ? model.bankAt(speed) : model.bank;
+  if (bank) lift = add(scale(lift, Math.cos(bank)), scale(cross(lift, u), Math.sin(bank)));
   return add(withDrag, scale(lift, -k * speed * ld));
 }
 

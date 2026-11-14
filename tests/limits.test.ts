@@ -76,4 +76,44 @@ describe('manual booster catch', () => {
     expect(b.status).toBe('caught');
     expect(sim.events.some((e) => /Booster caught/.test(e.text))).toBe(true);
   });
+
+  it('arms that close on a booster already down past their rails do not catch it', { timeout: 120_000 }, () => {
+    const sim = new Simulation();
+    sim.launch();
+    const br = () => sim.mission.boosterReturn;
+    const lined = () => {
+      const b = sim.find('booster');
+      if (b?.status !== 'flight' || br()?.phase !== 'terminal') return false;
+      const g = br()!.guide(b, sim.aux.get('booster')!);
+      return g.above < 20 && Math.hypot(g.east, g.north) < 1 && Math.hypot(...g.vel) < 3;
+    };
+    while (!lined()) {
+      sim.step();
+      expect(sim.t).toBeLessThan(2000);
+    }
+    sim.pilot.set({ manual: true, target: 'booster', sas: 'retrograde', engines: 2, throttle: 0.5 });
+    const b = sim.find('booster')!;
+    const arms = sim.towers[0];
+    let low = Infinity;
+    for (let i = 0; i < 6000 && b.status === 'flight'; i++) {
+      const aux = sim.aux.get('booster')!;
+      const g = br()!.guide(b, aux);
+      low = Math.min(low, g.above);
+      // The player sinks it gently to three metres under the rails and holds it there, the arms
+      // kept open (their own keys) until it's down; then lets them close.
+      if (g.above > -2.8) arms.command({ angle: 40 });
+      else arms.command({ angle: 0 });
+      if (i % 10 === 0) {
+        const vzCmd = g.above > -3 ? -Math.min(3, Math.max(1, 0.1 * g.above + 1.2)) : 0;
+        const force = aux.mp.mass * (9.8 + 1.4 * (vzCmd - g.vel[2]));
+        sim.pilot.set({ throttle: throttleForThrust(b.engines[0].place.type, force / 3, aux.pAmb) });
+      }
+      sim.step();
+    }
+    // (It used to count as caught, and the booster jumped up three metres into the arms.)
+    expect(low).toBeLessThan(-2.5);
+    expect(b.status).toBe('destroyed');
+    expect(sim.events.some((e) => /^Booster caught/.test(e.text))).toBe(false);
+    expect(sim.events.some((e) => /came down past the chopsticks/.test(e.text))).toBe(true);
+  });
 });

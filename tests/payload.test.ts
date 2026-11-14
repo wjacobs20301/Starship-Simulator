@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { STARLINK_V3, STARSHIP_V3 } from '../src/sim/config/starshipV3';
+import { DEG } from '../src/sim/constants';
+import { airRelativeVelocity, localBasisEci } from '../src/sim/frames';
 import { orbitApsides } from '../src/sim/guidance';
-import { norm, qrot, qrotInv, sub } from '../src/sim/math';
+import { dot, norm, qrot, qrotInv, sub } from '../src/sim/math';
 import { catchGapSwung } from '../src/sim/padCollision';
 import { eciDirToPad } from '../src/sim/padFrame';
 import { Simulation } from '../src/sim/simulation';
 import { massProps, payloadOf } from '../src/sim/vehicle';
 
-/** Flight 15 as the mission flies it: Pad 2, 26 Starlink V3 aboard, home after SECO to the Pad 2 tower, swung round. */
+/** Flight 15 as the mission flies it: Pad 2, 26 Starlink V3 aboard, home after SECO to the Pad 2 tower. */
 function flight15() {
   const sim = new Simulation();
   sim.launchPad = 1;
@@ -15,7 +17,7 @@ function flight15() {
   sim.reset();
   sim.launch();
   while (sim.mission.phase !== 'coast') sim.step();
-  sim.commandReturn({ kind: 'tower', pad: 1, slew: -70 });
+  sim.commandReturn({ kind: 'tower', pad: 1, slew: 0, approach: 'gulf' });
   return sim;
 }
 
@@ -61,12 +63,25 @@ describe('Starlink deployment (Flight 15)', () => {
     expect(norm(sub(bay.sats[0].r, ship.r))).toBeGreaterThan(200);
   });
 
-  it('the whole flight: booster caught at Pad 2 and set back on its mount, satellites out, ship caught by the same tower, swung round, about 14 orbits later', { timeout: 400_000 }, () => {
+  it('the whole flight: booster caught at Pad 2 and set back on its mount, satellites out, ship home north of the Valley and round over the Gulf, caught by the same tower, above the booster, about 14 orbits later', { timeout: 400_000 }, () => {
     const sim = flight15();
     const ship = sim.find('ship')!;
-    // (How far its catch fittings are turned from the arms' gap, swung round, as they meet.)
+    // (How far its catch fittings are turned from the arms' gap as they meet.)
     let misaligned = 0;
+    // The way in, from the entry interface to the flip: where, which way, how hard on the airframe.
+    const track: { lat: number; lon: number; az: number; flop: boolean }[] = [];
+    let peakQ = 0;
+    let sampled = -Infinity;
     runUntil(sim, () => {
+      const phase = sim.mission.shipReturn?.phase;
+      if ((phase === 'entry' || phase === 'bellyflop') && sim.t - sampled >= 1) {
+        sampled = sim.t;
+        const aux = sim.aux.get('ship')!;
+        const b = localBasisEci(aux.geo, sim.t);
+        const va = airRelativeVelocity(ship.r, ship.v);
+        track.push({ lat: aux.geo.lat / DEG, lon: aux.geo.lon / DEG, az: (Math.atan2(dot(va, b.e), dot(va, b.n)) / DEG + 360) % 360, flop: phase === 'bellyflop' });
+        peakQ = Math.max(peakQ, aux.q);
+      }
       if (ship.status === 'flight' && sim.mission.shipReturn?.phase === 'terminal') {
         const z = eciDirToPad(qrot(ship.q, [0, 0, 1]), sim.t);
         const g = catchGapSwung(1, sim.towers[1].slew);
@@ -77,7 +92,7 @@ describe('Starlink deployment (Flight 15)', () => {
     });
     const has = (re: RegExp) => sim.events.some((e) => re.test(e.text));
     expect(has(/^Booster caught!/)).toBe(true);
-    // The tower turned round for the ship: booster on the mount, arms up and swung aside.
+    // The tower made ready for the ship: booster on the mount, arms back up at the top.
     expect(has(/^Super Heavy back on the Pad 2 launch mount/)).toBe(true);
     expect(has(/pushed over/)).toBe(false);
     expect(has(/^Pad 2 chopsticks ready for the ship/)).toBe(true);
@@ -87,12 +102,35 @@ describe('Starlink deployment (Flight 15)', () => {
     expect(sim.bay!.aboard).toBe(0);
     expect(ship.status).toBe('caught');
     expect(ship.caughtPad).toBe(1);
-    expect(sim.towers[1].slew).toBeCloseTo(-70, 0);
-    // Lined up with the arms as swung, not snapped round to them as they grab it.
+    expect(sim.towers[1].slew).toBeCloseTo(0, 1);
+    // (Caught over the mount, clear above the booster standing on it.)
+    expect(sim.towers[1].top - 38.5).toBeGreaterThan(18 + 72.3 + 4);
+    // Lined up with the arms, not snapped round to them as they grab it.
     expect(misaligned).toBeLessThan(3);
     const hours = (sim.t - sim.mission.tZero!) / 3600;
     expect(hours).toBeGreaterThan(18);
     expect(hours).toBeLessThan(26);
+
+    // The way in, as Flight 15's was published: from the west, north of the Rio Grande Valley's
+    // cities (Edinburg and McAllen 26.2-26.3 N, Harlingen 26.2 N), across Padre Island north of
+    // South Padre (its last buildings at 26.14 N), then round to the south over the Gulf.
+    /** The track's latitude where it crosses this longitude, eastbound. */
+    const latAt = (lon: number) => {
+      const i = track.findIndex((p, k) => k > 0 && track[k - 1].lon < lon && p.lon >= lon);
+      const [a, b] = [track[i - 1], track[i]];
+      return a.lat + ((lon - a.lon) / (b.lon - a.lon)) * (b.lat - a.lat);
+    };
+    expect(sim.events.some((e) => /^Return to Pad 2 tower, round over the Gulf planned/.test(e.text))).toBe(true);
+    expect(latAt(-98.2)).toBeGreaterThan(26.45);
+    expect(latAt(-97.7)).toBeGreaterThan(26.35);
+    expect(latAt(-97.168)).toBeGreaterThan(26.14);
+    // Out over the water by the time it's subsonic, heading south; the belly-flop glides in from there.
+    const flop = track.find((p) => p.flop)!;
+    expect(flop.lon).toBeGreaterThan(-97.158 + 0.02);
+    expect(flop.az).toBeGreaterThan(150);
+    expect(flop.az).toBeLessThan(215);
+    // (Banked hard all the way round, well inside what the airframe takes: 40 kPa.)
+    expect(peakQ).toBeLessThan(34e3);
   });
 });
 

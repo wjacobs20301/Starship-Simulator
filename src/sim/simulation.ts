@@ -21,7 +21,7 @@ import { ARMS, TowerArms } from './tower';
 import { SHIP_ENTRY, heatFlux } from './shipReentry';
 import { airRelativeVelocity } from './frames';
 import { Mission, type Phase } from './sequencer';
-import { type ReturnTarget, SHIP_CATCH_PIN, ShipReturn, entryModel, targetLatLon } from './shipReturn';
+import { type ReturnTarget, SHIP_CATCH_PIN, ShipReturn, targetLatLon } from './shipReturn';
 import { LIMITS, type VehicleHealth, checkLimits, newHealth } from './limits';
 import { type EntryModel, type Trajectory, orbitalFrame, predictTrajectory, propagate } from './trajectory';
 
@@ -93,6 +93,8 @@ const QD_BREAK_SPEED = 0.8;
 export const PHYSICS_WARP_MAX = 50;
 /** Rails warp stops this long before a planned burn starts, s (time for the ship to turn to it). */
 const RAILS_BURN_LEAD = 90;
+/** A warp ahead to a burn stops this long before it starts, with the ship lined up for it, s. */
+export const BURN_LEAD = 10;
 
 /** The ship's entry as flown by its autopilot, measured from the sim (flaps included): approx. */
 
@@ -772,16 +774,17 @@ export class Simulation {
     }
     if (target.kind === 'tower') {
       const free = (p: number) => !this.towers[p].disabled && !this.vehicles.some((v) => v.status === 'caught' && v.caughtPad === p);
-      // A catch beside the tower (arms swung round): its arms set down the booster they hold
-      // first, then swing round for the ship (padTurnaround).
+      // This tower, whatever it holds (a slew given, even 0): its arms set down the booster they
+      // hold first, then go back up for the ship (padTurnaround).
       const swung = target.slew !== undefined && target.pad >= 0 && !this.towers[target.pad].disabled;
       const pad = swung || (target.pad >= 0 && free(target.pad)) ? target.pad : [0, 1].find(free);
       if (pad === undefined) {
         refuse("Can't return to a tower: both are holding a vehicle or wrecked");
         return;
       }
-      target = swung ? { kind: 'tower', pad, slew: target.slew } : { kind: 'tower', pad };
-      this.turnaround = swung ? { pad, slew: target.slew!, stage: 'wait', t: this.t } : null;
+      const slew = swung ? clamp(target.slew!, -ARMS.maxSlewDeg, ARMS.maxSlewDeg) : 0;
+      target = { kind: 'tower', pad, ...(swung ? { slew } : {}), ...(target.approach ? { approach: target.approach } : {}) };
+      this.turnaround = swung ? { pad, slew, stage: 'wait', t: this.t } : null;
     }
     this.pilot.set({ manual: false });
     m.shipReturn = new ShipReturn(this, ship, target, this.logLine);
@@ -825,9 +828,10 @@ export class Simulation {
   /** A ship that tips over after its splashdown: a few seconds on the water, then the fireball. */
   /**
    * A ship coming home to the tower that caught its booster (Flight 15): once the booster has
-   * settled on the arms, the tower sets it back down on the launch mount, opens the arms, takes
-   * them back up to the top and swings them round to the side, where the ship is caught clear of
-   * the booster below.
+   * settled on the arms, the tower sets it back down on the launch mount, opens the arms and
+   * takes them back up to the top, where the ship is caught: over the mount, its engines some
+   * seven metres above the booster standing there. (Or, for a return that asks for it, with the
+   * arms swung to one side.)
    */
   turnaround: { pad: number; slew: number; stage: 'wait' | 'lower' | 'release' | 'raise' | 'swing' | 'ready'; t: number } | null = null;
 
@@ -880,7 +884,7 @@ export class Simulation {
       case 'raise':
         if (arms.offset >= ARMS.maxOffset - 0.05) {
           arms.command({ slew: ta.slew });
-          this.log(`${name} chopsticks swinging ${Math.abs(ta.slew)} deg round for the ship catch`);
+          if (Math.abs(ta.slew) > 0.05) this.log(`${name} chopsticks swinging ${Math.abs(ta.slew).toFixed(0)} deg to the side for the ship catch`);
           ta.stage = 'swing';
         }
         break;
@@ -1006,10 +1010,26 @@ export class Simulation {
     }
     const r = this.mission.shipReturn;
     if (r && r.phase === 'burn' && r.plan.burns[r.burnIndexNow]?.label === 'entry burn') until = Math.min(until ?? Infinity, this.t);
+    // (And where the return autopilot has something to do on the way: on rails it isn't run.)
+    const act = r?.actAt ?? null;
+    if (act !== null) until = Math.min(until ?? Infinity, act);
     // (And at the satellites' deployment, to watch it.)
     const tz = this.mission.tZero;
     if (this.bay?.state === 'stowed' && this.bay.auto && tz !== null && this.t < tz + STARLINK_V3.deployAt) until = Math.min(until ?? Infinity, tz + STARLINK_V3.deployAt);
     return until;
+  }
+
+  /**
+   * How long before a planned burn starts a warp ahead to it should stop, s: ten seconds with the
+   * ship lined up for it; with a turn still to make, the time that takes as well (~2 deg/s and a
+   * moment to settle).
+   */
+  burnLead(): number {
+    const rem = this.maneuverRemaining();
+    const v = this.node && this.find(this.node.node.vehicle);
+    if (!rem || !v) return BURN_LEAD;
+    const off = Math.acos(clamp(dot(normalize(qrot(v.q, [1, 0, 0])), rem.dir), -1, 1));
+    return off < 4 * DEG ? BURN_LEAD : BURN_LEAD + 15 + off / (2 * DEG);
   }
 
   railsStep(dt: number): number {
@@ -1536,8 +1556,8 @@ export class Simulation {
       let model: EntryModel =
         ids.length > 1 ? { dragArea: 30 } : ids[0] === 'booster' ? { dragArea: 80 } : SHIP_ENTRY;
       // A ship on entry guidance: its path as flown now (banked, pitched up).
-      const shape = v.id === 'ship' ? this.mission.shipReturn?.entryShape : null;
-      if (shape) model = entryModel(Math.abs(shape.bank), shape.alphaUp);
+      const flown = v.id === 'ship' ? this.mission.shipReturn?.entryModelNow : null;
+      if (flown) model = flown;
       out.push(predictTrajectory(v.id, v.r, v.v, this.t, model, aux.mp.mass));
       const rem = this.maneuverRemaining();
       if (this.node && rem && this.node.node.vehicle === v.id) {

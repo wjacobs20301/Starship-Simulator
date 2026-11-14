@@ -12,7 +12,7 @@ import type { PilotControls } from '../game/pilotControls';
 import { BOOSTER_LENGTH, SHIP_LENGTH, STARLINK_V3, STARSHIP_V3, SUPER_HEAVY_V3 } from '../sim/config/starshipV3';
 import type { V3 } from '../sim/math';
 import type { Snapshot, VehicleSnapshot } from '../sim/simulation';
-import type { CameraRig, CameraTarget } from './cameras';
+import { type CameraRig, type CameraTarget, SAT_CAMERA_AGE } from './cameras';
 import { type FloatingOrigin, enuToWorld, vehicleQuaternion } from './floatingOrigin';
 import type { FrameMotion } from './frameMotion';
 import { type FxVehicle, type LaunchFx, explosionRadius } from './fx/launchFx';
@@ -178,7 +178,9 @@ export function createVehicleMeshes(deps: VehicleMeshesDeps): VehicleMeshes {
     let target: CameraTarget | null = null;
     if (flight.satFocus !== null && !snap.payload?.sats.some((x) => x.n === flight.satFocus)) flight.satFocus = null;
     const sats = snap.payload?.sats ?? [];
-    const camSat = flight.satFocus ?? (sats.length ? sats[sats.length - 1].n : null);
+    // (The Starlink camera rides the latest one that's out and clear of the ship: the one still
+    // sliding out of the bay took the camera through the hull with it.)
+    const camSat = flight.satFocus ?? sats.filter((s) => s.age > SAT_CAMERA_AGE).pop()?.n ?? null;
     for (const v of snap.vehicles) {
       const mesh = meshes.get(v.id);
       if (!mesh) continue;
@@ -217,7 +219,11 @@ export function createVehicleMeshes(deps: VehicleMeshesDeps): VehicleMeshes {
           axis: [up.x, up.y, up.z],
           size: v.stages.length === 2 ? BOOSTER_LENGTH + SHIP_LENGTH : v.stages[0] === 'ship' ? SHIP_LENGTH : BOOSTER_LENGTH,
           belly: ((b) => [b.x, b.y, b.z] as V3)(new THREE.Vector3(1, 0, 0).applyQuaternion(qb)),
+          id: v.id,
         };
+        // (Coasting in space: the free camera goes round the Earth with it, facing the way it goes.)
+        const va = v.telemetry.vAirEnu;
+        if (v.status === 'flight' && v.telemetry.altitude > 100e3 && Math.hypot(va[0], va[1], va[2]) > 2000) target.track = [va[0], va[2], -va[1]];
         if (v.stages.length === 1 && v.stages[0] === 'ship') {
           // The payload door (Starlink flights): on the leeward side (mesh -x), doorX above the ship's base.
           if (snap.payload) {

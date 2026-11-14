@@ -18,10 +18,12 @@ export const ARMS = {
   liftRate: 2.5,
   swingRate: 8,
   /**
-   * Both arms turned together about the carriage's pivot (deg, + = counter-clockwise seen from
-   * above): carries what they hold around to the side of the tower, e.g. onto a transport stand.
+   * Both arms swung the same way (deg, + = counter-clockwise seen from above): carries what they
+   * hold round to the side of the mount, e.g. to set it down on the ground there. Each arm turns
+   * on its own hinge (padCollision.ts armSwing); past this the inner one, crossing in front of
+   * the carriage, would meet the other's root. (How far the real arms can go isn't public.)
    */
-  maxSlewDeg: 100,
+  maxSlewDeg: 60,
   slewRate: 2.5,
   /** Ship quick-disconnect arm: swung back against the tower (deg from its reach-out position), and its rate, deg/s. */
   qdStowedDeg: 80,
@@ -33,7 +35,7 @@ export class TowerArms {
   offset = 0;
   /** Opening angle, degrees. */
   angle = ARMS.openDeg;
-  /** Swing of both arms together about the carriage (deg, + counter-clockwise from above). */
+  /** Both arms swung to one side (deg, + counter-clockwise from above). */
   slew = 0;
   targetOffset = 0;
   targetAngle = ARMS.openDeg;

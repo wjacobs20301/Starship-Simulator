@@ -5,6 +5,7 @@
 import { type V3, add, dot, norm, scale, sub } from './math';
 import { PAD, PAD2 } from './constants';
 import { PAD_COLLIDERS } from './padColliders';
+import { ARMS } from './tower';
 
 /** Hull radius of Super Heavy / Starship, m. */
 export const HULL_RADIUS = 4.5;
@@ -40,7 +41,7 @@ export interface TowerState {
   angle: number;
   broken: Record<ArmSide, boolean>;
   down: boolean;
-  /** Both arms' swing about the carriage (deg). */
+  /** Both arms swung to one side (deg): armSwing. */
   slew: number;
   /** Ship QD arm swing (deg) and whether it's wrecked. */
   qd: number;
@@ -60,12 +61,12 @@ const HINGES: V3[] = PAD_COLLIDERS.map((p) => toEnu(p.carriage.pos[0], p.carriag
  * Columns [x, z, y0, y1] given in a hinge's frame (turning about glTF y) placed in pad ENU: flat
  * array of [e, n, uBottom, uTop] per column. The hinge stands at `hinge` [x, z] in the frame of
  * its carriage, which is at `pos` (glTF) with yaw `yaw`; the columns are swung by `th` (rad)
- * about the hinge, then hinge and all by `slew` (rad) about the carriage; raised by `lift` (m).
+ * about the hinge; raised by `lift` (m).
  */
-function placeColumns(cols: number[][], pos: number[], yaw: number, th: number, lift: number, hinge: number[] = [0, 0], slew = 0): Float64Array {
+function placeColumns(cols: number[][], pos: number[], yaw: number, th: number, lift: number, hinge: number[] = [0, 0]): Float64Array {
   const [cx, cy, cz] = pos;
   const c1 = Math.cos(th), s1 = Math.sin(th);
-  const c2 = Math.cos(yaw + slew), s2 = Math.sin(yaw + slew);
+  const c2 = Math.cos(yaw), s2 = Math.sin(yaw);
   const out = new Float64Array(cols.length * 4);
   for (let i = 0; i < cols.length; i++) {
     const [x, z, y0, y1] = cols[i];
@@ -83,15 +84,57 @@ function placeColumns(cols: number[][], pos: number[], yaw: number, th: number, 
   return out;
 }
 
+/** A pad's launch mount (pad ENU, horizontal): MOUNTS below. */
+const mountAt = (pad: number): [number, number] => {
+  const p = pad === 0 ? PAD : PAD2;
+  return [(p.lonDeg - PAD.lonDeg) * 111_320 * Math.cos((PAD.latDeg * Math.PI) / 180), (p.latDeg - PAD.latDeg) * 110_800];
+};
+/** How far out from the carriage (the middle of the line between its hinges) the arms hold a vehicle, m, per pad. */
+const CATCH_REACH: number[] = PAD_COLLIDERS.map((_, i) => Math.hypot(mountAt(i)[0] - HINGES[i][0], mountAt(i)[1] - HINGES[i][1]));
+
 /**
- * One arm's columns in pad ENU at this carriage offset (m) and opening (deg): flat array of
- * [e, n, uBottom, uTop] per column. Each arm turns on its own hinge, L by +angle and R by -angle
- * (as the model is animated); a slew carries both, hinges and all, round the carriage's centre.
+ * One arm's swing on its own hinge (rad, as the model is animated: L opens by +, R by -), with
+ * the pair opened by angleDeg and swung to one side by slewDeg.
+ *
+ * As on the real towers, the hinges are fixed to the carriage, one at each front corner, and
+ * each arm has its own actuator: there is nothing that turns the pair as one piece. To carry a
+ * vehicle to the side, both arms swing the same way, the one on that side further out and the
+ * other in across the front of the carriage, each staying against the hull: its line passes the
+ * vehicle's centre at half the hinges' spacing, as it does closed on a vehicle over the mount.
+ * (The pair used to be turned rigidly about the carriage's middle, hinges and all: swung far
+ * round, the hinges and the arms' roots went through the tower.)
+ */
+export function armSwing(pad: number, side: ArmSide, angleDeg: number, slewDeg = 0): number {
+  const open = ((side === 'L' ? 1 : -1) * angleDeg * Math.PI) / 180;
+  if (slewDeg === 0) return open;
+  const s = (clampSlew(slewDeg) * Math.PI) / 180;
+  const D = CATCH_REACH[pad];
+  const hx = PAD_COLLIDERS[pad].hinges[side][0];
+  // (In the carriage's frame: the vehicle at (-D sin s, -D cos s), this hinge at (hx, 0); a swing
+  // th points the arm along (-sin th, -cos th).)
+  const vx = D * Math.sin(s) + hx;
+  const vz = D * Math.cos(s);
+  const bearing = Math.atan2(vx, vz);
+  const tangent = Math.asin(Math.min(1, Math.abs(hx) / Math.hypot(vx, vz)));
+  // (And no further out than square to the carriage: an arm opened wide and swung its own way
+  // as well would fold back alongside the tower.)
+  const th = bearing + (side === 'L' ? tangent : -tangent) + open;
+  return side === 'L' ? Math.min(th, ARM_OUT_MAX) : Math.max(th, -ARM_OUT_MAX);
+}
+
+/** The furthest an arm turns outward on its hinge, rad. */
+const ARM_OUT_MAX = Math.PI / 2;
+
+const clampSlew = (deg: number) => Math.max(-ARMS.maxSlewDeg, Math.min(ARMS.maxSlewDeg, deg));
+
+/**
+ * One arm's columns in pad ENU at this carriage offset (m), opening (deg) and sideways swing of
+ * the pair (deg): flat array of [e, n, uBottom, uTop] per column. Each arm turns on its own
+ * hinge (armSwing).
  */
 export function armColumns(pad: number, side: ArmSide, offset: number, angleDeg: number, slewDeg = 0): Float64Array {
   const p = PAD_COLLIDERS[pad];
-  const th = ((side === 'L' ? 1 : -1) * angleDeg * Math.PI) / 180;
-  return placeColumns(p.arms[side], p.carriage.pos, yawOf(p.carriage.rot), th, offset, p.hinges[side], (slewDeg * Math.PI) / 180);
+  return placeColumns(p.arms[side], p.carriage.pos, yawOf(p.carriage.rot), armSwing(pad, side, angleDeg, slewDeg), offset, p.hinges[side]);
 }
 
 /** The ship QD arm's columns in pad ENU at this swing (deg, as the model is animated). */
@@ -262,10 +305,7 @@ export function cylinder(base: V3, axis: V3, length: number, r = HULL_RADIUS): C
  * Launch mount centres (Pad 1 ENU, horizontal): from the pads' positions, placed exactly as the
  * pad model is built (scripts/export-geometry.ts: flat east / north offsets from Pad 1's mount).
  */
-export const MOUNTS: [number, number][] = [PAD, PAD2].map((p) => [
-  (p.lonDeg - PAD.lonDeg) * 111_320 * Math.cos((PAD.latDeg * Math.PI) / 180),
-  (p.latDeg - PAD.latDeg) * 110_800,
-]);
+export const MOUNTS: [number, number][] = [0, 1].map(mountAt);
 /** Half-width of the launch table on top of a mount, m. */
 const MOUNT_HALF = 14;
 
@@ -295,7 +335,7 @@ export function catchGap(pad: number): V3 {
 /** A pad's arms' gap direction (catchGap), turned with the arms when they're swung round the tower (slewDeg, + counter-clockwise from above). */
 export function catchGapSwung(pad: number, slewDeg: number): V3 {
   const g = catchGap(pad);
-  const a = (slewDeg * Math.PI) / 180;
+  const a = (clampSlew(slewDeg) * Math.PI) / 180;
   return [g[0] * Math.cos(a) - g[1] * Math.sin(a), g[0] * Math.sin(a) + g[1] * Math.cos(a), 0];
 }
 
@@ -315,7 +355,7 @@ export function catchPoint(pad: number, slewDeg: number): [number, number] {
   const [me, mn] = MOUNTS[pad];
   if (slewDeg === 0) return [me, mn];
   const [he, hn] = HINGES[pad];
-  const a = (slewDeg * Math.PI) / 180;
+  const a = (clampSlew(slewDeg) * Math.PI) / 180;
   const c = Math.cos(a);
   const s = Math.sin(a);
   return [he + (me - he) * c - (mn - hn) * s, hn + (me - he) * s + (mn - hn) * c];

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import type { V3 } from './sim/math';
 import type { Snapshot } from './sim/simulation';
-import { CAMERA_LABELS, CameraRig, type CameraTarget } from './render/cameras';
+import { CAMERA_LABELS, CameraRig, type CameraTarget, SAT_CAMERA_AGE } from './render/cameras';
 import { FloatingOrigin, enuToWorld } from './render/floatingOrigin';
 import { type ModelLibrary, loadModels } from './render/models';
 import { applyShipSerial } from './render/decals';
@@ -603,8 +603,11 @@ const actions: InputActions = {
   cycleCamera: () =>
     (views.stopDirector(),
     rig.cycle((need) => {
+      // (Starbase's cameras: only for something in their sight, not a ship round the far side of the Earth.)
+      if (need === 'ground') return CameraRig.groundSees(lastTarget);
       const ship = curr?.snap.vehicles.find((v) => v.id === flight.trackedId && v.stages.length === 1 && v.stages[0] === 'ship' && v.status !== 'destroyed');
-      return !!ship && (need === 'door' ? !!curr?.snap.payload : !!curr?.snap.payload?.sats.length);
+      const sats = curr?.snap.payload?.sats ?? [];
+      return !!ship && (need === 'door' ? !!curr?.snap.payload : flight.satFocus !== null || sats.some((x) => x.age > SAT_CAMERA_AGE));
     })),
   toggleMap: () => rig.toggleMap(lastTarget),
   cycleTarget: () => {

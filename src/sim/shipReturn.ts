@@ -16,6 +16,9 @@
 //                predictor-corrector re-plans the landing point every second, choosing how far to
 //                bank (less lift up = shorter range) and which way (bank reversals keep the
 //                crossrange inside a narrowing deadband), like the Space Shuttle's entry guidance.
+//                Or, to a Starbase tower by the approach round over the Gulf (TowerApproach, as
+//                Flight 15's was published): banked right all the way, gently at first and hard
+//                in a final turn, steering by the bank and the pitch together (guideGulf).
 //   bellyflop    subsonic: nose toward the target, pitching the belly to glide there.
 //   flip, burn   to the target: a splashdown on it, or a hover beside the tower with the whole
 //                ship above the arms, then down onto them by its catch pins (one engine: three
@@ -45,11 +48,23 @@ import { workingEngines } from './engineFaults';
 const rslWorking = (ship: Vehicle) => Math.max(1, workingEngines(ship, 0, (ring) => ring === 0));
 
 export type ReturnTarget =
-  /** slew: the arms swung round this far (deg) to catch it beside the tower, not over the mount (a booster standing there). */
-  | { kind: 'tower'; pad: number; slew?: number }
+  /**
+   * slew: given, this tower is made ready for the ship whatever it holds (it sets a booster on its
+   * arms down on the launch mount first: Simulation.turnaround), with its arms swung this far to
+   * the side for the catch (deg; 0, over the mount, is how a ship is caught).
+   */
+  | { kind: 'tower'; pad: number; slew?: number; approach?: TowerApproach }
   | { kind: 'ocean'; lat: number; lon: number }
   /** A patch of open ground by the pads (a diverted tower approach sets down there). */
   | { kind: 'ground'; lat: number; lon: number };
+
+/**
+ * How a ship from orbit comes in to a Starbase tower. 'gulf': as Flight 15's was published: in
+ * from the west over northern Mexico and south Texas, north of the Rio Grande Valley's cities,
+ * across Padre Island north of South Padre, and round to the south over the Gulf, banked right
+ * all the way (gulfProfile). Without it: straight in along the ground track, in S-turns.
+ */
+export type TowerApproach = 'gulf';
 
 export type ReturnPhase =
   | 'burn'
@@ -190,6 +205,95 @@ function entryControl(x: number): { bank: number; alphaUp: number } {
 }
 
 /**
+ * The Gulf approach (TowerApproach), as a bank and pitch-up down to TURN_SPEED and another pair
+ * below it, in the final turn: all the lift's sideways part goes one way, so the track curves
+ * right throughout, gently at first (a turn's radius is set by the air's density: thousands of
+ * km high up) and tightly at the end. Banks rad, + = left.
+ */
+export interface EntryProfile {
+  bank: number;
+  alphaUp: number;
+  turnBank: number;
+  turnUp: number;
+}
+/**
+ * Air speed the final turn starts at, m/s (Mach ~17, 60 km up, ~630 km from the tower, over
+ * Coahuila): from there the ship banks hard right all the way down. Measured in the sim,
+ * banked 65-75 deg: ~95 deg of turn by the time it is subsonic (from Mach 8, ~70; from Mach 5,
+ * 60; from Mach 3, 50), so a ship coming in eastbound ends up heading south. Starting later
+ * leaves less turn and the track cuts across South Padre Island; starting at the entry interface
+ * spreads the turn out over thousands of km and does the same.
+ */
+const TURN_SPEED = 5500;
+/** The final turn as planned: the guidance then has bank and pitch to spare either way. */
+const TURN_BANK = -70 * DEG;
+const TURN_UP = 3 * DEG;
+/**
+ * The glide down to the turn as planned: a little left, which is what the guidance settles on
+ * from Flight 15's orbit (the turn itself takes the ship ~150 km to the right), and pitched up
+ * part-way: range to spare either way.
+ */
+const GULF_BANK = 12 * DEG;
+const GULF_UP = 8 * DEG;
+/**
+ * Below this air speed, m/s, the turn banks this much further (rad): the dynamic pressure is past
+ * its peak there, so the ship can give up what is left of its lift's vertical part, sink into
+ * thicker air and turn tighter (a turn's radius goes with the air's density) where it counts:
+ * the last 100 km, by the coast. Banked that hard from the start of the turn it dives at Mach 10
+ * and loads the airframe to its limit (39 kPa, measured; this way ~30).
+ */
+const TURN_LATE_SPEED = 3000;
+const TURN_LATE_EXTRA = -14 * DEG;
+const TURN_BANK_MOST = -88 * DEG;
+/** The turn's bank as flown at this air speed, for the bank it is steered with. */
+const turnBankAt = (bank: number, speed: number) => (speed < TURN_LATE_SPEED ? Math.max(TURN_BANK_MOST, bank + TURN_LATE_EXTRA) : bank);
+/** Bank limits, rad: left / right before the turn, and in it. */
+const GULF_BANK_LEFT = 60 * DEG;
+const GULF_BANK_RIGHT = -75 * DEG;
+const TURN_BANK_LEFT = 30 * DEG;
+const TURN_BANK_RIGHT = -80 * DEG;
+/** The guidance leaves the bank alone below this air speed, m/s (too little flight left to steer by). */
+const GULF_GUIDE_MIN = 450;
+/**
+ * Where the supersonic part of the Gulf approach aims its fall, m east / north of the catch
+ * point: 4 km offshore to the north-east, so the last of the turn is over the water and the
+ * belly-flop glides in from the Gulf. (Further out moves the whole track north, further from
+ * South Padre, but the belly-flop can only glide back 5-6 km.)
+ */
+const GULF_AIM: readonly [number, number] = [3000, 3000];
+
+const gulfPlanProfile: EntryProfile = { bank: GULF_BANK, alphaUp: GULF_UP, turnBank: TURN_BANK, turnUp: TURN_UP };
+
+/** The glide flown to an EntryProfile, for predictions: the lift whole, banked as flown (not just its vertical part). */
+export function profileModel(p: EntryProfile): EntryModel {
+  const base = SHIP_ENTRY_MODEL.liftToDrag!;
+  const a0 = entryAlpha(30);
+  const before = alphaAero(a0 + p.alphaUp);
+  const turn = alphaAero(a0 + p.turnUp);
+  return {
+    dragArea: SHIP_ENTRY_MODEL.dragArea,
+    dragAt: (sp) => (sp > TURN_SPEED ? before.drag : turn.drag),
+    bankAt: (sp) => (sp > TURN_SPEED ? p.bank : turnBankAt(p.turnBank, sp)),
+    liftToDrag: (sp) => {
+      if (sp > TURN_SPEED) return base(sp) * before.ld;
+      if (sp > 900 || p.turnUp <= 0) return base(sp) * (p.turnUp <= 0 ? 1 : turn.ld);
+      const sched = entryAlpha(sp / 300);
+      return base(sp) * (alphaAero(Math.max(sched, a0 + p.turnUp)).ld / alphaAero(sched).ld);
+    },
+  };
+}
+const GULF_PLAN_MODEL = profileModel(gulfPlanProfile);
+
+const isGulf = (target: ReturnTarget): boolean => target.kind === 'tower' && target.approach === 'gulf';
+
+/** What the entry aims its fall at (lat/lon, deg): the target, or for the Gulf approach a point just offshore of it. */
+function entryAim(target: ReturnTarget): { lat: number; lon: number } {
+  const g = targetLatLon(target);
+  if (!isGulf(target)) return g;
+  return { lat: g.lat + GULF_AIM[1] / 110_800, lon: g.lon + GULF_AIM[0] / (111_320 * Math.cos(g.lat * DEG)) };
+}
+
+/**
  * Planning glides with the lift banked 45 deg (its vertical part: cos 45): the entry guidance can
  * then stretch (less bank) or shorten (more) from there.
  */
@@ -240,6 +344,8 @@ const LANDING_TAKEOVER_HEIGHT = 8000;
 const HOVER_CLEAR = 6;
 /** The catch pins must be within this of the catch point to close the arms / be caught, m. */
 const CAPTURE_RADIUS = 2.5;
+/** The deorbit burn is planned again this long before it starts, s. */
+const TOUCH_UP_AHEAD = 600;
 /** Most the hovering ship leans beside the arms (more swings its base into them). */
 const TERMINAL_NEAR_TILT = 5 * DEG;
 /** How far forward the flip carries the ship (m): the belly-flop aims this far short. */
@@ -345,9 +451,12 @@ function planReturnAt(
   keepPass?: number,
   phaseMax = PHASING_MAX,
 ): ReturnPlan {
-  const goal = targetLatLon(target);
+  // (The Gulf approach is planned as it will be flown: banked right all the way, to its aim point.)
+  const gulf = isGulf(target);
+  const goal = entryAim(target);
+  const planModel = gulf ? GULF_PLAN_MODEL : PLAN_MODEL;
   const dvAvailable = maneuverDeltaV(ship);
-  const land = (r: V3, v: V3, t0: number, burn?: { t: number; dv: V3 }, model = PLAN_MODEL) => {
+  const land = (r: V3, v: V3, t0: number, burn?: { t: number; dv: V3 }, model = planModel) => {
     const p = predictTrajectory('plan', r, v, t0, model, mass, burn);
     return p.impact ? { lat: p.impact.lat, lon: p.impact.lon, t: t0 + p.impact.dt, ecef: p.impact.ecef } : null;
   };
@@ -356,7 +465,10 @@ function planReturnAt(
   // Already coming down with the target inside its reach (between the longest glide, lift up,
   // and the shortest, lift banked well over): the entry guidance takes it from here.
   const aps = orbitApsides(ship.r, ship.v);
-  if (aps.perigee < 90e3) {
+  if (aps.perigee < 90e3 && gulf) {
+    const mid = land(ship.r, ship.v, t);
+    if (mid && greatCircleKm(mid, goal) < PLAN_ACCEPT_KM) return { ok: true, burns: [], landing: mid, missKm: greatCircleKm(mid, goal), dvNeeded: 0, dvAvailable };
+  } else if (aps.perigee < 90e3) {
     const far = land(ship.r, ship.v, t, undefined, SHIP_ENTRY_MODEL);
     const near = land(ship.r, ship.v, t, undefined, SHORT_MODEL);
     if (far && near) {
@@ -913,21 +1025,40 @@ export class ShipReturn {
     return this.burnIndex;
   }
   private touchedUp = false;
+  /**
+   * Sim time the autopilot next has something to do while it waits for a burn (the deorbit
+   * burn's touch-up, ten minutes ahead of it), or null: time warp comes off rails for it, then
+   * carries on.
+   */
+  get actAt(): number | null {
+    if (this.phase !== 'burn' || this.burning || this.touchedUp || this.plan.burns[this.burnIndex]?.label !== 'deorbit') return null;
+    const node = this.sim.node;
+    const snap = this.sim.nodeSnapshot();
+    return node && snap ? node.node.t - snap.burnTime / 2 - (TOUCH_UP_AHEAD - 1) : null;
+  }
   private burning = false;
   private bank = 0;
   private bankSign = 1;
   private nextGuide = 0;
   /** When the bank last reversed (sim time). */
   private reversedAt = -Infinity;
-  /** The bank the entry guidance is flying (rad, + = left), for the map's predicted path. */
   /** Pitched up from the entry attitude (rad), to shed energy (entryControl). */
   private alphaUp = 0;
-  /** The bank and pitch-up the entry guidance is flying (rad), for the map's predicted path. */
-  get entryShape(): { bank: number; alphaUp: number } | null {
-    return this.phase === 'entry' ? { bank: this.bank * this.bankSign, alphaUp: this.alphaUp } : null;
+  /** The Gulf approach's profile as flown now (the bank and pitch it holds, then the turn as planned; in the turn, as flown). */
+  private gulfProfile(): EntryProfile {
+    const bank = this.bank * this.bankSign;
+    if (this.phase !== 'entry') return gulfPlanProfile;
+    const turning = norm(airRelativeVelocity(this.ship.r, this.ship.v)) < TURN_SPEED;
+    return turning ? { bank, alphaUp: this.alphaUp, turnBank: bank, turnUp: this.alphaUp } : { bank, alphaUp: this.alphaUp, turnBank: TURN_BANK, turnUp: TURN_UP };
   }
-  get entryBank(): number | null {
-    return this.phase === 'entry' ? this.bank * this.bankSign : null;
+  /**
+   * The entry as this autopilot is flying it or means to (for the map's predicted path), or null
+   * past it: the Gulf approach's whole curve from before the deorbit burn on; otherwise the
+   * glide at the bank and pitch-up held now.
+   */
+  get entryModelNow(): EntryModel | null {
+    if (isGulf(this.target)) return ['burn', 'coast', 'entry'].includes(this.phase) ? profileModel(this.gulfProfile()) : null;
+    return this.phase === 'entry' ? entryModel(this.bank, this.alphaUp) : null;
   }
   private heading: V3 | null = null;
   private oneEngine = false;
@@ -970,14 +1101,25 @@ export class ShipReturn {
   ) {
     const mass = sim.aux.get(ship.id)?.mp.mass ?? 2e5;
     // (A mission flying a set parking orbit, like Flight 15's, keeps to it: only a small phasing trim.)
-    this.plan = planReturn(ship, sim.t, mass, target, phasing, undefined, sim.parkingAlt !== null ? PARK_PHASING_MAX : PHASING_MAX);
+    const phaseMax = sim.parkingAlt !== null ? PARK_PHASING_MAX : PHASING_MAX;
+    this.plan = planReturn(ship, sim.t, mass, target, phasing, undefined, phaseMax);
+    if (!this.plan.ok && target.kind === 'tower' && target.approach === 'gulf') {
+      // (No pass the Gulf approach reaches: the plain one, straight in, if that has one.)
+      const plain: ReturnTarget = { kind: 'tower', pad: target.pad, slew: target.slew };
+      const p = planReturn(ship, sim.t, mass, plain, phasing, undefined, phaseMax);
+      if (p.ok) {
+        log(`Return: no pass for the approach over the Gulf (${this.plan.reason}); coming straight in`);
+        this.target = plain;
+        this.plan = p;
+      }
+    }
     if (!this.plan.ok) {
       this.phase = 'lost';
       this.status = `Can't return: ${this.plan.reason}`;
       log(this.status);
       return;
     }
-    const where = target.kind === 'tower' ? `Pad ${target.pad + 1} tower` : 'the ocean target';
+    const where = target.kind === 'tower' ? `Pad ${target.pad + 1} tower${isGulf(this.target) ? ', round over the Gulf' : ''}` : 'the ocean target';
     const burns = this.plan.burns.map((b) => `${b.label} ${norm(b.dv).toFixed(0)} m/s`).join(', ');
     log(`Return to ${where} planned: ${burns || 'no burn needed'} (${Math.round(this.plan.dvNeeded)} of ${Math.round(this.plan.dvAvailable)} m/s)`);
     this.phase = this.plan.burns.length ? 'burn' : 'coast';
@@ -1196,13 +1338,17 @@ export class ShipReturn {
           setThrottle(ship, 'ship', 0);
           // One last touch-up of the deorbit burn about ten minutes out.
           const b = this.plan.burns[this.burnIndex];
-          if (b.label === 'deorbit' && !this.touchedUp && start - t < 600) {
+          if (b.label === 'deorbit' && !this.touchedUp && start - t < TOUCH_UP_AHEAD) {
             this.touchedUp = true;
             this.replan(ship, aux);
             this.setNode();
             break;
           }
-          if (start - t > 120 && !venting) this.sim.waitUntil = start - (this.touchedUp || b.label !== 'deorbit' ? 60 : 660);
+          // (A warp ahead runs to ten seconds before the burn, or as long before it as the ship
+          // still needs to turn to it: it used to stop a minute out, and eleven minutes out of
+          // the deorbit burn for the touch-up, which now happens on the way.)
+          const lead = this.sim.burnLead();
+          this.sim.waitUntil = !venting && start - t > lead ? start - lead : null;
           this.status = venting
             ? `venting propellant it won't need (${(this.ventLeft / 1000).toFixed(0)} t to go), ${burnName(b.label)} in ${fmt(start - t)}`
             : `${burnName(b.label)} in ${fmt(start - t)}`;
@@ -1220,6 +1366,12 @@ export class ShipReturn {
         if (aux.geo.h < 120e3 && vz < 0) {
           this.phase = 'entry';
           this.sim.waitUntil = null;
+          if (isGulf(this.target)) {
+            // (As planned, until the guidance's first look.)
+            this.bank = Math.abs(GULF_BANK);
+            this.bankSign = Math.sign(GULF_BANK) || 1;
+            this.alphaUp = GULF_UP;
+          }
           this.log('Return: entry guidance active');
         }
         break;
@@ -1229,9 +1381,12 @@ export class ShipReturn {
         // Predictor-corrector bank steering.
         if (t >= this.nextGuide) {
           this.nextGuide = t + 1;
-          this.guideEntry(ship, aux);
+          if (isGulf(this.target)) this.guideGulf(ship, aux);
+          else this.guideEntry(ship, aux);
         }
-        const att = entryAttitude(vHat, up, heading, entryAlphaFlown(aux.mach, this.alphaUp), this.bank * this.bankSign);
+        const steer = this.bank * this.bankSign;
+        const flown = isGulf(this.target) && speed < TURN_SPEED ? turnBankAt(steer, speed) : steer;
+        const att = entryAttitude(vHat, up, heading, entryAlphaFlown(aux.mach, this.alphaUp), flown);
         applyControl(ship, aux, att.nose, dt, undefined, att.bodyZ);
         if ((aux.mach < 1 && aux.geo.h < 30e3) || aux.geo.h < BELLYFLOP_BY) {
           this.phase = 'bellyflop';
@@ -1450,6 +1605,93 @@ export class ShipReturn {
     const miss = greatCircleKm(at, goal);
     this.predicted = { lat: at.lat, lon: at.lon, missKm: Math.hypot(miss, crossKm) };
     this.status = `entry: bank ${((this.bank * this.bankSign) / DEG).toFixed(0)} deg${this.alphaUp > 0.5 * DEG ? `, pitched up ${(this.alphaUp / DEG).toFixed(0)} deg` : ''}, ${(at.down / 1000).toFixed(0)} km downrange / ${crossKm.toFixed(0)} km crossrange to go`;
+  }
+
+  /**
+   * One cycle of the Gulf approach's guidance. Banked right all the way, the ship has no
+   * reversals to steer with; it has the bank itself (how hard it turns, and with it how far it
+   * goes) and the pitch-up (how far it goes, hardly turning it). Each second the fall ahead is
+   * predicted with the two as held (and, before the final turn, that turn as planned), and again
+   * with each nudged; from how the landing point moves, the pair that puts it on the aim point
+   * (a Newton step, a few degrees at most each cycle). Before the turn the pair is the glide's;
+   * from TURN_SPEED on, the turn's own.
+   */
+  private guideGulf(ship: Vehicle, aux: Aux): void {
+    const t = this.sim.t;
+    const aim = entryAim(this.target);
+    const aimEcef = geodeticToEcef(aim.lat * DEG, aim.lon * DEG, 0);
+    const R = ecefToEnuMatrix(aim.lat * DEG, aim.lon * DEG);
+    const speed = norm(airRelativeVelocity(ship.r, ship.v));
+    const turning = speed < TURN_SPEED;
+    /** The landing point's miss (km east, north of the aim point) with this bank and pitch-up from here. */
+    const miss = (bank: number, up: number): [number, number] | null => {
+      const prof: EntryProfile = turning ? { bank, alphaUp: up, turnBank: bank, turnUp: up } : { bank, alphaUp: up, turnBank: TURN_BANK, turnUp: TURN_UP };
+      const p = predictTrajectory('guide', ship.r, ship.v, t, profileModel(prof), aux.mp.mass);
+      if (!p.impact) return null;
+      const d = mat3Vec(R, sub(p.impact.ecef, aimEcef));
+      return [d[0] / 1000, d[1] / 1000];
+    };
+    let bank = this.bank * this.bankSign;
+    let up = this.alphaUp;
+    const e0 = miss(bank, up);
+    if (!e0) return;
+    if (speed > GULF_GUIDE_MIN) {
+      // (Late in the turn the bank flown is this one and TURN_LATE_EXTRA: no further than that takes it.)
+      const late = speed < TURN_LATE_SPEED ? TURN_BANK_MOST - TURN_LATE_EXTRA : -Math.PI;
+      const [lo, hi] = turning ? [Math.max(TURN_BANK_RIGHT, late), TURN_BANK_LEFT] : [GULF_BANK_RIGHT, GULF_BANK_LEFT];
+      const db = 2 * DEG;
+      const du = up + DEG > ENTRY_MAX_PITCH_UP ? -DEG : DEG;
+      const eb = miss(bank + db, up);
+      const eu = miss(bank, up + du);
+      if (eb && eu) {
+        // How the miss moves per radian of each; then the step that takes it out.
+        const jb: [number, number] = [(eb[0] - e0[0]) / db, (eb[1] - e0[1]) / db];
+        const ju: [number, number] = [(eu[0] - e0[0]) / du, (eu[1] - e0[1]) / du];
+        const along = (j: [number, number], e: [number, number]) => {
+          const jj = j[0] * j[0] + j[1] * j[1];
+          return jj > 1e-6 ? -(j[0] * e[0] + j[1] * e[1]) / jj : 0;
+        };
+        // (Least squares, lightly damped: where one of the two no longer moves the landing
+        // point, the other takes the miss out as far as it can.)
+        const bb = jb[0] * jb[0] + jb[1] * jb[1];
+        const uu = ju[0] * ju[0] + ju[1] * ju[1];
+        const bu = jb[0] * ju[0] + jb[1] * ju[1];
+        const damp = 1e-3 * (bb + uu) + 1e-9;
+        const det = (bb + damp) * (uu + damp) - bu * bu;
+        const rb = -(jb[0] * e0[0] + jb[1] * e0[1]);
+        const ru = -(ju[0] * e0[0] + ju[1] * e0[1]);
+        const stepB = (rb * (uu + damp) - ru * bu) / det;
+        const stepU = (ru * (bb + damp) - rb * bu) / det;
+        // Each within its limits and a few degrees a cycle; where one is held, the other does what
+        // it can alone (twice round: either may be the one held).
+        const maxB = 6 * DEG;
+        const maxU = 3 * DEG;
+        const held = (b: number) => clamp(bank + clamp(b, -maxB, maxB), lo, hi) - bank;
+        const heldU = (u: number) => clamp(up + clamp(u, -maxU, maxU), 0, ENTRY_MAX_PITCH_UP) - up;
+        let sb = held(stepB);
+        let su = heldU(stepU);
+        for (let k = 0; k < 2; k++) {
+          if (Math.abs(sb - stepB) > 1e-4) su = heldU(along(ju, [e0[0] + jb[0] * sb, e0[1] + jb[1] * sb]));
+          if (Math.abs(su - stepU) > 1e-4) sb = held(along(jb, [e0[0] + ju[0] * su, e0[1] + ju[1] * su]));
+        }
+        bank += sb;
+        up += su;
+      }
+    }
+    if (turning && !this.milestones.has('gulfTurn')) {
+      this.milestones.add('gulfTurn');
+      // (Into the turn at what was planned for it, unless the glide already banks harder.)
+      bank = Math.min(bank, TURN_BANK);
+      up = TURN_UP;
+      this.log(`Return: final turn, banking ${(-bank / DEG).toFixed(0)} deg right (${this.distanceToTargetKm(aux).toFixed(0)} km to go)`);
+    }
+    this.bank = Math.abs(bank);
+    this.bankSign = bank >= 0 ? 1 : -1;
+    this.alphaUp = up;
+    const missKm = Math.hypot(e0[0], e0[1]);
+    const P = ecefToGeodetic(add(aimEcef, mat3Vec(mat3Transpose(R), [e0[0] * 1000, e0[1] * 1000, 0])));
+    this.predicted = { lat: P.lat / DEG, lon: P.lon / DEG, missKm };
+    this.status = `entry: bank ${Math.abs(bank / DEG).toFixed(0)} deg ${bank < 0 ? 'right' : 'left'}${up > 0.5 * DEG ? `, pitched up ${(up / DEG).toFixed(0)} deg` : ''}, ${turning ? 'in the final turn, ' : ''}${this.distanceToTargetKm(aux).toFixed(0)} km to go`;
   }
 
   /**
@@ -1737,7 +1979,8 @@ export class ShipReturn {
       const tilt = Math.acos(clamp(axisPad[2], -1, 1));
       // (Closed on the hull, the arms hold it: a lean of a few degrees, from one off-centre engine
       // pushing against them, still sets the pins on the rails.)
-      if (arms.contact && off < CAPTURE_RADIUS && Math.abs(vel[2]) < 2.5 && tilt < TERMINAL_NEAR_TILT && this.rollErr < PIN_ROLL_CATCH) {
+      // (Pins at the rails: arms closed on a ship that has sunk past them hold nothing.)
+      if (arms.contact && pinAbove > -1.5 && off < CAPTURE_RADIUS && Math.abs(vel[2]) < 2.5 && tilt < TERMINAL_NEAR_TILT && this.rollErr < PIN_ROLL_CATCH) {
         setThrottle(ship, 'ship', 0);
         this.phase = 'caught';
         ship.status = 'caught';

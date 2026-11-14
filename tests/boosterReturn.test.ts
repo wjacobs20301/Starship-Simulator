@@ -41,14 +41,14 @@ describe('booster return and catch', () => {
     const b = sim.find('booster')!;
     expect(b.status).toBe('caught');
     const arms = sim.towers[0];
-    arms.command({ slew: 90 });
-    for (let i = 0; i < 6000 && Math.abs(arms.slew - 90) > 0.01; i++) sim.step();
+    arms.command({ slew: ARMS.maxSlewDeg });
+    for (let i = 0; i < 6000 && Math.abs(arms.slew - ARMS.maxSlewDeg) > 0.01; i++) sim.step();
     // All the way down: the carriage stops with the booster standing on the ground.
     arms.command({ offset: ARMS.minOffset });
     for (let i = 0; i < 6000 && arms.moving; i++) sim.step();
     const xcg = currentAux(b, sim.t, sim.env).mp.xcg;
     const base = eciToPad(add(b.r, qrot(b.q, [-(xcg - b.extent[0]), 0, 0])), sim.t);
-    const [se, sn] = catchPoint(0, 90);
+    const [se, sn] = catchPoint(0, ARMS.maxSlewDeg);
     expect(Math.hypot(base[0] - se, base[1] - sn)).toBeLessThan(0.5);
     expect(base[2]).toBeCloseTo(0, 1);
     // Open the arms: it stays standing there.

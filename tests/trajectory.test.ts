@@ -1,7 +1,9 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { ecefToGeodetic, eciToEcef } from '../src/sim/frames';
 import { Simulation } from '../src/sim/simulation';
-import type { Trajectory } from '../src/sim/trajectory';
+import { DEG } from '../src/sim/constants';
+import type { V3 } from '../src/sim/math';
+import { type EntryModel, type Trajectory, predictTrajectory } from '../src/sim/trajectory';
 
 // The map view's prediction, checked against the flight itself: made in the coast after SECO,
 // it should call the entry interface almost exactly (vacuum) and the splashdown roughly (the
@@ -60,5 +62,40 @@ describe('trajectory prediction', () => {
     };
     expect(km(pred.impact!, splash!)).toBeLessThan(150);
     expect(Math.abs(pred.impact!.dt - splash!.t)).toBeLessThan(240);
+  });
+});
+
+// A lifting entry banked to one side: the lift's sideways part turns the path that way (what the
+// ship's approach round over the Gulf is planned and steered with).
+describe('a banked glide', () => {
+  // Coming down eastbound over the equator at orbital speed, 120 km up.
+  const r: V3 = [6378137 + 120e3, 0, 0];
+  const v: V3 = [-180, 7400, 0];
+  const land = (model: Partial<EntryModel>) => predictTrajectory('x', r, v, 0, { dragArea: 339, liftToDrag: () => 0.5, ...model }, 140e3).impact!;
+
+  it('lands to the left banked left, to the right banked right, and shorter either way', () => {
+    const level = land({});
+    const left = land({ bank: 40 * DEG });
+    const right = land({ bank: -40 * DEG });
+    expect(Math.abs(level.lat)).toBeLessThan(0.05);
+    expect(left.lat).toBeGreaterThan(1);
+    expect(right.lat).toBeLessThan(-1);
+    expect(left.lat + right.lat).toBeCloseTo(0, 1);
+    expect(left.lon).toBeLessThan(level.lon - 1);
+  });
+
+  it('follows a bank that changes with speed: level, then a hard turn at the end', () => {
+    const level = land({});
+    const late = land({ bankAt: (speed) => (speed > 3000 ? 0 : -70 * DEG) });
+    const all = land({ bank: -70 * DEG });
+    // To the right, but nowhere near as far as banked all the way; and not as short.
+    expect(late.lat).toBeLessThan(-0.2);
+    expect(late.lat).toBeGreaterThan(all.lat / 3);
+    expect(late.lon).toBeLessThan(level.lon);
+    expect(late.lon).toBeGreaterThan(all.lon);
+  });
+
+  it('drags more where the model says (pitched up): a little shorter (the glide ratio is what sets the range)', () => {
+    expect(land({ dragAt: (speed) => (speed > 3000 ? 1.25 : 1) }).lon).toBeLessThan(land({}).lon - 0.05);
   });
 });

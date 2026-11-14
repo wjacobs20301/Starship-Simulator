@@ -5,6 +5,7 @@
 import { PAD } from '../sim/constants';
 import { MISSION } from '../sim/config/starshipV3';
 import type { ScriptedFault } from '../sim/engineFaults';
+import type { TowerApproach } from '../sim/shipReturn';
 import type { MissionStart } from '../sim/simulation';
 import type { Snapshot, VehicleSnapshot } from '../sim/simulation';
 
@@ -88,10 +89,17 @@ export interface MissionSetup {
   /** At SECO, send the ship home on autopilot (tower catch or the ocean target). */
   shipReturn?: 'tower' | 'ocean';
   /**
-   * The ship is caught by the tower it launched from (the one that caught the booster), its arms
-   * swung this far round (deg) once they've set the booster back on the launch mount.
+   * The ship is caught by the tower it launched from (the one that caught the booster), once its
+   * arms have set the booster back on the launch mount and gone back up to the top: over the
+   * mount, as every catch is, above the booster standing there.
    */
-  shipCatchSlew?: number;
+  shipCatchOwnTower?: boolean;
+  /**
+   * How the ship comes in to the tower (shipReturn.ts TowerApproach): 'gulf', Flight 15's published
+   * route: north of the Rio Grande Valley's cities, across Padre Island north of South Padre,
+   * and round to the south over the Gulf.
+   */
+  shipApproach?: TowerApproach;
   /** Always from this pad (0 = Pad 1, 1 = Pad 2), as the real flight. */
   pad?: number;
   /** The ship carries Starlink V3 satellites and deploys them in orbit. */
@@ -301,15 +309,15 @@ export const MISSIONS: MissionDef[] = [
     group: 'auto',
     summary:
       'SpaceX\'s plan for the fifteenth flight (November 2026): both stages caught by the same tower. Super Heavy is back on Pad 2\'s chopsticks seven minutes after liftoff; ' +
-      'the ship deploys 26 Starlink V3 satellites, checks its heat shield, and about 14 orbits later comes home to be caught beside the booster.',
+      'the ship deploys 26 Starlink V3 satellites, checks its heat shield, and about 14 orbits later comes home to be caught above the booster.',
     brief:
       "Starship's fifteenth flight, as SpaceX plans it (November 2026): Super Heavy lifts off from Pad 2 and flies home to its tower; " +
       'the ship goes on to orbit, opens its payload door half an hour after liftoff and deploys 26 Starlink V3 satellites, one about every 70 seconds. ' +
       'Cameras on the satellites look back at the heat shield: GO or NO-GO for the catch. ' +
-      'Meanwhile the Pad 2 tower sets the booster back on the launch mount and swings its arms 70 degrees round to the side. ' +
-      'About 14 orbits later, nearly a day, the Raptors relight to deorbit; the ship comes in over the Pacific and Mexico and is caught there, beside the booster: the first catch of both stages, by the same tower. ' +
-      'Warp (1–8, or , .) through the orbits; time drops back to normal for the deployment, the flip and the catch. C cycles the cameras (the tower camera, the heat shield inspection).',
-    setup: { shipReturn: 'tower', shipCatchSlew: -70, pad: 1, payload: 'starlink', parkingAlt: 275e3 },
+      'Meanwhile the Pad 2 tower sets the booster back on the launch mount and takes its arms back up to the top. ' +
+      'About 14 orbits later, nearly a day, the Raptors relight to deorbit; the ship comes in over the Pacific and northern Mexico, passes north of the Rio Grande Valley and of South Padre Island, turns south over the Gulf and is caught there, above the booster: the first catch of both stages, by the same tower. ' +
+      'Warp (1–8, or , .) through the orbits; time drops back to normal for the deployment, the flip and the catch. C cycles the cameras (the payload bay, a camera on one of the Starlinks looking back at the ship, the heat shield inspection, the tower camera for the catch).',
+    setup: { shipReturn: 'tower', shipCatchOwnTower: true, shipApproach: 'gulf', pad: 1, payload: 'starlink', parkingAlt: 275e3 },
     objectives: [liftoff, separation, catchBooster, orbitReached, allDeployed, doorClosed, relight, catchShip],
     score(r) {
       // (Out of 1000: the objectives 850, the catches' precision 150.)

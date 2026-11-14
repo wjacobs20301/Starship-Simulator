@@ -79,6 +79,7 @@ export function createMenuBackdrop(deps: MenuBackdropDeps): MenuBackdrop {
     deps.sendScene({ type: 'scene', kind: sc.kind });
     deps.enter(sc.weather ?? null, sc.track);
     const [a0, a1] = sc.azimuth ?? [0, Math.PI * 2];
+    rig.resetFrame();
     rig.azimuth = a0 + Math.random() * (a1 - a0);
     rig.elevation = sc.elevation;
     rig.distance = sc.distance;
@@ -174,6 +175,7 @@ export function createMenuBackdrop(deps: MenuBackdropDeps): MenuBackdrop {
     deps.sendScene({ type: 'scene', kind: 'pad', pad });
     deps.enter(deps.pickFreeWeather(), 'stack');
     // (From the ground, ~30 m up, looking up at the tower and the stack against the sky.)
+    rig.resetFrame();
     rig.azimuth = -2.3 + (Math.random() - 0.5) * 0.6;
     rig.elevation = -0.072;
     rig.distance = 900;

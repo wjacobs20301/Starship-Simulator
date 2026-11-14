@@ -156,28 +156,69 @@ describe('a caught booster hangs on the arms, not on nothing', () => {
     for (const pad of [0, 1]) expect(Math.abs(catchGap(pad)[0] * awayFromTower(pad)[0] + catchGap(pad)[1] * awayFromTower(pad)[1])).toBeLessThan(1e-9);
   });
 
-  it('the arms swing what they hold round the tower, clear of it and of the mount', () => {
+  it('the arms swing what they hold to the side of the mount, clear of it and of the tower', () => {
     for (const pad of [0, 1]) {
       expect(catchPoint(pad, 0)).toEqual(MOUNTS[pad]);
-      const [se, sn] = catchPoint(pad, 90);
+      const [se, sn] = catchPoint(pad, ARMS.maxSlewDeg);
       const [me, mn] = MOUNTS[pad];
       const [te, tn] = TOWERS[pad];
-      // Swung about the carriage pivot: off to the tower's side, clear of the mount.
+      // As far round as they go: off to the tower's side, clear of the mount.
       expect(Math.hypot(se - te, sn - tn)).toBeGreaterThan(20);
-      expect(Math.hypot(se - me, sn - mn)).toBeGreaterThan(25);
+      expect(Math.hypot(se - me, sn - mn)).toBeGreaterThan(20);
       expect(surfaceUnder([se, sn, 0])).toBe(0);
       // A vehicle set down there is clear of the tower and its (swung) arms.
       const hull = cylinder([se, sn, 0], [0, 0, 1], 70);
-      const t = { ...settled, offset: 0, slew: 90, angle: 40 };
+      const t = { ...settled, offset: 0, slew: ARMS.maxSlewDeg, angle: 40 };
       expect(towerContact(pad, t, hull)).toBeNull();
       expect(qdContact(pad, t, hull)).toBeNull();
+    }
+  });
+
+  it('swung to the side, each arm turns on its own hinge, which stays where it is, and stays against the vehicle', () => {
+    for (const pad of [0, 1]) {
+      // (An arm's root: its columns nearest the hinge.)
+      const root = (side: 'L' | 'R', slew: number) => {
+        const c = armColumns(pad, side, 0, 0, slew);
+        const c0 = armColumns(pad, side, 0, 30, slew);
+        // The column that moves least between two openings is the one at the hinge.
+        let best = 0;
+        let move = Infinity;
+        for (let i = 0; i < c.length; i += 4) {
+          const d = Math.hypot(c[i] - c0[i], c[i + 1] - c0[i + 1]);
+          if (d < move) [move, best] = [d, i];
+        }
+        return [c[best], c[best + 1]];
+      };
+      for (const side of ['L', 'R'] as const) {
+        const home = root(side, 0);
+        for (const slew of [-ARMS.maxSlewDeg, -30, 30, ARMS.maxSlewDeg]) {
+          const at = root(side, slew);
+          expect(Math.hypot(at[0] - home[0], at[1] - home[1])).toBeLessThan(1.2);
+        }
+      }
+      // A hull where the swung arms hold one: touched by both arms closed on it just as one over
+      // the mount is, and by neither opened a little.
+      const touch = (slew: number, angle: number) => {
+        const [e, n] = catchPoint(pad, slew);
+        const hull = cylinder([e, n, ARMS.homeTop - 40], [0, 0, 1], 70);
+        const t = { ...settled, offset: 0, slew, angle };
+        return (['L', 'R'] as const).map((s) => armContact(pad, s, t, hull)?.depth ?? 0);
+      };
+      const closed = touch(0, 0);
+      for (const slew of [-ARMS.maxSlewDeg, -30, 30, ARMS.maxSlewDeg]) {
+        const d = touch(slew, 0);
+        for (const k of [0, 1]) expect(Math.abs(d[k] - closed[k])).toBeLessThan(0.6);
+        expect(touch(slew, 8)).toEqual([0, 0]);
+      }
+      expect(touch(0, 8)).toEqual([0, 0]);
     }
   });
 
   it('an arm swung into a standing rocket tips it over, and it is destroyed when it hits the ground', () => {
     const sim = new Simulation();
     const stack = sim.find('stack')!;
-    sim.towers[0].command({ slew: ARMS.maxSlewDeg });
+    // (Nearly closed, and swung to the side: the arm on the far side comes across through it.)
+    sim.towers[0].command({ slew: ARMS.maxSlewDeg, angle: 5 });
     let pushed = -1;
     for (let i = 0; i < 60 * 100 && stack.status !== 'destroyed'; i++) {
       sim.step();

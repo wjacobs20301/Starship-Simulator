@@ -427,7 +427,7 @@ describe('saved and loaded the way the worker does it, in the weather', () => {
     // does at SECO; warping on rails where it may): saved again with satellites out, the door
     // open, the dispenser part-way through its cycle, a deorbit burn planned.
     while (sim.mission.phase !== 'coast') sim.step();
-    sim.commandReturn({ kind: 'tower', pad: 1, slew: -70 });
+    sim.commandReturn({ kind: 'tower', pad: 1, slew: 0, approach: 'gulf' });
     for (let n = 0; n < 3e6 && sim.bay!.sats.length < 2; n++) warp(sim);
     for (let i = 0; i < 2500; i++) sim.step();
     expect(sim.bay!.state).toBe('deploying');

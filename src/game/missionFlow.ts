@@ -59,9 +59,9 @@ export function createMissionFlow(deps: MissionFlowDeps): MissionFlow {
         const aim = tracker.mission.target?.vehicle === 'ship' ? tracker.mission.target : SPLASH_TARGET;
         const target: ReturnTarget =
           setup.shipReturn === 'tower'
-            ? setup.shipCatchSlew !== undefined
-              ? { kind: 'tower', pad: flight.launchPad, slew: setup.shipCatchSlew }
-              : { kind: 'tower', pad: -1 }
+            ? setup.shipCatchOwnTower
+              ? { kind: 'tower', pad: flight.launchPad, slew: 0, approach: setup.shipApproach }
+              : { kind: 'tower', pad: -1, approach: setup.shipApproach }
             : { kind: 'ocean', lat: aim.lat, lon: aim.lon };
         send({ type: 'return', target });
       }

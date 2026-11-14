@@ -22,15 +22,14 @@ const PREDICT_EVERY = 400;
 let lastPredict = -Infinity;
 /** Warping ahead to a point in the flight (the player asked), or null. */
 let warpTo: WarpTarget | null = null;
-/** Stop warping this long before a maneuver burn starts, s (time to line up and watch it). */
-const NODE_LEAD = 30;
 
 /** Sim time a warp-to should stop at, or null if there's nothing to go to. */
 function warpToTime(target: WarpTarget): number | null {
   if (target === 'next') return sim.waitUntil;
   const n = sim.nodeSnapshot();
   if (!n) return null;
-  return n.t - (Number.isFinite(n.burnTime) ? n.burnTime / 2 : 0) - NODE_LEAD;
+  // (Ten seconds before the burn starts; earlier if the ship still has to turn to it.)
+  return n.t - (Number.isFinite(n.burnTime) ? n.burnTime / 2 : 0) - sim.burnLead();
 }
 
 /**

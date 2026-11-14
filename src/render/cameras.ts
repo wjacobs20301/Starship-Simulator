@@ -8,6 +8,9 @@ import { MOUNTS, TOWERS } from '../sim/padCollision';
 
 const EARTH_CENTER = ecefToWorld([0, 0, 0]);
 const Y = new THREE.Vector3(0, 1, 0);
+const TMP_UP = new THREE.Vector3();
+const TMP_V = new THREE.Vector3();
+const TMP_Q = new THREE.Quaternion();
 /** Earth-fixed axes in world coordinates (for the map camera). */
 const axisWorld = (p: V3) => {
   const w = ecefToWorld(p);
@@ -37,8 +40,17 @@ export const CAMERA_LABELS: Record<CameraMode, string> = {
   hull: 'Hull camera (payload door)',
   satellite: 'Starlink camera',
 };
-/** Camera modes that need something to look from: the payload door (a Starlink ship), a satellite out. */
-const NEEDS: Partial<Record<CameraMode, 'door' | 'sat'>> = { bay: 'door', baytop: 'door', hull: 'door', satellite: 'sat' };
+/**
+ * Camera modes that need something: the payload door to look from (a Starlink ship), a satellite
+ * out and clear of the ship to ride on, or, for Starbase's own cameras, the vehicle in their sight.
+ */
+export type CameraNeed = 'door' | 'sat' | 'ground';
+const NEEDS: Partial<Record<CameraMode, CameraNeed>> = { bay: 'door', baytop: 'door', hull: 'door', satellite: 'sat', pad: 'ground', tower: 'ground', spectator: 'ground' };
+/** A satellite carries the Starlink camera once it has been out this long, s: through the slot and ~15 m clear of the hull. */
+export const SAT_CAMERA_AGE = 30;
+/** Starbase's cameras see a vehicle this far off (m) and this high above their horizon (rad) at the most / least. */
+const GROUND_RANGE = 600e3;
+const GROUND_ELEVATION = 0.02;
 
 // Fixed viewpoints in pad ENU (m).
 /** The tower cameras: on a boom above each tower's top, out over its arms (looking down at a catch). */
@@ -66,6 +78,13 @@ export interface CameraTarget {
   door?: { at: V3; out: V3; side: V3 };
   /** The satellite the Starlink camera rides on (world). */
   sat?: V3;
+  /** Which vehicle this is. */
+  id?: string;
+  /**
+   * Coasting in space: the way it's going over the ground (world, any length). The free camera
+   * then keeps its place relative to that, and to the vertical.
+   */
+  track?: V3;
 }
 
 export class CameraRig {
@@ -79,9 +98,15 @@ export class CameraRig {
   distance = 420;
   private dragging = false;
   private last = { x: 0, y: 0 };
-  /** Local vertical at the target, and the rotation taking the pad's axes to local axes. */
+  /**
+   * Local vertical at the target, and the rotation taking the pad's axes to local axes: carried
+   * along from frame to frame as the target moves (see update()).
+   */
   private up = new THREE.Vector3(0, 1, 0);
   private local = new THREE.Quaternion();
+  /** The target's ground-track direction last frame (horizontal, unit) and whose it was. */
+  private lastTrack: THREE.Vector3 | null = null;
+  private lastTrackId: string | undefined;
   /** Map view: orbiting the Earth's centre in the Earth-fixed frame (longitude / latitude). */
   map = false;
   mapLon = 0;
@@ -170,8 +195,19 @@ export class CameraRig {
     return [pos[0] + up.x * lift, pos[1] + up.y * lift, pos[2] + up.z * lift];
   }
 
+  /**
+   * Whether Starbase's cameras (the pad's, the towers', South Padre Island's) can see a point
+   * (world): above their horizon and not too far. A ship in orbit mostly isn't: they'd look
+   * down through the ground at it.
+   */
+  static groundSees(c: V3): boolean {
+    const d: V3 = [c[0] - PAD_CAM[0], c[1] - PAD_CAM[1], c[2] - PAD_CAM[2]];
+    const range = Math.hypot(d[0], d[1], d[2]);
+    return range < GROUND_RANGE && d[1] > range * Math.sin(GROUND_ELEVATION);
+  }
+
   /** Next camera; has: whether there's a payload door / a satellite to look from (else those are skipped). */
-  cycle(has: (need: 'door' | 'sat') => boolean = () => false): void {
+  cycle(has: (need: CameraNeed) => boolean = () => false): void {
     this.map = false;
     let i = CAMERA_MODES.indexOf(this.mode);
     for (let k = 0; k < CAMERA_MODES.length; k++) {
@@ -182,13 +218,54 @@ export class CameraRig {
     this.mode = CAMERA_MODES[i];
   }
 
+  /** The free camera's frame back to the pad's own (a new flight or scene: its angles mean what they did). */
+  resetFrame(): void {
+    this.up.copy(Y);
+    this.local.identity();
+    this.lastTrack = null;
+  }
+
+  /**
+   * The local vertical at the target (the pad's +y near Starbase, very different half a world
+   * away), and the free camera's axes there. The axes are carried along with the target: tipped
+   * by just the turn of the vertical since last frame, and, for a vehicle coasting in space,
+   * turned with its ground track, so the camera keeps its place relative to the way it's going.
+   * (They used to be the pad's axes tipped over to the local vertical the short way round. Near
+   * Starbase that's the same thing; round the far side of the Earth the short way flips over,
+   * and the camera swung right round the ship each orbit: slowly at first, wildly under time warp.)
+   */
+  private carryFrame(target: CameraTarget): void {
+    const c = target.center;
+    const up = TMP_UP.set(c[0] - EARTH_CENTER[0], c[1] - EARTH_CENTER[1], c[2] - EARTH_CENTER[2]).normalize();
+    const step = TMP_Q.setFromUnitVectors(this.up, up);
+    this.local.premultiply(step);
+    let track: THREE.Vector3 | null = null;
+    if (target.track) {
+      track = new THREE.Vector3(...target.track);
+      track.addScaledVector(up, -track.dot(up));
+      track = track.lengthSq() > 1e-6 ? track.normalize() : null;
+    }
+    if (track && this.lastTrack && this.lastTrackId === target.id) {
+      // (Where the carried axes have the track now, and where it really is: turn by the difference.)
+      const was = this.lastTrack.applyQuaternion(step);
+      const turn = Math.atan2(up.dot(TMP_V.crossVectors(was, track)), was.dot(track));
+      this.local.premultiply(TMP_Q.setFromAxisAngle(up, turn));
+    }
+    this.local.normalize();
+    this.lastTrack = track;
+    this.lastTrackId = target.id;
+    this.up.copy(up);
+  }
+
   /** Returns the camera world position and field of view for this frame. */
   update(camera: THREE.PerspectiveCamera, target: CameraTarget): V3 {
     if (this.map) return this.updateMap(camera);
     const c = target.center;
-    // Local vertical at the target: the pad's +y near Starbase, very different half a world away.
-    this.up.set(c[0] - EARTH_CENTER[0], c[1] - EARTH_CENTER[1], c[2] - EARTH_CENTER[2]).normalize();
-    this.local.setFromUnitVectors(Y, this.up);
+    this.carryFrame(target);
+    // (A camera left on something that's no longer there: the vehicle gone over Starbase's horizon,
+    // the satellite it rode long gone. Back to the free camera.)
+    const need = NEEDS[this.mode];
+    if ((need === 'ground' && !CameraRig.groundSees(c)) || (need === 'sat' && !target.sat)) this.mode = 'orbit';
     let pos: V3;
     let fov = 50;
     switch (this.mode) {
@@ -290,8 +367,10 @@ export class CameraRig {
         return this.aim(camera, [at.x, at.y, at.z], look, out, 64);
       }
       case 'satellite': {
-        // On a satellite, a few metres beyond and above it, looking back at the ship (a long lens that keeps
-        // the ship a steady size as the satellite drifts away).
+        // On a satellite that's out and clear of the ship, as its own camera sees it: mounted just
+        // behind and over the satellite, whose edge runs along the bottom of the picture, looking
+        // back at the ship as it falls away. (A normal lens to begin with, the ship filling the
+        // view; then tightening as it shrinks, but never so far that the satellite itself is lost.)
         if (!target.sat) {
           pos = [c[0] + this.up.x * target.size, c[1] + this.up.y * target.size, c[2] + this.up.z * target.size];
           break;
@@ -300,9 +379,15 @@ export class CameraRig {
         const away = new THREE.Vector3(s[0] - c[0], s[1] - c[1], s[2] - c[2]);
         const d = Math.max(1, away.length());
         away.divideScalar(d);
-        const at: V3 = [s[0] + away.x * 4 + this.up.x * 4, s[1] + away.y * 4 + this.up.y * 4, s[2] + away.z * 4 + this.up.z * 4];
-        const zoom = THREE.MathUtils.clamp(2 * Math.atan((target.size * 1.1) / (d + 6)) * THREE.MathUtils.RAD2DEG, 2, 70);
-        return this.aim(camera, at, new THREE.Vector3(...c), this.up, zoom);
+        // (The picture's up: the local vertical, squared to the line of sight.)
+        const over = this.up.clone().addScaledVector(away, -this.up.dot(away));
+        if (over.lengthSq() < 1e-4) over.set(1, 0, 0).addScaledVector(away, -away.x);
+        over.normalize();
+        // (Five metres behind it and two over it: the satellite lies across the bottom of the
+        // picture, under the ship, not across it.)
+        const at: V3 = [s[0] + away.x * 5 + over.x * 2, s[1] + away.y * 5 + over.y * 2, s[2] + away.z * 5 + over.z * 2];
+        const zoom = THREE.MathUtils.clamp(2 * Math.atan((target.size * 0.9) / (d + 5)) * THREE.MathUtils.RAD2DEG, 36, 62);
+        return this.aim(camera, at, new THREE.Vector3(...c), over, zoom);
       }
       case 'pad':
       case 'spectator': {
