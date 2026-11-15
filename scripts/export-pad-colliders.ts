@@ -60,7 +60,12 @@ function points(n: Node, m: M4, dense = true, out: number[][] = []): number[][] 
       }
     }
   }
-  for (const c of n.listChildren()) points(c, mul(m, c.getMatrix() as M4), dense, out);
+  for (const c of n.listChildren()) {
+    // (An arm's swing cylinder's rod rides on the arm but turns on its own pin, back beside the
+    // tower: no part of what a vehicle can meet.)
+    if (c.getName().includes('ArmRod')) continue;
+    points(c, mul(m, c.getMatrix() as M4), dense, out);
+  }
   return out;
 }
 

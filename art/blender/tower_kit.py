@@ -16,7 +16,7 @@ import bpy
 from mathutils import Matrix, Vector
 
 from lib import ROOT, MeshBuilder, parent_keep, pivot
-from chopsticks import HINGE_X, QD_DEPTH, QD_KICKER_DROP, QD_TOP, build_arm, build_carriage, build_lattice, build_qd_arm
+from chopsticks import HINGE_X, QD_DEPTH, QD_KICKER_DROP, QD_TOP, build_actuator, build_arm, build_carriage, build_lattice, build_qd_arm
 
 KIT = os.path.join(ROOT, "art", "source", "tower", "stl", "STLs")
 SCALE = 0.144  # 1 mm at 1:144 -> 0.144 m
@@ -166,7 +166,8 @@ def build_tower_kit(root, mats, geo, spec):
         node = pivot(f"{pre}Chopstick_{tag}", tuple(at.translation))
         node.rotation_quaternion = KIT_TO_WORLD.to_quaternion()  # (the carriage's frame: its hinge turns in it)
         parent_keep(node, carriage)
-        steel, rail = build_arm(hang + reach, hang)
+        # (The second tower's arms are the shorter, deeper design: chopsticks.py.)
+        steel, rail = build_arm(hang + reach, hang, short=reach < 9.0)
         flip = Matrix.Diagonal((-1, 1, 1, 1)) if side < 0 else Matrix.Identity(4)
         for mb, name, mat in ((steel, "Arm", mats.chopstick), (rail, "Rail", mats.arm_rail)):
             obj = mb.build(f"{pre}Chopstick_{tag}_{name}", mat)
@@ -174,6 +175,21 @@ def build_tower_kit(root, mats, geo, spec):
             if side < 0:
                 obj.data.flip_normals()
             parent_keep(obj, node)
+        # Its swing cylinder: the barrel (and the housing on its tower end) on a pin on the
+        # carriage, the rod on a pin on the arm's lug. Each its own node at its pin, so the app
+        # can turn them to face each other as the arm swings.
+        anchor, lug, barrel, cover, rod = build_actuator(side)
+        barrel_node = pivot(f"{pre}ArmActuator_{tag}", tuple((arm_frame @ anchor.to_4d()).to_3d()))
+        barrel_node.rotation_quaternion = KIT_TO_WORLD.to_quaternion()
+        parent_keep(barrel_node, carriage)
+        rod_node = pivot(f"{pre}ArmRod_{tag}", tuple((arm_frame @ lug.to_4d()).to_3d()))
+        rod_node.rotation_quaternion = KIT_TO_WORLD.to_quaternion()
+        parent_keep(rod_node, node)
+        for mb, name, mat, to in ((barrel, "ArmActuator", mats.chopstick, barrel_node), (cover, "ArmActuator_Cover", mats.tank_white, barrel_node),
+                                  (rod, "ArmRod", mats.pipe, rod_node)):
+            obj = mb.build(f"{pre}{name}_{tag}_Mesh", mat)
+            obj.data.transform(arm_frame)
+            parent_keep(obj, to)
 
     # --- Ship quick-disconnect arm ------------------------------------------------
     # The kit arm is modeled for a longer tower-to-mount distance; shorten its straight run so the

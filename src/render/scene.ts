@@ -11,6 +11,7 @@ import { armSwing } from '../sim/padCollision';
 import { SceneAtmospherePass } from './atmosphere';
 import { AutoExposurePass } from './exposure';
 import { StarSky } from './stars';
+import { ArmActuator } from './armActuators';
 import { TowerRigging } from './towerRigging';
 import { weatherPads } from './padDetail';
 import type { FloatingOrigin } from './floatingOrigin';
@@ -156,6 +157,8 @@ interface TowerRig {
   qd: ArmRig;
   /** The carriage's hoisting ropes and blocks. */
   rigging: TowerRigging;
+  /** The arms' swing cylinders. */
+  actuators: ArmActuator[];
 }
 
 /** Tower mechanisms: both towers' ship QD arms and catch arms (from the sim), and wreckage. */
@@ -206,7 +209,13 @@ export class PadRig {
       const groundY = fall.worldToLocal(model.localToWorld(new THREE.Vector3())).y;
       const spec = p === 'Pad1_' ? { passes: 5, housing: true, exitSection: 1 } : { passes: 6, housing: true, exitSection: 2 };
       const rigging = new TowerRigging(fall, carriage, need(`${p}Chopstick_L_Arm`), need(`${p}Tower`), front, groundY, spec);
-      return { carriage, home: carriage.position.y, left: arm('L'), right: arm('R'), fall, fallAngle: 0, fallRate: 0, qd, rigging };
+      // The arms' swing cylinders: barrel on the carriage, rod on the arm (armActuators.ts).
+      const actuators = (['L', 'R'] as const).flatMap((side) => {
+        const barrel = model.getObjectByName(`${p}ArmActuator_${side}`);
+        const rod = model.getObjectByName(`${p}ArmRod_${side}`);
+        return barrel && rod ? [new ArmActuator(barrel, rod)] : [];
+      });
+      return { carriage, home: carriage.position.y, left: arm('L'), right: arm('R'), fall, fallAngle: 0, fallRate: 0, qd, rigging, actuators };
     });
     this.update(null, []);
   }
@@ -231,6 +240,7 @@ export class PadRig {
       // armSwing).
       pose(rig.left, armSwing(i, 'L', state.angle, state.slew ?? 0), !!state.broken?.L);
       pose(rig.right, armSwing(i, 'R', state.angle, state.slew ?? 0), !!state.broken?.R);
+      for (const a of rig.actuators) a.update();
       // The ship QD arm: swung by the sim; bent down off its hinge when a vehicle wrecks it.
       pose(rig.qd, THREE.MathUtils.degToRad(state.qd ?? 0), !!state.qdBroken);
       // A felled tower goes over like a falling mast: slowly at first, then faster.
