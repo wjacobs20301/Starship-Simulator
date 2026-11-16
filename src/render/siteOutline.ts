@@ -3,13 +3,17 @@
 //
 // Coordinates: pad-local east / north metres (origin at the Pad 1 launch mount, ground level).
 
+import { HIGHWAY_4_EAST, HIGHWAY_4_WEST } from './roadLines';
+
 /**
  * Launch-site outline, (east, north) m, counter-clockwise. Traced over the imagery / OSM.
  *
  * Its north side runs along Highway 4, which is in the aerial imagery and stays in it: the
  * edge stands ROAD_CLEAR back from the road's centre line, so that neither the slab nor the
  * sloped fill round it (EDGE wide) lies on the road. (It ran 4 to 11 m from the centre line,
- * and the fill and its apron, added later, buried the road for the whole length of the site.)
+ * and the fill and its apron, added later, buried the road for the whole length of the site.
+ * Then the road's line was one traced by eye off the photo, up to 5 m out: the outline is set
+ * against OpenStreetMap's now.)
  */
 export const SITE_OUTLINE: [number, number][] = [
   [-445, -18],
@@ -19,8 +23,8 @@ export const SITE_OUTLINE: [number, number][] = [
   [130, -82],
   [130, 107],
   [60, 126],
-  [-55, 159],
-  [-200, 194],
+  [-55, 157],
+  [-200, 191],
   [-334, 213],
   [-445, 202],
 ];
@@ -28,27 +32,8 @@ export const SITE_OUTLINE: [number, number][] = [
 /** Width of the sloped fill edge around the slab, m. */
 export const SITE_EDGE = 9;
 
-/** Highway 4 past the launch site: its centre line (east, north; m), west to east, off the 2022 imagery. */
-export const HIGHWAY_4: [number, number][] = [
-  [-700, 150],
-  [-600, 183],
-  [-497, 211],
-  [-400, 228],
-  [-350, 232.5],
-  [-300, 229],
-  [-250, 223],
-  [-200, 212.5],
-  [-150, 201],
-  [-100, 190.5],
-  [-50, 176],
-  [0, 162],
-  [50, 148],
-  [100, 134],
-  [150, 122],
-  [200, 110.5],
-  [250, 98],
-  [330, 78],
-];
+/** Highway 4 past the launch site: its centre line (east, north; m), west to east (roadLines.ts: OpenStreetMap's). */
+export const HIGHWAY_4: [number, number][] = [...HIGHWAY_4_WEST.filter(([e]) => e > -900), ...HIGHWAY_4_EAST];
 /** Half the road's width with its shoulders, m. */
 export const ROAD_HALF = 6;
 /** The least the outline may stand from the road's centre line, m: the road, the fill's edge, a metre of verge. */

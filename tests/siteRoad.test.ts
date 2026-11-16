@@ -25,6 +25,7 @@ describe('the launch site keeps off Highway 4', () => {
     // (The outline as it was: its north side on the road's verge.)
     const was: [number, number][] = [[-445, -18], [130, -82], [130, 118], [60, 136], [-55, 166], [-200, 205], [-334, 228], [-445, 212]];
     expect(outlineRoadClearance(was)).toBeLessThan(ROAD_CLEAR);
-    expect(distanceToLine([-334, 228], HIGHWAY_4)).toBeLessThan(6);
+    // (That corner stood on the road's shoulder.)
+    expect(distanceToLine([-334, 228], HIGHWAY_4)).toBeLessThan(8);
   });
 });

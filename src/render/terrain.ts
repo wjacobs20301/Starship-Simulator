@@ -10,6 +10,7 @@ import { SEA_GLSL, bindSea, sea as seaState } from './ocean';
 import { FAR_SHADOW_GLSL, bindFarShadow } from './farShadows';
 import { SEA_MESH_GLSL, seaMeshUniforms } from './oceanSurface';
 import { TRENCHES } from './launchSite';
+import { ROAD_GLSL, bindRoads } from './roads';
 import { DEG, PAD } from '../sim/constants';
 import type { V3 } from '../sim/math';
 import type { FloatingOrigin } from './floatingOrigin';
@@ -118,6 +119,7 @@ function makeMaterial(map: THREE.Texture | null, holes: boolean, array: THREE.Te
     shader.uniforms.uSiteMask = uniforms.uSiteMask;
     bindFarShadow(shader);
     shader.uniforms.uSiteRect = uniforms.uSiteRect;
+    bindRoads(shader);
     bindSea(shader, seaState);
     shader.uniforms.uMaskN = seaMeshUniforms.uMaskN;
     shader.uniforms.uMaskNC = seaMeshUniforms.uMaskNC;
@@ -149,6 +151,7 @@ float siteVNoise(vec2 p) {
   f = f * f * (3.0 - 2.0 * f);
   return mix(mix(siteVHash(i), siteVHash(i + vec2(1.0, 0.0)), f.x), mix(siteVHash(i + vec2(0.0, 1.0)), siteVHash(i + vec2(1.0, 1.0)), f.x), f.y);
 }
+${ROAD_GLSL}
 ${array ? 'uniform sampler2DArray uTiles;\nvarying float vLayer;\nvarying vec2 vTileUv;' : ''}
 varying float vHeight;
 varying vec2 vEN;
@@ -193,9 +196,12 @@ if (siteUv.x > 0.0 && siteUv.y > 0.0 && siteUv.x < 1.0 && siteUv.y < 1.0) {
   // The launch site's fill (blue): compacted caliche spreading out from the slab and thinning
   // into the flats, its edge frayed, not a line.
   if (site.b > 0.003) {
-    float fray = site.b + 0.75 * (siteVNoise(vEN / 17.0) - 0.5) + 0.3 * (siteVNoise(vEN / 4.5 + 7.0) - 0.5);
+    // (The noise turned off the compass points: square to them, its cells showed along the
+    // fill's edge as a row of steps.)
+    vec2 fr = mat2(0.799, -0.602, 0.602, 0.799) * vEN;
+    float fray = site.b + 0.7 * (siteVNoise(fr / 19.0) - 0.5) + 0.22 * (siteVNoise(fr.yx / 6.3 + 7.0) - 0.5);
     vec3 fill = vec3(0.6, 0.535, 0.41) * (0.88 + 0.2 * siteVNoise(vEN / 3.1 + 1.0)) * (0.9 + 0.2 * siteVNoise(vEN / 40.0 + 5.0));
-    diffuseColor.rgb = mix(diffuseColor.rgb, fill, smoothstep(0.4, 0.62, fray) * (0.82 + 0.18 * siteVNoise(vEN / 9.0 + 2.0)));
+    diffuseColor.rgb = mix(diffuseColor.rgb, fill, smoothstep(0.36, 0.66, fray) * (0.82 + 0.18 * siteVNoise(vEN / 9.0 + 2.0)));
   }
   if (site.r + site.g > 0.003) {
     vec2 slab = floor(vEN / 7.5);
@@ -212,6 +218,8 @@ if (siteUv.x > 0.0 && siteUv.y > 0.0 && siteUv.x < 1.0 && siteUv.y < 1.0) {
     diffuseColor.rgb = mix(diffuseColor.rgb, lawn, site.g * (1.0 - site.r));
   }
 }
+// Highway 4, over whatever else is painted on the ground (roads.ts).
+roadPaint(vEN, diffuseColor.rgb);
 // Fade out over the region's outer edge, revealing the streamed globe tiles underneath.
 float edge = smoothstep(uEdge.x, uEdge.y, max(abs(vEN.x), abs(vEN.y)));
 diffuseColor.a *= 1.0 - edge;

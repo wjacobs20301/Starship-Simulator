@@ -864,18 +864,34 @@ function paintSiteMask(facilities: Facility[]): void {
   // the pads were built up on, spreading out past the concrete and thinning into the flats
   // (blurred over ~25 m here; the terrain's shader frays its edge). Without it the slab was a
   // sheet of card laid on the marsh.
+  // (Drawn by itself first, so that it can be kept off the road and off everything beyond it:
+  // the site is all on the road's south side, and the fill's blurred edge reached across to lie
+  // along the far verge as a band of its own.)
+  const fillCanvas = document.createElement('canvas');
+  fillCanvas.width = canvas.width;
+  fillCanvas.height = canvas.height;
+  const fill = fillCanvas.getContext('2d')!;
+  fill.filter = `blur(${9 / MASK_RES}px)`;
+  fill.fillStyle = fill.strokeStyle = 'rgb(0,0,255)';
+  fill.lineWidth = (2 * 9) / MASK_RES;
+  fill.beginPath();
+  SITE_OUTLINE.forEach(([e, n], i) => (i ? fill.lineTo(...px(e, n)) : fill.moveTo(...px(e, n))));
+  fill.closePath();
+  fill.fill();
+  fill.stroke();
+  const BEYOND = 34;
+  fill.globalCompositeOperation = 'destination-out';
+  fill.filter = `blur(${2 / MASK_RES}px)`;
+  fill.strokeStyle = 'rgb(0,0,0)';
+  fill.lineWidth = (2 * BEYOND) / MASK_RES;
+  fill.beginPath();
+  HIGHWAY_4.forEach(([e, n], i) => (i ? fill.lineTo(...px(e, n + BEYOND - ROAD_HALF)) : fill.moveTo(...px(e, n + BEYOND - ROAD_HALF))));
+  fill.stroke();
   ctx.globalCompositeOperation = 'lighter';
-  ctx.filter = `blur(${9 / MASK_RES}px)`;
-  ctx.fillStyle = ctx.strokeStyle = 'rgb(0,0,255)';
-  ctx.lineWidth = (2 * 9) / MASK_RES;
-  ctx.beginPath();
-  SITE_OUTLINE.forEach(([e, n], i) => (i ? ctx.lineTo(...px(e, n)) : ctx.moveTo(...px(e, n))));
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
-  ctx.filter = 'none';
-  // Highway 4 stays as the photo has it: none of this painted ground on the road (the fill's
-  // apron, and the concrete round the buildings that stand along it, reached over it).
+  ctx.drawImage(fillCanvas, 0, 0);
+  // Highway 4 itself is painted on the ground over all of this (roads.ts); none of the painted
+  // ground lies on it either (the concrete round the buildings that stand along it reached
+  // over it).
   ctx.globalCompositeOperation = 'destination-out';
   ctx.filter = `blur(${2 / MASK_RES}px)`;
   ctx.strokeStyle = 'rgb(0,0,0)';
