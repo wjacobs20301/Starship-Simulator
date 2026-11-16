@@ -84,6 +84,49 @@ describe('the free camera round a ship in orbit', () => {
     expect(cam[2]).toBeCloseTo(80, 0);
   });
 
+  it('glides from one vehicle to another close by (the ship lifted off the stack), and cuts to one far off', () => {
+    const rig = new CameraRig(el);
+    const camera = new THREE.PerspectiveCamera();
+    rig.azimuth = 0;
+    rig.elevation = 0;
+    rig.distance = 100;
+    const stack = { center: [0, 80, 0] as [number, number, number], axis: [0, 1, 0] as [number, number, number], size: 124, id: 'stack' };
+    const ship = { ...stack, center: [0, 116, 0] as [number, number, number], size: 52, id: 'ship' };
+    /** Where a camera set the same way and never anywhere else stands for a target. */
+    const direct = (target: typeof stack) => {
+      const r = new CameraRig(el);
+      r.azimuth = 0;
+      r.elevation = 0;
+      r.distance = 100;
+      return r.update(new THREE.PerspectiveCamera(), target, 0);
+    };
+    let t = 1000;
+    const on = rig.update(camera, stack, t);
+    // The frame the ship is first followed, the camera is where it was; then on its way; then there.
+    const first = rig.update(camera, ship, (t += 16));
+    expect(Math.abs(first[1] - on[1])).toBeLessThan(0.01);
+    let last = first[1];
+    for (let k = 0; k < 110; k++) {
+      const cam = rig.update(camera, ship, (t += 16));
+      // (Never a jump: under a metre a frame, and always on toward the ship.)
+      expect(cam[1] - last).toBeGreaterThanOrEqual(0);
+      expect(cam[1] - last).toBeLessThan(1);
+      last = cam[1];
+    }
+    expect(last).toBeCloseTo(direct(ship)[1], 3);
+    // Moving meanwhile, the glide goes with it: no lag left at the end.
+    const moved = { ...stack, center: [0, 500, 0] as [number, number, number] };
+    rig.update(camera, moved, (t += 16));
+    rig.update(camera, { ...ship, center: [0, 536, 0] }, (t += 16));
+    const end = rig.update(camera, { ...ship, center: [0, 2536, 0] }, (t += 2000));
+    expect(end[1]).toBeCloseTo(direct({ ...ship, center: [0, 2536, 0] })[1], 2);
+    // A booster kilometres away: a cut.
+    const far = rig.update(camera, { ...stack, center: [5000, 30, 0], size: 72, id: 'booster' }, (t += 16));
+    const there = direct({ ...stack, center: [5000, 30, 0], size: 72, id: 'booster' });
+    expect(far[0]).toBeCloseTo(there[0], 1);
+    expect(far[1]).toBeCloseTo(there[1], 1);
+  });
+
   it("Starbase's cameras are offered only for what they can see", () => {
     expect(CameraRig.groundSees([500, 3000, -2000])).toBe(true);
     expect(CameraRig.groundSees([80e3, 60e3, -5e3])).toBe(true);

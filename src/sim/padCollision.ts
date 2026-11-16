@@ -390,7 +390,25 @@ export function catchPoint(pad: number, slewDeg: number): [number, number] {
   return [(kl * nr[1] - kr * nl[1]) / det, (nl[0] * kr - nr[0] * kl) / det];
 }
 
-/** Height of what's under a point (pad ENU) near the pads: a launch mount, or the ground (0). */
+/**
+ * The transport stand beside each mount: where the arms, swung as far as they go to the one side
+ * (+: counter-clockwise from above), set a vehicle down, a ship or a booster (both sit on the
+ * same 9 m ring). One a pad: swung as far the other way, the arms are over the mouth of the
+ * flame trench, which runs out from under the mount on that side at both pads. Each: its pad,
+ * where (pad ENU, horizontal), and which way its trailers lie (rad from east: along the trench,
+ * so along the mount's wall beside it).
+ */
+export const STAND_HEIGHT = 3;
+/** Half the width of a stand's top, m: a vehicle's base within this of its middle is on it. */
+export const STAND_HALF = 6;
+export const STANDS: { pad: number; at: [number, number]; yaw: number }[] = [0, 1].map((pad) => ({
+  pad,
+  at: catchPoint(pad, ARMS.maxSlewDeg),
+  yaw: ((pad === 0 ? PAD : PAD2).trench.axisDeg * Math.PI) / 180,
+}));
+
+/** Height of what's under a point (pad ENU) near the pads: a launch mount, a transport stand, or the ground (0). */
 export function surfaceUnder(p: V3): number {
-  return onLaunchMount(p) ? PAD.mountHeight : 0;
+  if (onLaunchMount(p)) return PAD.mountHeight;
+  return STANDS.some((s) => Math.hypot(p[0] - s.at[0], p[1] - s.at[1]) < STAND_HALF) ? STAND_HEIGHT : 0;
 }

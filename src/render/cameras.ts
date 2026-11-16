@@ -25,6 +25,12 @@ const MAP_MIN = 7.4e6;
 const MAP_MAX = 1.2e9;
 /** Closest the camera may come to the ground or sea, m. */
 const GROUND_CLEARANCE = 2;
+/**
+ * Changing from one vehicle to another this close (m) is a glide over this long (ms), not a cut:
+ * a stack and its stages, two stages on the pad or just parted.
+ */
+const GLIDE_REACH = 400;
+const GLIDE_MS = 1600;
 
 export type CameraMode = 'orbit' | 'chase' | 'pad' | 'tower' | 'spectator' | 'inspect' | 'bay' | 'baytop' | 'hull' | 'satellite';
 export const CAMERA_MODES: CameraMode[] = ['orbit', 'chase', 'pad', 'tower', 'spectator', 'inspect', 'bay', 'baytop', 'hull', 'satellite'];
@@ -107,6 +113,16 @@ export class CameraRig {
   /** The target's ground-track direction last frame (horizontal, unit) and whose it was. */
   private lastTrack: THREE.Vector3 | null = null;
   private lastTrackId: string | undefined;
+  /**
+   * Gliding from one vehicle to another (glide()): which vehicle was aimed at last, where the aim
+   * really was last frame and the size it was framed for, when (ms); and the glide under way:
+   * how far the aim still is from the new vehicle's middle when it began, the size then, its start.
+   */
+  private aimedId: string | undefined;
+  private aimedAt: V3 | null = null;
+  private aimedSize = 0;
+  private aimedTime = 0;
+  private gliding: { off: V3; size: number; t0: number } | null = null;
   /** Map view: orbiting the Earth's centre in the Earth-fixed frame (longitude / latitude). */
   map = false;
   mapLon = 0;
@@ -223,6 +239,44 @@ export class CameraRig {
     this.up.copy(Y);
     this.local.identity();
     this.lastTrack = null;
+    this.aimedId = undefined;
+    this.aimedAt = null;
+    this.gliding = null;
+  }
+
+  /**
+   * The target to aim at this frame: the one given, or, for a second or so after the vehicle
+   * followed has changed to another close by, a point on the way from where the aim was to the
+   * new one's middle (and a size between theirs).
+   *
+   * The arms lifting the ship off the booster make two vehicles of one: the camera, on the
+   * stack's middle 62 m up, was at once on the ship's, 36 m higher, framed for something half the
+   * length. The same when they're stacked again, at staging, and on stepping from one vehicle to
+   * the next on the pad. (Not across a real distance: from a ship in orbit to its booster in the
+   * Gulf is a cut.)
+   */
+  private glide(target: CameraTarget, now: number): CameraTarget {
+    const c = target.center;
+    if (target.id !== undefined && this.aimedId !== undefined && target.id !== this.aimedId && this.aimedAt && now - this.aimedTime < 500) {
+      const off: V3 = [this.aimedAt[0] - c[0], this.aimedAt[1] - c[1], this.aimedAt[2] - c[2]];
+      this.gliding = Math.hypot(off[0], off[1], off[2]) < GLIDE_REACH ? { off, size: this.aimedSize, t0: now } : null;
+    }
+    if (target.id !== undefined) this.aimedId = target.id;
+    let out = target;
+    if (this.gliding) {
+      const u = (now - this.gliding.t0) / GLIDE_MS;
+      if (u >= 1) this.gliding = null;
+      else {
+        // (Eased at both ends; the way still to go is carried with the new vehicle as it moves.)
+        const left = 1 - u * u * u * (u * (6 * u - 15) + 10);
+        const { off, size } = this.gliding;
+        out = { ...target, center: [c[0] + off[0] * left, c[1] + off[1] * left, c[2] + off[2] * left], size: target.size + (size - target.size) * left };
+      }
+    }
+    this.aimedAt = out.center;
+    this.aimedSize = out.size;
+    this.aimedTime = now;
+    return out;
   }
 
   /**
@@ -258,8 +312,9 @@ export class CameraRig {
   }
 
   /** Returns the camera world position and field of view for this frame. */
-  update(camera: THREE.PerspectiveCamera, target: CameraTarget): V3 {
+  update(camera: THREE.PerspectiveCamera, given: CameraTarget, now = performance.now()): V3 {
     if (this.map) return this.updateMap(camera);
+    const target = this.glide(given, now);
     const c = target.center;
     this.carryFrame(target);
     // (A camera left on something that's no longer there: the vehicle gone over Starbase's horizon,

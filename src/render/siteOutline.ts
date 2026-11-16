@@ -91,3 +91,13 @@ export function outlineRoadClearance(outline: readonly (readonly [number, number
   }
   return best;
 }
+
+/** Whether a point (east, north) is on the launch site's slab. */
+export function insideSite(e: number, n: number): boolean {
+  let inside = false;
+  for (let i = 0, j = SITE_OUTLINE.length - 1; i < SITE_OUTLINE.length; j = i++) {
+    const [a, b] = [SITE_OUTLINE[i], SITE_OUTLINE[j]];
+    if (a[1] > n !== b[1] > n && e < ((b[0] - a[0]) * (n - a[1])) / (b[1] - a[1]) + a[0]) inside = !inside;
+  }
+  return inside;
+}

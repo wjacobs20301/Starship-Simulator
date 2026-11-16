@@ -9,17 +9,19 @@ import { buildingUniforms, loadFacilities } from './render/facilities';
 import { farShadowCasters } from './render/farShadows';
 import { rocketGarden } from './render/rocketGarden';
 import { loadSouthPadre } from './render/southPadre';
-import { createLaunchSite } from './render/launchSite';
+import { SLAB_TOP, createLaunchSite } from './render/launchSite';
 import { PadLights, lampLightAll } from './render/padLights';
 import { Scrub } from './render/scrub';
+import { insideSite } from './render/siteOutline';
+import { TransportStands } from './render/transportStands';
 import { createYardLights } from './render/yardLights';
 import { Moon } from './render/moon';
 import { WEATHER_NAME, onSettingsChange, settings, updateSettings } from './settings';
 import { type PadRig, createWorld } from './render/scene';
 import { createFramePacing } from './render/framePacing';
-import { RE } from './sim/constants';
+import { PAD, RE } from './sim/constants';
 import { GlobeTiles } from './render/globeTiles';
-import { ecefToWorld, worldToGeodetic } from './render/geo';
+import { M_PER_DEG_LAT, M_PER_DEG_LON, ecefToWorld, worldToGeodetic } from './render/geo';
 import { sea } from './render/ocean';
 import { AfloatFx } from './render/fx/afloat';
 import { FarCull } from './render/farCull';
@@ -133,9 +135,18 @@ origin.place(launchSite, [0, 0, 0]);
 // The launch site's parts too small to see from where the camera is: left out (farCull.ts).
 const farCull = new FarCull();
 farCull.add(launchSite, origin.camera);
+// The transport stands beside the mounts, and the one that brings a vehicle out to them.
+const transportStands = new TransportStands();
+const stands = transportStands.group;
+world.scene.add(stands, transportStands.rolling);
+world.statics.push(stands);
+origin.place(stands, [0, 0, 0]);
+farCull.add(stands, origin.camera);
+farShadowCasters.push(stands);
 // Floodlights and tower beacons, for the night.
 const padLights = new PadLights();
 lampLightAll(launchSite);
+lampLightAll(stands);
 world.scene.add(padLights.group);
 world.statics.push(padLights.group);
 origin.place(padLights.group, [0, 0, 0]);
@@ -493,7 +504,8 @@ function resetFlight(): void {
   backdrop.clearPadView();
   sky.applyWeatherSetting();
   const setup = tracker.mission.setup;
-  const start = setup.start ?? 'pad';
+  // (Free roam's other start: the ship on its way out from the Starfactory on its transport.)
+  const start = setup.start ?? (tracker.mission.id === 'free' && settings.freeRollout ? 'rollout' : 'pad');
   if (setup.pad !== undefined && flight.launchPad !== setup.pad) setLaunchPad(setup.pad);
   sky.startDay(missionDaylight(tracker.mission));
   send({ type: 'reset', pad: flight.launchPad, start, boosterOcean: setup.boosterOcean ? BOOSTER_OCEAN_ENU : null, options: missionFlow.flightOptions(setup) });
@@ -502,7 +514,7 @@ function resetFlight(): void {
   send({ type: 'node', node: null });
   // Hand-flown missions (and free roam) start with the player at the controls, autopilot off
   // for what they fly: set up for where it starts.
-  flight.trackedId = setup.fly ?? 'stack';
+  flight.trackedId = setup.fly ?? (start === 'rollout' ? 'ship' : 'stack');
   // Watched flights get the auto camera (K turns it off; touching the camera does too).
   views.restartDirector(tracker.mission.group === 'auto');
   const fly = setup.fly;
@@ -848,6 +860,15 @@ function placeWorldStep(snap: Snapshot, simTime: number, placements: FxVehicle[]
   origin.apply(world.statics);
   moon.update(simTime, world.skyRotation, world.sunDir, origin, PAD_UP, buildingUniforms.uNight.value);
   for (const pl of placements) origin.place(pl.mesh.root, pl.world);
+  // The transport under a vehicle rolling out: where that vehicle is drawn, its wheels on the
+  // road there (the terrain's height; the slab's, once on the launch site); arrived, on its stand's place.
+  {
+    const tr = snap.transport;
+    const riding = tr && !tr.arrived ? placements.find((pl) => pl.snap.id === tr.id) : null;
+    const [x, z] = riding ? [riding.world[0], riding.world[2]] : tr ? [tr.e, -tr.n] : [0, 0];
+    const ground = insideSite(x, -z) ? SLAB_TOP : ((terrain.groundHeight(PAD.latDeg - z / M_PER_DEG_LAT, PAD.lonDeg + x / M_PER_DEG_LON) ?? PAD.groundAlt) - PAD.groundAlt);
+    transportStands.update(tr, tr ? [x, ground - (x * x + z * z) / (2 * 6371000), z] : null, (o, w) => origin.place(o, w));
+  }
   farCull.update(cam, world.renderer.domElement.height / (2 * Math.tan(THREE.MathUtils.degToRad(world.camera.fov) / 2)));
   // Stages down in the sea: afloat on the waves, the spray off them.
   afloatFx.update(simTime, placements, fx.particles);

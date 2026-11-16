@@ -243,6 +243,11 @@ export class GameMenu {
         this.render();
         return;
       }
+      if (act === 'rollout') {
+        updateSettings({ freeRollout: !settings.freeRollout });
+        this.render();
+        return;
+      }
       if (act === 'faults' || act === 'tiles') {
         updateSettings(act === 'faults' ? { engineFailures: !settings.engineFailures } : { tileLoss: !settings.tileLoss });
         this.render();
@@ -609,6 +614,9 @@ export class GameMenu {
           `<div class="mn-real"><div class="mn-label">Payload</div>` +
           `<div class="mn-row"><span>Starlink V3 satellites<small>26 in the bay: ${kbd('deploy')} above 120 km to deploy, again to hold</small></span>` +
           `<button class="mn-toggle${settings.freeStarlink ? ' on' : ''}" data-act="starlink"><i></i></button></div></div>` +
+          `<div class="mn-real"><div class="mn-label">Start</div>` +
+          `<div class="mn-row"><span>Roll the ship out<small>Starship comes from the Starfactory on its transport, along Highway 4 to the stand beside the mount: stack it on the booster with the tower arms</small></span>` +
+          `<button class="mn-toggle${settings.freeRollout ? ' on' : ''}" data-act="rollout"><i></i></button></div></div>` +
           this.realism() +
           `<div class="mn-foot2"><button class="mn-go" data-act="free">Go to the pad <b>›</b></button></div></div>`
         );

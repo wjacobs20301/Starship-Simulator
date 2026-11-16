@@ -15,7 +15,8 @@ import {
   type Q, qmul, qFromAxisAngle,
 } from './math';
 import { CATCH, type CatchGuide } from './boosterReturn';
-import { type Contact, type Cylinder, MOUNTS, TOWERS, type TowerState, armContact, awayFromTower, catchGap, catchPoint, cylinder, deepestContact, surfaceUnder } from './padCollision';
+import { type Contact, type Cylinder, MOUNTS, STAND_HEIGHT, TOWERS, type TowerState, armContact, awayFromTower, catchGap, catchPoint, cylinder, deepestContact, surfaceUnder } from './padCollision';
+import { ROLL, rolloutRoute, routeAt, routeLength } from './rollout';
 import { eciDirToPad, eciToPad, eciVelToPad, padDirToEci, padToEci } from './padFrame';
 import { ARMS, TowerArms } from './tower';
 import { SHIP_ENTRY, heatFlux } from './shipReentry';
@@ -51,7 +52,8 @@ export interface FlightOptions {
   deploy?: 'auto' | 'manual';
 }
 
-export type MissionStart = 'pad' | 'separation' | 'boosterLanding' | 'entry';
+/** ('rollout': the booster on the mount, the ship on its way from the Starfactory on its transport.) */
+export type MissionStart = 'pad' | 'separation' | 'boosterLanding' | 'entry' | 'rollout';
 
 /** Main-menu backdrops (Simulation.scene). */
 export type MenuScene = 'pad' | 'liftoff' | 'orbit' | 'reentry' | 'shipCaught' | 'boosterCatch' | 'shipCatch';
@@ -188,8 +190,26 @@ export interface Snapshot {
   phase: Phase;
   vehicles: VehicleSnapshot[];
   events: SimEvent[];
+  /** A vehicle's transport (rollout): the pad it's bound for, where it is (pad east, north; m), the way it faces (rad from east), and whether it has arrived. */
+  transport?: { id: string; pad: number; e: number; n: number; heading: number; arrived: boolean } | null;
   /** Catch arms per pad: carriage height relative to home (m), opening (deg) and rail top (m). */
-  towers: { offset: number; angle: number; top: number; broken: { L: boolean; R: boolean }; down: boolean; fallDir: V3; slew: number; qd: number; qdBroken: boolean }[];
+  towers: {
+    offset: number;
+    angle: number;
+    top: number;
+    broken: { L: boolean; R: boolean };
+    down: boolean;
+    fallDir: V3;
+    slew: number;
+    qd: number;
+    qdBroken: boolean;
+    /** What hangs on the arms (its name), if anything. */
+    holding?: string;
+    /** The standing vehicle the arms could lift where they are, and how far their rails are above its lifting points, m (within 1 m, closed on it and raised, they take it). */
+    lift?: { name: string; dz: number } | null;
+    /** Opening is stopped: a standing vehicle is in an arm's way (its name). */
+    stopped?: string;
+  }[];
   /** Ship's return phase after SECO (entry, belly-flop, ...), if it has started. */
   shipPhase: string | null;
   /** The player's controls as the sim sees them, and SAS's current aim (local ENU of the flown vehicle). */
@@ -393,6 +413,7 @@ export class Simulation {
     this.returnNotice = null;
     this.inOrbitSince = null;
     this.seaTips.clear();
+    this.transport = null;
     stack.caughtPad = this.launchPad;
     placeOnPad(stack, this.t, PAD.mountHeight, this.launchPad);
     // A stacked vehicle on the launch pad: its arms are parked high up the tower, clear of the launch.
@@ -540,6 +561,7 @@ export class Simulation {
    */
   startAt(start: MissionStart): void {
     if (start === 'pad') return;
+    if (start === 'rollout') return this.beginRollout();
     this.launch();
     const tm = () => this.mission.missionTime ?? -99;
     const drop = (id: string) => {
@@ -669,6 +691,8 @@ export class Simulation {
         // Hanging on the arms: engines shut down.
         for (const e of v.engines) e.throttleCmd = 0;
         this.hang(v, this.t + dt);
+      } else if (v.status === 'landed' && this.transport && !this.transport.arrived && this.transport.id === v.id) {
+        this.ride(v, dt);
       } else if (v.status === 'landed') {
         if (this.seaTip(v, dt)) continue;
         restOnEarth(v, this.t, dt);
@@ -1098,6 +1122,74 @@ export class Simulation {
     return cylinder(add(cg, scale(axis, v.extent[0] - aux.mp.xcg)), axis, v.extent[1] - v.extent[0]);
   }
 
+  /**
+   * Rollout: the vehicle riding its transport to a pad's stand (rollout.ts): how far along the way
+   * it is (m) and how fast, and, once there, that it has arrived (the transport stays under it:
+   * it is the stand).
+   */
+  transport: { id: string; pad: number; route: [number, number][]; s: number; v: number; arrived: boolean } | null = null;
+
+  /**
+   * Free roam's other start: the booster alone on the launch mount, the ship at the Starfactory's
+   * gate on its transport, setting off for the pad. It is stacked with the tower's arms.
+   */
+  private beginRollout(): void {
+    const pad = this.launchPad;
+    const { booster, ship } = this.separate();
+    booster.status = 'held';
+    booster.caughtPad = pad;
+    placeOnPad(booster, this.t, PAD.mountHeight, pad);
+    ship.status = 'landed';
+    ship.caughtPad = pad;
+    ship.rest = null;
+    this.transport = { id: ship.id, pad, route: rolloutRoute(pad), s: 0, v: 0, arrived: false };
+    this.placeOnTransport(ship, this.t);
+    this.refreshAux();
+    this.log(`Starship rolling out from the Starfactory on its transport: ${(routeLength(this.transport.route) / 1000).toFixed(1)} km to Pad ${pad + 1}`);
+  }
+
+  /** One step of the ride: up to speed, along the way, down to a crawl onto the stand, stopped there. */
+  private ride(v: Vehicle, dt: number): void {
+    const tr = this.transport!;
+    const left = routeLength(tr.route) - tr.s;
+    const want = left > ROLL.crawlFor ? ROLL.speed : Math.max(0.15, ROLL.crawl * Math.min(1, left / 6));
+    tr.v += clamp(want - tr.v, -ROLL.accel * 2 * dt, ROLL.accel * dt);
+    tr.s += tr.v * dt;
+    if (left - tr.v * dt <= 0.02) {
+      tr.s = routeLength(tr.route);
+      tr.v = 0;
+      tr.arrived = true;
+      this.log(`Starship at Pad ${tr.pad + 1}, on its stand beside the mount: the chopsticks can take it`);
+    }
+    this.placeOnTransport(v, this.t + dt);
+    // (Arrived: it stands there like any vehicle set down, from the next step on.)
+    v.rest = null;
+  }
+
+  /**
+   * A vehicle on its transport, upright on the stand's ring, where the transport is on its way.
+   * It faces as it will on the pad's stand (as the arms would have set it there), turned with
+   * the road from that as the transport turns.
+   */
+  private placeOnTransport(v: Vehicle, t: number): void {
+    const tr = this.transport!;
+    const at = routeAt(tr.route, tr.s);
+    const end = routeAt(tr.route, routeLength(tr.route));
+    placeOnPad(v, t, STAND_HEIGHT, tr.pad, ARMS.maxSlewDeg);
+    // (placeOnPad stands it on the pad's own stand, as let down there by the arms: moved from
+    // there to where the transport is, turned by as much as the road is from its last stretch,
+    // and down with the Earth's curve: the pad's flat ground plane is 2 m up in the air 5 km off.)
+    const mp = massProps(v.stages, v.stages.map((s) => s.prop));
+    const turn = at.heading - end.heading;
+    const up = ecefToEci(enuBasis(padLat, padLon).u, t);
+    const drop = (at.e * at.e + at.n * at.n) / (2 * 6371000);
+    v.r = add(padToEci([at.e, at.n, STAND_HEIGHT - drop], t), scale(up, mp.xcg - v.extent[0]));
+    v.v = cross([0, 0, OMEGA_E], v.r);
+    if (Math.abs(turn) > 1e-6) v.q = qmul(qFromAxisAngle(up, turn), v.q);
+    v.w = qrotInv(v.q, [0, 0, OMEGA_E]);
+    v.status = 'landed';
+  }
+
   /** Vehicles being tipped over (id -> the tip about their base edge). */
   private toppling = new Map<string, Topple>();
 
@@ -1244,11 +1336,49 @@ export class Simulation {
         const r = armContact(pad, 'R', state, cyl, probe);
         left ||= !!l;
         right ||= !!r;
-        if ((l || r) && h.v.status !== 'flight') fixed = true;
+        // (One arm on a vehicle that can't give way stops them both, but not at its first
+        // touch: swung to the side the two don't arrive quite together, and the second, a
+        // fraction of a degree behind, never did, so nothing standing there could be lifted.)
+        if (h.v.status !== 'flight' && ((l && r) || (l?.depth ?? 0) > FIRM_TOUCH || (r?.depth ?? 0) > FIRM_TOUCH)) fixed = true;
       }
       arms.contact = left && right;
       arms.touching = left || right;
       arms.blocked = arms.contact || fixed;
+      // Opening, too, stops short of a vehicle standing in an arm's way: swung to the side with a
+      // ship set down there, the arm nearer the mount opens back across it, through a booster
+      // left standing on it. (Only what stands: one in flight is knocked, as ever.)
+      let inWay: string | null = null;
+      if (arms.targetAngle > arms.angle + 0.01) {
+        const wider = Math.min(ARMS.maxOpenDeg, arms.angle + 0.5);
+        for (const h of hulls) {
+          if ((h.v.status !== 'held' && h.v.status !== 'landed') || inWay) continue;
+          for (const side of ['L', 'R'] as const) {
+            const now = armContact(pad, side, state, h.cyl)?.depth ?? 0;
+            const then = armContact(pad, side, state, h.cyl, wider)?.depth ?? 0;
+            if (then > now + 0.01) inWay = h.v.name;
+          }
+        }
+        if (inWay && !arms.openBlocked) this.log(`Pad ${pad + 1} chopsticks stopped opening: ${inWay} is in the way`);
+      }
+      arms.openBlocked = inWay;
+      // And the carriage won't bring an arm down onto one: it waits a few metres above (an arm
+      // swinging across over a booster's top, on its way round to the stand, is to pass over it,
+      // not be let down on it meanwhile).
+      let under: string | null = null;
+      if (Math.max(arms.floor, arms.targetOffset) < arms.offset - 0.01) {
+        for (const h of hulls) {
+          if ((h.v.status !== 'held' && h.v.status !== 'landed') || under) continue;
+          for (const side of ['L', 'R'] as const) {
+            const now = armContact(pad, side, state, h.cyl)?.depth ?? 0;
+            for (const down of [2.5, 5]) {
+              const then = armContact(pad, side, { ...state, offset: state.offset - down }, h.cyl)?.depth ?? 0;
+              if (then > now + 0.01) under = h.v.name;
+            }
+          }
+        }
+        if (under && !arms.lowerBlocked) this.log(`Pad ${pad + 1} carriage waiting: ${under} is under an arm`);
+      }
+      arms.lowerBlocked = under;
       // Both arms on a vehicle they're centring: they hold it (sideways) from here.
       if (arms.contact) for (const h of hulls) if (this.captured.has(`${h.v.id}:${pad}`)) this.gripped.set(h.v.id, pad);
     });
@@ -1450,6 +1580,25 @@ export class Simulation {
       }
       return true;
     });
+  }
+
+  /**
+   * For the arms' readout: the standing vehicle a pad's arms could lift from where they are (it
+   * stands where they hold one: pickUp), and how far their rails are above its lifting points.
+   */
+  private liftCue(pad: number): { name: string; dz: number } | null {
+    const arms = this.towers[pad];
+    if (arms.disabled) return null;
+    const [e, n] = catchPoint(pad, arms.slew);
+    for (const v of this.vehicles) {
+      const lift = liftPoint(v);
+      const aux = this.aux.get(v.id);
+      if (lift === null || !aux || (v.status !== 'held' && v.status !== 'landed') || this.toppling.has(v.id)) continue;
+      const cyl = this.hull(v, aux);
+      if (Math.hypot(cyl.a[0] - e, cyl.a[1] - n) > 1.5) continue;
+      return { name: v.id === 'stack' ? 'Starship' : v.name, dz: arms.top - (cyl.a[2] + lift) };
+    }
+    return null;
   }
 
   private grab(v: Vehicle, pad: number, pin: number): void {
@@ -1696,7 +1845,21 @@ export class Simulation {
       phase: this.mission.phase,
       vehicles,
       events: this.drainEvents(),
-      towers: this.towers.map((a) => ({ offset: a.offset, angle: a.angle, top: a.top, broken: { ...a.broken }, down: a.down, fallDir: a.fallDir, slew: a.slew, qd: a.qd, qdBroken: a.qdBroken })),
+      transport: this.transport ? { id: this.transport.id, pad: this.transport.pad, ...routeAt(this.transport.route, this.transport.s), arrived: this.transport.arrived } : null,
+      towers: this.towers.map((a, pad) => ({
+        offset: a.offset,
+        angle: a.angle,
+        top: a.top,
+        broken: { ...a.broken },
+        down: a.down,
+        fallDir: a.fallDir,
+        slew: a.slew,
+        qd: a.qd,
+        qdBroken: a.qdBroken,
+        holding: this.vehicles.find((v) => v.status === 'caught' && v.caughtPad === pad)?.name,
+        lift: this.liftCue(pad),
+        stopped: a.openBlocked ?? a.lowerBlocked ?? undefined,
+      })),
       shipPhase: this.mission.shipReentry?.phase ?? null,
       pilot: { ...this.pilot.cmd, sasDirLocal: this.flownSasDirLocal() },
       catchGuide: this.catchGuide(),
@@ -1897,6 +2060,8 @@ const ARM_PUSH_SPEED = 2;
 
 /** An arm has to press this far into a standing vehicle (m) to start tipping it. */
 const TOPPLE_PUSH_DEPTH = 0.15;
+/** How far one closing arm may press into a standing vehicle before the pair stops for it, m (under TOPPLE_PUSH_DEPTH: it isn't pushed). */
+const FIRM_TOUCH = 0.1;
 
 /** Rotate a pad-ENU vector by `angle` about the horizontal axis that tips "up" toward `dir`. */
 function rotateAbout(p: V3, dir: V3, angle: number): V3 {

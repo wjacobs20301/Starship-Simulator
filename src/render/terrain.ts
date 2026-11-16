@@ -11,6 +11,7 @@ import { FAR_SHADOW_GLSL, bindFarShadow } from './farShadows';
 import { SEA_MESH_GLSL, seaMeshUniforms } from './oceanSurface';
 import { TRENCHES } from './launchSite';
 import { ROAD_GLSL, bindRoads } from './roads';
+import { photoLit } from './photoGround';
 import { SITE_LIGHT_GLSL, siteLightUniforms } from './siteLight';
 import { DEG, PAD } from '../sim/constants';
 import type { V3 } from '../sim/math';
@@ -138,6 +139,7 @@ function makeMaterial(map: THREE.Texture | null, holes: boolean, array: THREE.Te
     shader.uniforms.uSiteRect = uniforms.uSiteRect;
     bindRoads(shader);
     Object.assign(shader.uniforms, siteLightUniforms);
+    photoLit(shader);
     bindSea(shader, seaState);
     shader.uniforms.uMaskN = seaMeshUniforms.uMaskN;
     shader.uniforms.uMaskNC = seaMeshUniforms.uMaskNC;
@@ -207,6 +209,15 @@ vec3 globe = texture2D(uGlobe, vec2((ll.y + 180.0) / 360.0, (ll.x + 90.0) / 180.
 // little of the photo for surf lines, 2 = no imagery (open sea).
 vec3 sea = pow(mix(pow(uWater, vec3(1.0 / 2.2)), pow(globe, vec3(1.0 / 2.2)), 0.75), vec3(2.2));
 diffuseColor.rgb = mix(diffuseColor.rgb, sea, water * (0.92 * min(vWaterWeight, 1.0) + 0.08 * max(vWaterWeight - 1.0, 0.0)));
+// Underfoot, the photo's pixels are a third of a metre and more: a blur, with nothing in it for
+// the eye to settle on. So, from close by, the ground's own grain over it: the unevenness of sand
+// and dried mud at three sizes, each only once the pixels are finer than it is.
+{
+  float gfw = max(length(fwidth(vEN)) * 0.7071, 1e-3);
+  vec2 gp = mod(vEN, 256.0);
+  float gk = (siteVNoise(gp / 1.1 + 3.0) - 0.5) * 0.14 * roadSeen(1.1, gfw) + (siteVNoise(gp / 0.31 + 17.0) - 0.5) * 0.2 * roadSeen(0.31, gfw) + (siteVNoise(gp / 0.085 + 29.0) - 0.5) * 0.24 * roadSeen(0.085, gfw);
+  diffuseColor.rgb *= 1.0 + gk * (1.0 - water);
+}
 // Built-up ground around the 3D buildings: concrete (slabs with joints, a little patchy) or lawn,
 // over the aerial photo of the buildings themselves.
 vec2 siteUv = (vEN - uSiteRect.xy) * uSiteRect.zw;
@@ -286,7 +297,7 @@ gl_FragColor.a = 1.0 - 0.5 * water * (1.0 - gSeaFoam);
 #endif`,
       );
   };
-  mat.customProgramCacheKey = () => `terrain-v19${holes ? '-holes' : ''}${array ? '-array' : ''}`;
+  mat.customProgramCacheKey = () => `terrain-v21${holes ? '-holes' : ''}${array ? '-array' : ''}`;
   return mat;
 }
 

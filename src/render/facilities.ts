@@ -17,7 +17,8 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { PAD, PAD2 } from '../sim/constants';
 import { SITE_OUTLINE, SLAB_TOP, TRENCHES, insideTrench } from './launchSite';
-import { HIGHWAY_4, ROAD_HALF } from './siteOutline';
+import { HIGHWAY_4, ROAD_HALF, distanceToLine } from './siteOutline';
+import { rolloutRoute } from '../sim/rollout';
 import { EXTRA_FACILITIES } from './facilitiesExtra';
 import { SITE_LIGHT_GLSL, siteLightUniforms } from './siteLight';
 import { setSiteMask } from './terrain';
@@ -264,6 +265,13 @@ if (bWall > 0.5) {
 } else if (bN.y > 0.5 && bStyle == 5 && uRoofOn > 0.5) {
   // The Starfactory's roof: the survey's picture of it (its units, drains, seams and stains).
   diffuseColor.rgb = texture2D(uRoofPhoto, (vec2(vObj.x, -vObj.z) - uRoofRect.xy) * uRoofRect.zw).rgb;
+} else if (bN.y > 0.5 && bStyle == 2) {
+  // A high bay's roof, as the survey has the Mega Bays': pale standing-seam sheet, its seams
+  // close together one way and a joint every 12 m the other, nothing standing on it.
+  float seam = aaLine(dot(vObj.xz, vec2(0.714, 0.7)), 1.2, 0.12);
+  float joint = aaLine(dot(vObj.xz, vec2(0.7, -0.714)), 12.0, 0.25);
+  float patchy = fract(sin(dot(floor(vObj.xz / 12.0), vec2(12.9898, 78.233))) * 43758.5453);
+  diffuseColor.rgb = vec3(0.56, 0.58, 0.6) * (1.0 - 0.16 * seam * bDetail) * (1.0 - 0.22 * joint) * (0.95 + 0.07 * patchy);
 } else if (bN.y > 0.5) {
   // Flat roofs: a little darker, with faint sheet lines.
   diffuseColor.rgb *= 0.86 - 0.05 * (1.0 - smoothstep(0.0, 0.08, abs(fract(vObj.x / 1.5) - 0.5))) * bDetail;
@@ -290,7 +298,7 @@ if (bRib != 0.0) {
 }`,
     );
 };
-buildingMaterial.customProgramCacheKey = () => 'starbase-buildings-v9';
+buildingMaterial.customProgramCacheKey = () => 'starbase-buildings-v10';
 
 /**
  * The tank farm's tanks and its pipes: white insulation jackets, matte (as polished metal they
@@ -591,7 +599,6 @@ export async function loadFacilities(): Promise<THREE.Group> {
         style = STYLE.bay;
         color.setHex(BAY_COLOR);
         door = doorFor(f.ring);
-        roofUnits(shape, e, n, y0 + f.height, 6, 4);
         bayGirts(f.ring, y0, f.height, seed, parts.buildings);
         parapet(f.ring, y0, f.height, new THREE.Color(0x4a4c4f), seed, parts.buildings, 1.6);
       } else if (f.material === 'house' && Math.abs(shape.getPoints().reduce((a, p, i, ps) => a + p.x * ps[(i + 1) % ps.length].y - ps[(i + 1) % ps.length].x * p.y, 0) / 2) > 400) {
@@ -947,7 +954,10 @@ function siteDressing(facilities: Facility[], parts: { buildings: THREE.BufferGe
     [TRENCHES[0].center[0] + PAD.tower.e, TRENCHES[0].center[1] + PAD.tower.n, 34],
     [TRENCHES[1].center[0] + PAD2.tower.e, TRENCHES[1].center[1] + PAD2.tower.n, 34],
   ];
-  const free = (e: number, nn: number, r: number) => inside(e, nn) > r + 6 && [...taken, ...pads].every(([x, y, rr]) => Math.hypot(e - x, nn - y) > rr + r);
+  // (And nothing parked on the way a transport takes across the site to either pad's stand.)
+  const ways = [0, 1].map((pad) => rolloutRoute(pad).filter(([e]) => e > -500));
+  const free = (e: number, nn: number, r: number) =>
+    inside(e, nn) > r + 6 && [...taken, ...pads].every(([x, y, rr]) => Math.hypot(e - x, nn - y) > rr + r) && ways.every((way) => distanceToLine([e, nn], way) > r + 7);
   const box = (e: number, nn: number, up: number, size: [number, number, number], heading: number, color: number, seed = 0.5) => {
     const g = new THREE.BoxGeometry(size[0], size[1], size[2]);
     g.rotateY(heading);

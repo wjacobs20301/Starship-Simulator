@@ -16,7 +16,7 @@ export type SaveUpgrade = (saved: Record<string, unknown>) => Record<string, unk
  * The simulation's save format version (sim/saveFlight.ts says when to raise it). A save of any
  * other version is upgraded through SAVE_UPGRADES, or refused.
  */
-export const SAVE_VERSION = 1;
+export const SAVE_VERSION = 2;
 
 /**
  * How to bring the simulation's save of each older version up to the next one. Raising
@@ -24,9 +24,24 @@ export const SAVE_VERSION = 1;
  * in an old save: a field with an obvious value to fill in, a renamed one), or leaving it out
  * (when it can't), in which case saves of version N and older are refused.
  *
- * Nothing to convert yet: version 1 is the first.
+ * 1 -> 2 (rollout and the arms' guards): the simulation gained `transport` (a vehicle's transport
+ * on its way to the pad: none in an older flight), and each tower's arms `openBlocked` and
+ * `lowerBlocked` (what stands in their way this step: worked out afresh every step).
  */
-export const SAVE_UPGRADES: Record<number, SaveUpgrade> = {};
+export const SAVE_UPGRADES: Record<number, SaveUpgrade> = {
+  1: (saved) => {
+    const fill = (x: unknown): void => {
+      if (x === null || typeof x !== 'object') return;
+      if (Array.isArray(x)) return x.forEach(fill);
+      const o = x as Record<string, unknown>;
+      if (o.$ === 'class' && o.name === 'TowerArms' && o.fields && typeof o.fields === 'object') Object.assign(o.fields, { openBlocked: null, lowerBlocked: null, ...(o.fields as object) });
+      Object.values(o).forEach(fill);
+    };
+    const state = { transport: null, ...(saved.state as Record<string, unknown>) };
+    fill(state);
+    return { ...saved, state, version: 2 };
+  },
+};
 
 /**
  * Why a save of `version` can't be brought up to `current` through `upgrades` (null: it can,

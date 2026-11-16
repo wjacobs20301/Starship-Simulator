@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { currentAux } from '../src/sim/dynamics';
 import { add, qrot } from '../src/sim/math';
-import { catchPoint } from '../src/sim/padCollision';
+import { STAND_HEIGHT, catchPoint } from '../src/sim/padCollision';
 import { eciToPad } from '../src/sim/padFrame';
 import { Simulation } from '../src/sim/simulation';
 import { ARMS } from '../src/sim/tower';
@@ -43,14 +43,14 @@ describe('booster return and catch', () => {
     const arms = sim.towers[0];
     arms.command({ slew: ARMS.maxSlewDeg });
     for (let i = 0; i < 6000 && Math.abs(arms.slew - ARMS.maxSlewDeg) > 0.01; i++) sim.step();
-    // All the way down: the carriage stops with the booster standing on the ground.
+    // All the way down: the carriage stops with the booster standing on the transport stand there.
     arms.command({ offset: ARMS.minOffset });
     for (let i = 0; i < 6000 && arms.moving; i++) sim.step();
     const xcg = currentAux(b, sim.t, sim.env).mp.xcg;
     const base = eciToPad(add(b.r, qrot(b.q, [-(xcg - b.extent[0]), 0, 0])), sim.t);
     const [se, sn] = catchPoint(0, ARMS.maxSlewDeg);
     expect(Math.hypot(base[0] - se, base[1] - sn)).toBeLessThan(0.5);
-    expect(base[2]).toBeCloseTo(0, 1);
+    expect(base[2]).toBeCloseTo(STAND_HEIGHT, 1);
     // Open the arms: it stays standing there.
     arms.command({ angle: ARMS.maxOpenDeg });
     for (let i = 0; i < 1000; i++) sim.step();

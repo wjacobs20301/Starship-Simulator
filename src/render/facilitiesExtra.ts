@@ -45,10 +45,12 @@ export const EXTRA_FACILITIES: ExtraFacility[] = [
     height: 17,
     factory: true,
   }),
-  // Multi-storey parking garage (current OpenStreetMap).
+  // The multi-storey parking garage north of the Starfactory, as NOAA's January 2026 survey has
+  // it: its whole top deck, a little askew of the street. (OpenStreetMap's outline before, short
+  // of the deck's north bays and its east end.)
   make({
     name: 'Parking garage',
-    ring: [[-3171.5, -698.3], [-3170.6, -690.1], [-3175.8, -689.5], [-3170.0, -638.6], [-3058.4, -651.1], [-3065.1, -710.3], [-3171.5, -698.3]],
+    ring: [[-3178, -621], [-3027, -635], [-3064, -707], [-3188, -692], [-3178, -621]],
     base: 1.9,
     height: 17,
     office: true,

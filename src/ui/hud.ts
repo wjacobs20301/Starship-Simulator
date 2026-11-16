@@ -61,7 +61,7 @@ export class Hud {
             ? '<span class="bad">tower destroyed</span>'
             : arms.broken.L || arms.broken.R
               ? '<span class="bad">chopsticks wrecked</span>'
-              : `arms: rails ${arms.top.toFixed(0)} m, open ${arms.angle.toFixed(0)}°${Math.abs(arms.slew) > 0.5 ? `, swung ${arms.slew.toFixed(0)}°` : ''}`)
+              : `arms: rails ${arms.top.toFixed(0)} m, open ${arms.angle.toFixed(0)}°${Math.abs(arms.slew) > 0.5 ? `, swung ${arms.slew.toFixed(0)}°` : ''}` + armsCue(arms))
         : '')
       + (info.weather ? `<br>Weather: ${info.weather}` : '')
       + (info.payload ? `<br>${info.payload}` : '');
@@ -107,3 +107,18 @@ const SHIP_PHASE_LABEL: Record<string, string> = {
   landed: 'Splashdown',
   lost: 'Vehicle lost',
 };
+
+/**
+ * What the arms are doing with a vehicle, after their numbers: holding one; stopped by one in
+ * their way; or, with one standing where they could lift it, how far the rails are from its
+ * lifting points (they take it only from within a metre: by eye, from most cameras, there is no
+ * telling).
+ */
+function armsCue(arms: { holding?: string; lift?: { name: string; dz: number } | null; stopped?: string }): string {
+  if (arms.holding) return ` · holding ${arms.holding}`;
+  if (arms.stopped) return ` · <span class="bad">waiting: ${arms.stopped} in the way</span>`;
+  if (!arms.lift) return '';
+  const { name, dz } = arms.lift;
+  if (Math.abs(dz) <= 1) return ` · <span class="good">level with ${name}'s lift points</span>`;
+  return ` · ${name}'s lift points ${Math.abs(dz).toFixed(0)} m ${dz > 0 ? 'below' : 'above'}`;
+}

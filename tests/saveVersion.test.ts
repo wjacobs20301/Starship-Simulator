@@ -36,14 +36,17 @@ describe('save format versions', () => {
     expect(() => upgradeSave({ version: 1 }, 2, { 1: (s) => ({ ...s }) })).toThrow(/converting it from format version 1 went wrong/);
   });
 
-  it('has a step for every version the simulation can still read (none to convert yet)', () => {
+  it('has no step from the current version or a later one', () => {
     for (const v of Object.keys(SAVE_UPGRADES).map(Number)) expect(v).toBeLessThan(SAVE_VERSION);
   });
 });
 
 describe('Simulation.load and the upgrade table', () => {
+  // (The table's own step from the last version is put back after each: this plays with it.)
+  const real = SAVE_UPGRADES[SAVE_VERSION - 1];
   afterEach(() => {
-    delete SAVE_UPGRADES[SAVE_VERSION - 1];
+    if (real) SAVE_UPGRADES[SAVE_VERSION - 1] = real;
+    else delete SAVE_UPGRADES[SAVE_VERSION - 1];
   });
 
   it('runs a save of a lower version through the table, then loads it', () => {
@@ -51,6 +54,7 @@ describe('Simulation.load and the upgrade table', () => {
     const saved = JSON.parse(JSON.stringify(sim.save()));
     const older = { ...saved, version: SAVE_VERSION - 1, oldName: true };
     // (Refused while there's no step from it...)
+    delete SAVE_UPGRADES[SAVE_VERSION - 1];
     expect(() => new Simulation().load(older)).toThrow(/format version .*can't convert/);
     // (...and loaded once there is one.)
     const seen: unknown[] = [];

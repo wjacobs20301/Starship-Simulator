@@ -236,6 +236,11 @@ float roadLine(float d, float fw, float at, float width) {
   // (A painted line: its share of the pixel, fading out once it is far thinner than one.)
   return clamp((0.5 * width - abs(d - at)) / fw + 0.5, 0.0, 1.0) * min(1.0, 2.5 * width / fw);
 }
+// How much of a detail of the given size (m) shows at this pixel's size on the ground: all of it
+// from close by, none once the pixel is as big as it is (it would only shimmer).
+float roadSeen(float size, float fw) {
+  return 1.0 - smoothstep(0.3 * size, 0.75 * size, fw);
+}
 float roadPaint(vec2 en, inout vec3 colour) {
   float fw = max(length(fwidth(en)) * 0.7071, 1e-3);
   if (en.x < uRoadBounds.x || en.y < uRoadBounds.y || en.x > uRoadBounds.z || en.y > uRoadBounds.w) return 0.0;
@@ -267,15 +272,39 @@ float roadPaint(vec2 en, inout vec3 colour) {
   float d = e + ${ROAD_PAVED_HALF.toFixed(2)};
   float tracks = highway * (exp(-pow((d - 1.0) / 0.42, 2.0)) + exp(-pow((d - 2.75) / 0.42, 2.0)));
   vec3 asphalt = vec3(0.150, 0.150, 0.156) * (0.84 + 0.22 * siteVNoise(en / 9.0 + 13.0) + 0.12 * siteVNoise(en / 0.9 + 5.0)) * (1.0 - 0.13 * tracks);
+  // From close by, what a road is made of: the stone in it (three sizes of grain, the palest
+  // chips catching the light), the cracks that wander across it, sealed dark. (Without them the
+  // paving was one smooth tone at any distance: out of focus, standing on it.)
+  // (The grain's place taken round every 256 m: kilometres from the pad its noise ran out of digits.)
+  vec2 fine = mod(en, 256.0);
+  float g1 = siteVNoise(fine / 0.21 + 3.0);
+  float g2 = siteVNoise(fine / 0.07 + 11.0);
+  float g3 = siteVNoise(fine / 0.023 + 5.0);
+  float grain = (g1 - 0.5) * 0.2 * roadSeen(0.21, fw) + (g2 - 0.5) * 0.26 * roadSeen(0.07, fw) + (g3 - 0.5) * 0.3 * roadSeen(0.023, fw);
+  asphalt *= 1.0 + grain;
+  asphalt += vec3(0.06, 0.06, 0.055) * smoothstep(0.8, 0.96, g3) * roadSeen(0.023, fw);
+  // (Long and nearly straight, a few to a stretch of road: the noise they follow is drawn out
+  // five to one, and only some stretches have any. Followed round a square noise they were
+  // loops and rings, like tyre marks.)
+  vec2 along = mat2(0.94, 0.342, -0.342, 0.94) * fine;
+  float crack = (1.0 - smoothstep(0.0, 0.006 + 0.5 * fw, abs(siteVNoise(along / vec2(9.0, 1.7) + 40.0) - 0.5))) * smoothstep(0.52, 0.72, siteVNoise(en / 17.0 + 3.0)) * roadSeen(0.4, fw);
+  asphalt *= 1.0 - 0.34 * crack;
+  sand *= 1.0 + ((g1 - 0.5) * 0.22 * roadSeen(0.21, fw) + (g2 - 0.5) * 0.3 * roadSeen(0.07, fw));
   // (Sand blown in over its edges.)
   asphalt = mix(asphalt, sand, 0.5 * smoothstep(-0.9, 0.0, e) * siteVNoise(en / 3.3 + 30.0));
   // The double yellow line down the highway's middle (by which side of it this is, and how
   // far), the white line along each edge.
   float yellow = roadLine(abs(r.g), fw, 0.17, 0.11) * (1.0 - smoothstep(0.03, 0.12, r.a));
   float white = lined * roadLine(e, fw, -0.32, 0.12);
+  // (The paint worn through here and there, seen from close.)
+  float worn = mix(1.0, smoothstep(0.12, 0.42, siteVNoise(fine / 0.31 + 60.0)) * (0.82 + 0.3 * g2), roadSeen(0.31, fw));
+  yellow *= worn;
+  white *= worn;
   vec3 paved = mix(asphalt, vec3(0.62, 0.47, 0.08), 0.85 * yellow);
   paved = mix(paved, vec3(0.66, 0.66, 0.64), 0.85 * white);
-  float pavedK = (1.0 - smoothstep(-0.5 * fw, 0.5 * fw, e)) * (1.0 - island);
+  // (Its edge crumbled a hand's width, not ruled.)
+  float edge = e + (siteVNoise(fine / 0.37 + 80.0) - 0.5) * 0.14 * roadSeen(0.37, fw);
+  float pavedK = (1.0 - smoothstep(-0.5 * fw, 0.5 * fw, edge)) * (1.0 - island);
   colour = mix(colour, mix(sand, paved, pavedK), max(pavedK, verge) * r.b);
   return pavedK * r.b;
 }`;

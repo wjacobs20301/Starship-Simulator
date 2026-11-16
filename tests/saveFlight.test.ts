@@ -215,8 +215,8 @@ const SAVED_FIELDS: Record<string, string> = {
   SeededRandom: 'state',
   ShipReentry: 'heading log logged peakHeat phase sim',
   ShipReturn: 'alphaUp bank bankSign burnIndex burning closing glideHeading heading intOff lastPin lit log milestones nextGuide nextQCheck offLine oneEngine peakHeat phase pinVel plan predicted qAhead reversedAt rollErr ship sim status target touchedUp ventLeft vented venting',
-  Simulation: 'aux bay boosterOcean captured deployMode engineFaults eventCursor events faultSeed faults gripped health inOrbitSince launchPad logLine mission node parkingAlt payloadKind pilot returnNotice seaTips shield splashFireball t tileLoss toppling towers turnaround vehicles waitUntil',
-  TowerArms: 'angle blocked broken contact down fallDir floor offset qd qdBroken qdTarget slew targetAngle targetOffset targetSlew touching',
+  Simulation: 'aux bay boosterOcean captured deployMode engineFaults eventCursor events faultSeed faults gripped health inOrbitSince launchPad logLine mission node parkingAlt payloadKind pilot returnNotice seaTips shield splashFireball t tileLoss toppling towers transport turnaround vehicles waitUntil',
+  TowerArms: 'angle blocked broken contact down fallDir floor lowerBlocked offset openBlocked qd qdBroken qdTarget slew targetAngle targetOffset targetSlew touching',
   Vehicle: 'catchPin caughtPad engines extForce id name q r rcsTorque rest stages status surfaceAngles surfaceEff surfaces v ventUntil w',
 };
 
@@ -241,7 +241,27 @@ describe('the save format', () => {
     walk(saved.state);
     const fields = Object.fromEntries(Object.keys(found).sort().map((name) => [name, [...found[name]].sort().join(' ')]));
     expect(fields, 'the saved fields changed: raise SAVE_VERSION in src/sim/saveFlight.ts, then update SAVED_FIELDS here').toEqual(SAVED_FIELDS);
-    expect(SAVE_VERSION).toBe(1);
+    expect(SAVE_VERSION).toBe(2);
+    // A save of version 1 (before the rollout and the arms' guards: none of their fields) is
+    // brought up to this one, and is then the same flight.
+    const old = JSON.parse(JSON.stringify(sim.save())) as SavedSimulation & { state: Record<string, Json> };
+    old.version = 1;
+    delete old.state.transport;
+    const strip = (x: Json): void => {
+      if (x === null || typeof x !== 'object') return;
+      if (Array.isArray(x)) return x.forEach(strip);
+      if (x.$ === 'class' && x.name === 'TowerArms') {
+        delete (x.fields as Record<string, Json>).openBlocked;
+        delete (x.fields as Record<string, Json>).lowerBlocked;
+      }
+      Object.values(x).forEach(strip);
+    };
+    strip(old.state);
+    const upgraded = new Simulation();
+    upgraded.load(old);
+    expect(upgraded.transport).toBeNull();
+    expect(upgraded.towers[0].openBlocked).toBeNull();
+    expect(JSON.parse(JSON.stringify(upgraded.save()))).toEqual(JSON.parse(JSON.stringify(sim.save())));
     // (And that flight, odd as it is, loads and flies on the same.)
     const copy = reload(sim);
     flyBoth(sim, copy, () => false, step, 500);

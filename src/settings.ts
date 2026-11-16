@@ -48,11 +48,13 @@ export interface Settings {
   tileLoss: boolean;
   /** Free roam: the ship carries 26 Starlink V3 satellites (deployed with B in orbit). */
   freeStarlink: boolean;
+  /** Free roam: it starts with the ship rolling out from the Starfactory on its transport, the booster alone on the mount. */
+  freeRollout: boolean;
   /** Keys the player has changed (ui/keys.ts): action -> key, '' for none. The rest are the defaults. */
   keys: KeyOverrides;
 }
 
-const DEFAULTS: Settings = { shipSerial: 'SN41', muted: false, volume: 1, uiScale: 1, detail: 'high', cameraSpeed: 1, renderScale: 'auto', clouds: true, freeWeather: 'starbase', engineFailures: false, tileLoss: false, freeStarlink: false, keys: {} };
+const DEFAULTS: Settings = { shipSerial: 'SN41', muted: false, volume: 1, uiScale: 1, detail: 'high', cameraSpeed: 1, renderScale: 'auto', clouds: true, freeWeather: 'starbase', engineFailures: false, tileLoss: false, freeStarlink: false, freeRollout: false, keys: {} };
 const STORAGE_KEY = 'starship-sim.settings';
 
 function load(): Settings {

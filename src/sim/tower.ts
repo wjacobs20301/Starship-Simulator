@@ -53,6 +53,10 @@ export class TowerArms {
   blocked = false;
   /** One arm is already touching a vehicle: close the rest of the way slowly (squeeze, don't shove). */
   touching = false;
+  /** Opening is stopped this step: a standing vehicle (its name) is in an arm's way (simulation.ts constrainArms). */
+  openBlocked: string | null = null;
+  /** And lowering: a standing vehicle (its name) is under an arm. */
+  lowerBlocked: string | null = null;
   /** Arms wrecked by a collision (they hang dead), and the tower itself felled. */
   broken = { L: false, R: false };
   down = false;
@@ -83,7 +87,7 @@ export class TowerArms {
   }
 
   get moving(): boolean {
-    const swinging = Math.abs(this.targetAngle - this.angle) > 0.01 && !(this.blocked && this.targetAngle < this.angle);
+    const swinging = Math.abs(this.targetAngle - this.angle) > 0.01 && !(this.blocked && this.targetAngle < this.angle) && !(this.openBlocked && this.targetAngle > this.angle);
     return Math.abs(this.targetOffset - this.offset) > 0.01 || swinging || Math.abs(this.targetSlew - this.slew) > 0.01;
   }
 
@@ -106,10 +110,11 @@ export class TowerArms {
     if (!this.qdBroken && !this.down) this.qd += Math.max(-ARMS.qdRate * dt, Math.min(ARMS.qdRate * dt, this.qdTarget - this.qd));
     if (this.disabled) return;
     const to = Math.max(this.floor, this.targetOffset);
-    this.offset += Math.max(-ARMS.liftRate * dt, Math.min(ARMS.liftRate * dt, to - this.offset));
+    if (!(this.lowerBlocked && to < this.offset)) this.offset += Math.max(-ARMS.liftRate * dt, Math.min(ARMS.liftRate * dt, to - this.offset));
     this.slew += Math.max(-ARMS.slewRate * dt, Math.min(ARMS.slewRate * dt, this.targetSlew - this.slew));
     // Commanded closed onto something, they keep squeezing: stopped only while it pushes back.
     if (this.blocked && this.targetAngle < this.angle) return;
+    if (this.openBlocked && this.targetAngle > this.angle) return;
     const rate = this.touching && this.targetAngle < this.angle ? ARMS.swingRate * 0.2 : ARMS.swingRate;
     this.angle += Math.max(-rate * dt, Math.min(rate * dt, this.targetAngle - this.angle));
   }

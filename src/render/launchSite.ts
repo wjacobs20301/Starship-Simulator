@@ -17,6 +17,7 @@ import * as THREE from 'three';
 import { PAD, PAD2, type Trench } from '../sim/constants';
 import { FAR_SHADOW_GLSL, bindFarShadow } from './farShadows';
 import { M_PER_DEG_LAT, M_PER_DEG_LON } from './geo';
+import { photoLit } from './photoGround';
 import { SITE_LIGHT_GLSL, siteLightUniforms } from './siteLight';
 import { SITE_EDGE, SITE_OUTLINE } from './siteOutline';
 
@@ -93,7 +94,7 @@ function sitePhotoTrust(): THREE.CanvasTexture {
   g.fillStyle = 'rgb(255,255,255)';
   g.fillRect(0, 0, c.width, c.height);
   // (Black on white, both opaque: the blur is then in the colour, which is what the shader reads.)
-  g.filter = `blur(${5 / RES}px)`;
+  g.filter = `blur(${8 / RES}px)`;
   g.fillStyle = 'rgb(0,0,0)';
   for (const s of SITE_DRAWN) {
     g.beginPath();
@@ -227,6 +228,7 @@ export function createLaunchSite(): THREE.Group {
     shader.uniforms.uPads = { value: pads };
     Object.assign(shader.uniforms, photo, siteLightUniforms);
     bindFarShadow(shader);
+    photoLit(shader);
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nvarying vec2 vSiteXZ;')
       .replace('#include <uv_vertex>', '#include <uv_vertex>\nvSiteXZ = position.xz;');
@@ -290,7 +292,18 @@ export function createLaunchSite(): THREE.Group {
         // (0.3 m: within a couple of hundred metres) it's a blur, and takes the drawn concrete's
         // grain and joints.
         vec2 siteUv = (vec2(P.x, -P.y) - uSitePhotoRect.xy) * uSitePhotoRect.zw;
-        float trust = uSitePhotoOn * texture2D(uSiteTrust, siteUv).r * step(0.0, siteUv.x) * step(siteUv.x, 1.0) * step(0.0, siteUv.y) * step(siteUv.y, 1.0);
+        float inPhoto = uSitePhotoOn * step(0.0, siteUv.x) * step(siteUv.x, 1.0) * step(0.0, siteUv.y) * step(siteUv.y, 1.0);
+        // (Where one gives way to the other: not along the shapes' own straight edges, but
+        // raggedly, as one pour of concrete meets another.)
+        float trust = inPhoto * smoothstep(0.32, 0.68, texture2D(uSiteTrust, siteUv).r + 0.55 * (siteNoise(P / 11.0 + 31.0) - 0.5) + 0.2 * (siteNoise(P / 3.7 + 7.0) - 0.5));
+        if (inPhoto > 0.5 && trust < 0.997) {
+          // The drawn concrete in the light and tone of the ground about it: the survey's own
+          // colour there, blurred over some forty metres (its coarse mipmaps), against the drawn
+          // concrete's own average. (An even warm grey of its own, it was a patch laid on the
+          // paler, cooler ground round Pad 1, its edge plain however ragged.)
+          vec3 around = texture2D(uSitePhoto, siteUv, 6.5).rgb;
+          diffuseColor.rgb *= mix(vec3(1.0), clamp(around / vec3(0.47, 0.445, 0.385), 0.75, 1.45), 0.75);
+        }
         if (trust > 0.003) {
           vec3 ph = texture2D(uSitePhoto, siteUv).rgb;
           float closeK = 1.0 - smoothstep(0.1, 0.4, sitePx);
@@ -312,7 +325,7 @@ export function createLaunchSite(): THREE.Group {
         gl_FragColor.rgb *= 1.0 - farShadow(vec2(vSiteXZ.x, -vSiteXZ.y));`,
       );
   };
-  mat.customProgramCacheKey = () => 'site-concrete-v5';
+  mat.customProgramCacheKey = () => 'site-concrete-v7';
 
   // Slab top: the outline, UVs in world metres / TILE.
   const shape = new THREE.Shape(SITE_OUTLINE.map(([e, n]) => new THREE.Vector2(e, n)));

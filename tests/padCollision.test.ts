@@ -3,7 +3,7 @@ import { OMEGA_E, PAD } from '../src/sim/constants';
 import { STARSHIP_V3 } from '../src/sim/config/starshipV3';
 import { SHIP_CATCH_PIN } from '../src/sim/shipReturn';
 import { type V3, add, cross, normalize, qFromAxisAngle } from '../src/sim/math';
-import { MOUNTS, TOWERS, armColumns, armContact, awayFromTower, catchGap, catchPoint, cylinder, qdContact, surfaceUnder, towerContact } from '../src/sim/padCollision';
+import { MOUNTS, STANDS, STAND_HEIGHT, TOWERS, armColumns, armContact, awayFromTower, catchGap, catchPoint, cylinder, qdContact, surfaceUnder, towerContact } from '../src/sim/padCollision';
 import { PAD_COLLIDERS } from '../src/sim/padColliders';
 import { eciToPad, padDirToEci, padToEci } from '../src/sim/padFrame';
 import { Simulation } from '../src/sim/simulation';
@@ -169,7 +169,13 @@ describe('a caught booster hangs on the arms, not on nothing', () => {
       // As far round as they go: off to the tower's side, clear of the mount.
       expect(Math.hypot(se - te, sn - tn)).toBeGreaterThan(20);
       expect(Math.hypot(se - me, sn - mn)).toBeGreaterThan(20);
-      expect(surfaceUnder([se, sn, 0])).toBe(0);
+      // (On the transport stand that waits there, not the mount; a little short of it, the ground.)
+      expect(surfaceUnder([se, sn, 0])).toBe(STAND_HEIGHT);
+      expect(STANDS.filter((st) => st.pad === pad).length).toBe(1);
+      // (Clear of the mount's table and of the trench: the other way round the arms are over the trench's mouth.)
+      expect(Math.hypot(se - me, sn - mn)).toBeGreaterThan(14 + 6);
+      const [ge, gn] = catchPoint(pad, ARMS.maxSlewDeg - 22);
+      expect(surfaceUnder([ge, gn, 0])).toBe(0);
       // A vehicle set down there is clear of the tower and its (swung) arms.
       const hull = cylinder([se, sn, 0], [0, 0, 1], 70);
       const t = { ...settled, offset: 0, slew: ARMS.maxSlewDeg, angle: 40 };
@@ -365,15 +371,15 @@ describe('a ship held on the arms', () => {
     expect(lowest).toBeGreaterThan(PAD.mountHeight + STARSHIP_V3.xBase);
   });
 
-  it('is stood on the ground beside the mount, picked up again and stacked back on the booster', { timeout: 120_000 }, () => {
+  it('is stood on its transport stand beside the mount, picked up again and stacked back on the booster', { timeout: 120_000 }, () => {
     const { sim, arms, run, ship, booster } = lifted(6);
-    // Round to the side, down until it stands on the ground (the carriage stops there), let go.
+    // Round to the side, down until it stands on the stand there (the carriage stops), let go.
     sim.commandArms(0, null, null, 1);
     run(30);
     sim.commandArms(0, -1, null, 0);
     run(45);
     expect(ship.status).toBe('caught');
-    expect(arms.top).toBeCloseTo(SHIP_CATCH_PIN, 1);
+    expect(arms.top).toBeCloseTo(STAND_HEIGHT + SHIP_CATCH_PIN, 1);
     sim.commandArms(0, 0, 1, 0);
     run(2);
     sim.commandArms(0, 0, 0, 0);
@@ -382,6 +388,7 @@ describe('a ship held on the arms', () => {
     const stood = eciToPad(ship.r, sim.t);
     const [e, n] = catchPoint(0, ARMS.maxSlewDeg);
     expect(Math.hypot(stood[0] - e, stood[1] - n)).toBeLessThan(0.1);
+    expect(sim.events.some((ev) => /Starship touchdown/.test(ev.text))).toBe(true);
     // Closed on it again where it stands: both arms meet it together, and neither tips it.
     sim.commandArms(0, 0, -1, 0);
     run(6);
@@ -401,6 +408,71 @@ describe('a ship held on the arms', () => {
     expect(booster.status).not.toBe('destroyed');
     expect(sim.find('stack')?.status).toBe('held');
     expect(sim.events.some((ev) => /stacked on Super Heavy/.test(ev.text))).toBe(true);
+  });
+
+  it('short of the stand, it is stood on the ground itself: the carriage goes low enough', { timeout: 120_000 }, () => {
+    const { sim, arms, run, ship } = lifted(6);
+    arms.command({ slew: ARMS.maxSlewDeg - 22 });
+    run(20);
+    sim.commandArms(0, -1, null, null);
+    run(45);
+    expect(ship.status).toBe('caught');
+    expect(arms.top).toBeCloseTo(SHIP_CATCH_PIN, 1);
+    sim.commandArms(0, 0, 1, 0);
+    run(2);
+    sim.commandArms(0, 0, 0, 0);
+    run(3);
+    expect(ship.status).toBe('landed');
+  });
+
+  it('the readout says how far the rails are from the lift points, and then what the arms hold', { timeout: 120_000 }, () => {
+    const sim = new Simulation();
+    const arms = sim.towers[0];
+    const run = (sec: number) => {
+      for (let i = 0; i < sec * 100; i++) sim.step();
+    };
+    const knobs = PAD.mountHeight + STARSHIP_V3.xBase + SHIP_CATCH_PIN;
+    const tower = () => sim.snapshot().towers[0];
+    // On the pad for launch: the rails are above the ship's fittings by what they have to come down.
+    expect(tower().lift?.name).toBe('Starship');
+    expect(tower().lift!.dz).toBeCloseTo(ARMS.homeTop + ARMS.launchOffset - knobs, 1);
+    arms.command({ offset: knobs - ARMS.homeTop });
+    run(10);
+    expect(Math.abs(tower().lift!.dz)).toBeLessThan(0.05);
+    arms.command({ angle: 0 });
+    run(8);
+    arms.command({ offset: knobs - ARMS.homeTop + 6 });
+    run(6);
+    expect(tower().holding).toBe('Starship');
+    // (And the other pad's arms have nothing under them.)
+    expect(sim.snapshot().towers[1].lift ?? null).toBeNull();
+  });
+
+  it("opening at the side stops short of the booster on the mount: the arm nearer it isn't swung back through it", { timeout: 120_000 }, () => {
+    const { sim, arms, run, ship, booster } = lifted(6);
+    sim.commandArms(0, null, null, 1);
+    run(30);
+    sim.commandArms(0, -1, null, 0);
+    run(45);
+    // Open, and keep the key down: all the way, if nothing stopped them.
+    sim.commandArms(0, 0, 1, 0);
+    run(15);
+    expect(ship.status).toBe('landed');
+    expect(booster.status).toBe('held');
+    expect(sim.events.some((ev) => /pushed over/.test(ev.text))).toBe(false);
+    expect(sim.events.some((ev) => /stopped opening: Super Heavy is in the way/.test(ev.text))).toBe(true);
+    expect(arms.angle).toBeGreaterThan(15);
+    expect(arms.angle).toBeLessThan(ARMS.maxOpenDeg - 20);
+    expect(sim.snapshot().towers[0].stopped).toBe('Super Heavy');
+    // With nothing in the way (the arms back over the mount, above the booster) they open right out.
+    sim.commandArms(0, 0, -1, 0);
+    run(6);
+    sim.commandArms(0, 1, null, 0);
+    run(45);
+    arms.command({ slew: 0 });
+    run(30);
+    sim.commandArms(0, 0, 0, 0);
+    expect(ship.status).toBe('caught');
   });
 
   it('let go high up at the side of the mount before any launch, it meets the ground', { timeout: 120_000 }, () => {
