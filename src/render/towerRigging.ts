@@ -297,12 +297,13 @@ export class TowerRigging {
     // neighbours); across its front, at the arms' top, a header beam the block hangs it by, with
     // struts back to shoes on the two front faces.
     const toCarriage = (p: THREE.Vector3) => this.carriage.worldToLocal(fall.localToWorld(p.clone()));
-    const headerTop = frameBox.max.y + 0.2;
+    // (Above the arms' hinges, which stand side by side under it: the arms' roots swing below.)
+    const headerTop = frameBox.max.y + 0.5 + HEADER_H;
     const header = new THREE.Group();
     header.position.copy(toCarriage(at(half + FALLS_OUT / 2, headerTop, hs)));
     this.carriage.add(header);
     face(header);
-    const beamW = Math.max(width + 3, 8);
+    const beamW = Math.max(width + 2, 5);
     const beam = new THREE.Mesh(new THREE.BoxGeometry(beamW, HEADER_H, FALLS_OUT + 1.2), dark);
     beam.position.y = -HEADER_H / 2;
     header.add(beam);

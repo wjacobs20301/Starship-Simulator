@@ -11,7 +11,7 @@ export const ARMS = {
   maxOffset: 36,
   /** Where the arms sit for launch and stay for the booster catch: high up the tower. */
   launchOffset: 34,
-  /** Arm opening, degrees each side (0 = closed on a vehicle, parallel). */
+  /** Arm opening, degrees each side (0 = shut on a vehicle over the mount: a narrow V from the two hinges at the tower's corner). */
   maxOpenDeg: 80,
   openDeg: 50,
   /** Travel rates: carriage m/s, arms deg/s (approx). */

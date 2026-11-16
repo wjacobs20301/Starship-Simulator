@@ -93,16 +93,21 @@ const mountAt = (pad: number): [number, number] => {
 const CATCH_REACH: number[] = PAD_COLLIDERS.map((_, i) => Math.hypot(mountAt(i)[0] - HINGES[i][0], mountAt(i)[1] - HINGES[i][1]));
 
 /**
+ * How far an arm's own line (through its hinge, along the arm) passes from the centre of a
+ * vehicle it is shut on, m: the rail's inner edge is 1.1 m inside that line, against a 9 m hull.
+ * (The model is built so: art/blender/chopsticks.py ARM_LINE.)
+ */
+const ARM_LINE = 5.6;
+
+/**
  * One arm's swing on its own hinge (rad, as the model is animated: L opens by +, R by -), with
  * the pair opened by angleDeg and swung to one side by slewDeg.
  *
- * As on the real towers, the hinges are fixed to the carriage, one at each front corner, and
- * each arm has its own actuator: there is nothing that turns the pair as one piece. To carry a
- * vehicle to the side, both arms swing the same way, the one on that side further out and the
- * other in across the front of the carriage, each staying against the hull: its line passes the
- * vehicle's centre at half the hinges' spacing, as it does closed on a vehicle over the mount.
- * (The pair used to be turned rigidly about the carriage's middle, hinges and all: swung far
- * round, the hinges and the arms' roots went through the tower.)
+ * As on the real towers, the two hinges stand side by side at the tower's corner, fixed to the
+ * carriage, and each arm has its own actuator: there is nothing that turns the pair as one
+ * piece. Shut on a vehicle over the mount the arms are a narrow V (that is the model as built:
+ * swing 0). To carry a vehicle to the side, both arms swing the same way, each staying against
+ * the hull: its line passes the vehicle's centre ARM_LINE off, as it does over the mount.
  */
 export function armSwing(pad: number, side: ArmSide, angleDeg: number, slewDeg = 0): number {
   const open = ((side === 'L' ? 1 : -1) * angleDeg * Math.PI) / 180;
@@ -111,14 +116,11 @@ export function armSwing(pad: number, side: ArmSide, angleDeg: number, slewDeg =
   const D = CATCH_REACH[pad];
   const hx = PAD_COLLIDERS[pad].hinges[side][0];
   // (In the carriage's frame: the vehicle at (-D sin s, -D cos s), this hinge at (hx, 0); a swing
-  // th points the arm along (-sin th, -cos th).)
-  const vx = D * Math.sin(s) + hx;
-  const vz = D * Math.cos(s);
-  const bearing = Math.atan2(vx, vz);
-  const tangent = Math.asin(Math.min(1, Math.abs(hx) / Math.hypot(vx, vz)));
-  // (And no further out than square to the carriage: an arm opened wide and swung its own way
-  // as well would fold back alongside the tower.)
-  const th = bearing + (side === 'L' ? tangent : -tangent) + open;
+  // th turns the arm, from where it stands shut over the mount, by th.)
+  const line = (vx: number, vz: number) => Math.atan2(vx, vz) + (side === 'L' ? 1 : -1) * Math.asin(Math.min(1, ARM_LINE / Math.hypot(vx, vz)));
+  const th = line(D * Math.sin(s) + hx, D * Math.cos(s)) - line(hx, D) + open;
+  // (And no further out than square to where it stands shut: an arm opened wide and swung its
+  // own way as well would fold back into the tower.)
   return side === 'L' ? Math.min(th, ARM_OUT_MAX) : Math.max(th, -ARM_OUT_MAX);
 }
 
@@ -134,7 +136,8 @@ const clampSlew = (deg: number) => Math.max(-ARMS.maxSlewDeg, Math.min(ARMS.maxS
  */
 export function armColumns(pad: number, side: ArmSide, offset: number, angleDeg: number, slewDeg = 0): Float64Array {
   const p = PAD_COLLIDERS[pad];
-  return placeColumns(p.arms[side], p.carriage.pos, yawOf(p.carriage.rot), armSwing(pad, side, angleDeg, slewDeg), offset, p.hinges[side]);
+  // (The columns are laid out along the arm's own line; shut, it stands p.splay out of square.)
+  return placeColumns(p.arms[side], p.carriage.pos, yawOf(p.carriage.rot), p.splay[side] + armSwing(pad, side, angleDeg, slewDeg), offset, p.hinges[side]);
 }
 
 /** The ship QD arm's columns in pad ENU at this swing (deg, as the model is animated). */

@@ -205,7 +205,11 @@ export class PadRig {
       const qd = rigOf(`${p}ShipQD`, `${p}ShipQD_Arm`);
       // The carriage's hoisting rigging (not in the kit), its crown under a clad shroud: Pad 1's
       // tower reeves 5 passes, its lines leaving the tower one section up; Pad 2's 6, two up.
-      const front = new THREE.Box3().setFromObject(need(`${p}Chopstick_L_Arm`)).getCenter(new THREE.Vector3());
+      // (Out in front of the tower: midway between the two arms, which stand in a V.)
+      const front = new THREE.Box3()
+        .setFromObject(need(`${p}Chopstick_L_Arm`))
+        .union(new THREE.Box3().setFromObject(need(`${p}Chopstick_R_Arm`)))
+        .getCenter(new THREE.Vector3());
       const groundY = fall.worldToLocal(model.localToWorld(new THREE.Vector3())).y;
       const spec = p === 'Pad1_' ? { passes: 5, housing: true, exitSection: 1 } : { passes: 6, housing: true, exitSection: 2 };
       const rigging = new TowerRigging(fall, carriage, need(`${p}Chopstick_L_Arm`), need(`${p}Tower`), front, groundY, spec);

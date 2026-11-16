@@ -16,7 +16,7 @@ import bpy
 from mathutils import Matrix, Vector
 
 from lib import ROOT, MeshBuilder, parent_keep, pivot
-from chopsticks import HINGE_X, QD_DEPTH, QD_KICKER_DROP, QD_TOP, build_actuator, build_arm, build_carriage, build_lattice, build_qd_arm
+from chopsticks import HINGE_X, QD_DEPTH, QD_KICKER_DROP, QD_TOP, arm_splay, build_actuator, build_arm, build_carriage, build_lattice, build_qd_arm
 
 KIT = os.path.join(ROOT, "art", "source", "tower", "stl", "STLs")
 SCALE = 0.144  # 1 mm at 1:144 -> 0.144 m
@@ -160,6 +160,9 @@ def build_tower_kit(root, mats, geo, spec):
     frame_obj = build_carriage(col_r, CORNER * s).build(pre + "Carriage_Frame", mats.chopstick)
     frame_obj.data.transform(arm_frame)
     parent_keep(frame_obj, carriage)
+    # (Shut on a vehicle over the mount the arms are a narrow V: each stands this far out of
+    # square on its hinge, and that is how it is built, so the app's "shut" is the model as it is.)
+    splay = arm_splay(hang)
     for tag, side in (("R", 1), ("L", -1)):
         # Each arm on its own hinge, HINGE_X either side of the carriage's centre.
         at = Matrix.Translation(hinge) @ KIT_TO_WORLD @ Matrix.Translation((side * HINGE_X, 0.0, 0.0))
@@ -168,7 +171,7 @@ def build_tower_kit(root, mats, geo, spec):
         parent_keep(node, carriage)
         # (The second tower's arms are the shorter, deeper design: chopsticks.py.)
         steel, rail = build_arm(hang + reach, hang, short=reach < 9.0)
-        flip = Matrix.Diagonal((-1, 1, 1, 1)) if side < 0 else Matrix.Identity(4)
+        flip = (Matrix.Diagonal((-1, 1, 1, 1)) if side < 0 else Matrix.Identity(4)) @ Matrix.Rotation(-splay, 4, "Z")
         for mb, name, mat in ((steel, "Arm", mats.chopstick), (rail, "Rail", mats.arm_rail)):
             obj = mb.build(f"{pre}Chopstick_{tag}_{name}", mat)
             obj.data.transform(at @ flip)
@@ -178,7 +181,7 @@ def build_tower_kit(root, mats, geo, spec):
         # Its swing cylinder: the barrel (and the housing on its tower end) on a pin on the
         # carriage, the rod on a pin on the arm's lug. Each its own node at its pin, so the app
         # can turn them to face each other as the arm swings.
-        anchor, lug, barrel, cover, rod = build_actuator(side)
+        anchor, lug, barrel, cover, rod = build_actuator(side, splay, col_r, CORNER * s)
         barrel_node = pivot(f"{pre}ArmActuator_{tag}", tuple((arm_frame @ anchor.to_4d()).to_3d()))
         barrel_node.rotation_quaternion = KIT_TO_WORLD.to_quaternion()
         parent_keep(barrel_node, carriage)
