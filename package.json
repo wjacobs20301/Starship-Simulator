@@ -14,8 +14,9 @@
     "geometry": "tsx scripts/export-geometry.ts",
     "models": "npm run geometry && /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup -P art/blender/build_all.py -- --no-preview && tsx scripts/optimize-models.ts",
     "models:preview": "npm run geometry && /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup -P art/blender/build_all.py && tsx scripts/optimize-models.ts",
-    "terrain:fetch": "tsx scripts/terrain/fetch-dem.ts && tsx scripts/terrain/fetch-copdem.ts && tsx scripts/terrain/fetch-s2.ts --concurrency=4 && tsx scripts/terrain/fetch-imagery.ts --concurrency=12",
-    "terrain:build": "tsx scripts/terrain/build-tiles.ts && python3 scripts/terrain/fix-flatwater.py",
+    "terrain:fetch": "tsx scripts/terrain/fetch-dem.ts && tsx scripts/terrain/fetch-copdem.ts && tsx scripts/terrain/fetch-s2.ts --concurrency=4 && tsx scripts/terrain/fetch-imagery.ts --concurrency=12 && tsx scripts/terrain/fetch-noaa.ts",
+    "terrain:build": "tsx scripts/terrain/build-tiles.ts && python3 scripts/terrain/fix-flatwater.py && npm run terrain:noaa",
+    "terrain:noaa": "tsx scripts/terrain/build-noaa.ts",
     "globe:fetch": "tsx scripts/globe/fetch-globe.ts",
     "globe:build": "tsx scripts/globe/build-globe.ts",
     "data": "python3 -c \"import numpy, scipy, PIL\" && npm run terrain:fetch && npm run terrain:build && npm run globe:fetch && npm run globe:build"

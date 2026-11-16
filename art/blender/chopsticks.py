@@ -426,6 +426,39 @@ BRACE = 0.55  # the one diagonal in each bay of each face
 BAY = 7.1  # a bay's height (about: 0.54 of the face, off the long-lens photo)
 
 
+def build_cladding(half, z0, z1, bays=4):
+    """The second tower's plating: its lowest two sections (four bays of the lattice, 28 m) are
+    closed in on every face with flat steel plate between the columns, a dark band round the
+    tower at each section's joint; open lattice above. (NSF's aerial photo of Pad 2's tower of
+    August 2025, "Starbase Pad 2: Design Advancements from Pad 1": looked at, nothing of it copied.
+    The first tower has none.) Three plates across each face and two up each bay, a finger apart.
+
+    In build_lattice's frame and with its numbers. Returns (plates, bands)."""
+    plates = MeshBuilder()
+    bands = MeshBuilder()
+    c = half - (COLUMN + 0.3) / 2
+    n = max(4, round((z1 - z0) / BAY))
+    bay = (z1 - z0) / n
+    out = c + COLUMN / 2 - 0.18  # (just inside the columns' outer faces)
+    span = 2 * c - COLUMN
+    gap = 0.05
+    for f in range(4):
+        ax = (1, 0) if f % 2 == 0 else (0, 1)  # along the face
+        nx = (0, 1) if f == 0 else (-1, 0) if f == 1 else (0, -1) if f == 2 else (1, 0)  # out of it
+        for k in range(bays * 2):
+            zc = z0 + bay * (k + 0.5) / 2
+            for i in range(3):
+                u = (i - 1) * span / 3
+                centre = (ax[0] * u + nx[0] * out, ax[1] * u + nx[1] * out, zc)
+                size = (span / 3 - gap, 0.12, bay / 2 - gap) if f % 2 == 0 else (0.12, span / 3 - gap, bay / 2 - gap)
+                plates.add_box(centre, size, uv_size=2.0)
+        for k in range(0, bays + 1, 2):
+            zc = min(z0 + bay * k, z0 + bay * bays)
+            size = (span, 0.3, 0.9) if f % 2 == 0 else (0.3, span, 0.9)
+            bands.add_box((nx[0] * (out + 0.05), nx[1] * (out + 0.05), zc), size)
+    return plates, bands
+
+
 def build_lattice(half, z0, z1, joint_every=2):
     """The tower's lattice as built ("Tower-OLM.jpg" shows it close up): one square column at
     each corner, a beam round the tower at every bay, and ONE diagonal per bay on each face,

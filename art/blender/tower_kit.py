@@ -16,7 +16,7 @@ import bpy
 from mathutils import Matrix, Vector
 
 from lib import ROOT, MeshBuilder, parent_keep, pivot
-from chopsticks import HINGE_X, QD_DEPTH, QD_KICKER_DROP, QD_TOP, arm_splay, build_actuator, build_arm, build_carriage, build_lattice, build_qd_arm
+from chopsticks import HINGE_X, QD_DEPTH, QD_KICKER_DROP, QD_TOP, arm_splay, build_actuator, build_arm, build_carriage, build_cladding, build_lattice, build_qd_arm
 
 KIT = os.path.join(ROOT, "art", "source", "tower", "stl", "STLs")
 SCALE = 0.144  # 1 mm at 1:144 -> 0.144 m
@@ -139,6 +139,13 @@ def build_tower_kit(root, mats, geo, spec):
     # (The columns and the lift shaft ride with the tower: it falls as one.)
     parent_keep(columns, tower)
     parent_keep(lift, tower)
+    if spec.get("clad", pre == "Pad2_"):
+        # The second tower's lowest two sections are plated in (chopsticks.py, build_cladding).
+        plates, bands = build_cladding(LATTICE_HALF * s, BASE_TOP * s, TOWER_TOP + 2.0 * s)
+        for mb, name, mat in ((plates, "Tower_Cladding", mats.tower_light), (bands, "Tower_Bands", mats.tower)):
+            o = mb.build(pre + name, mat)
+            o.data.transform(Matrix.Translation(tower_origin) @ KIT_TO_WORLD @ corner_on)
+            parent_keep(o, tower)
 
     # --- Carriage and chopsticks ------------------------------------------------
     # The carriage (and the arms' hinge) on the tower's corner toward the rocket.

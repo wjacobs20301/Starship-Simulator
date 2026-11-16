@@ -11,6 +11,8 @@ import { rocketGarden } from './render/rocketGarden';
 import { loadSouthPadre } from './render/southPadre';
 import { createLaunchSite } from './render/launchSite';
 import { PadLights, lampLightAll } from './render/padLights';
+import { Scrub } from './render/scrub';
+import { createYardLights } from './render/yardLights';
 import { Moon } from './render/moon';
 import { WEATHER_NAME, onSettingsChange, settings, updateSettings } from './settings';
 import { type PadRig, createWorld } from './render/scene';
@@ -82,6 +84,11 @@ world.scene.add(globeTiles.group);
 const terrain = new Terrain(world.renderer, origin);
 world.scene.add(terrain.group);
 terrain.load().catch((err) => console.error('terrain failed to load', err));
+// Scrub and dune grass standing on it, round the camera.
+const scrub = new Scrub(terrain);
+world.scene.add(scrub.mesh);
+world.statics.push(scrub.mesh);
+origin.place(scrub.mesh, [0, 0, 0]);
 rig.groundHeight = (lat, lon) => terrain.groundHeight(lat, lon);
 const mapView = new MapView(document.body);
 world.scene.add(mapView.group);
@@ -150,6 +157,12 @@ facilitiesLoaded
     farShadowCasters.push(g);
     origin.place(g, [0, 0, 0]);
     farCull.add(g, origin.camera);
+    // The yards' and streets' lamps (the masts' and buildings' from the facilities, the street
+    // lights its own).
+    const yard = createYardLights(g.userData.lamps ?? []);
+    world.scene.add(yard);
+    world.statics.push(yard);
+    origin.place(yard, [0, 0, 0]);
   })
   .catch((err) => console.error('facilities failed to load', err));
 
@@ -855,6 +868,7 @@ function placeWorldStep(snap: Snapshot, simTime: number, placements: FxVehicle[]
 function groundStep(snap: Snapshot, cam: V3, now: number): void {
   globeTiles.update(world.camera, cam);
   terrain.update(world.camera, cam, now / 1000, rig.mode === 'orbit' && !rig.map ? rig.distance : 0);
+  scrub.update(cam, now / 1000);
   preparing.frameDrawn();
   if (menu.kind === 'main') preparing.warmPad();
   padRig?.update(snap.missionTime, snap.towers);

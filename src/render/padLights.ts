@@ -24,6 +24,7 @@ import { PAD, PAD2 } from '../sim/constants';
 import { toFxLayer } from './atmosphere';
 import { buildingUniforms } from './facilities';
 import { TRENCHES } from './launchSite';
+import { siteLightUniforms } from './siteLight';
 
 /** The towers' lattice: centre to corner, m (a corner toward the mount; measured on the pad model). */
 const TOWER_CORNER = 8.4;
@@ -212,6 +213,46 @@ const glowFragment = /* glsl */ `
   }
 `;
 
+/** Every field of glows (the pads' own, the yards': yardLights.ts): lit and sized together. */
+const glowMaterials: THREE.ShaderMaterial[] = [];
+
+function glowMaterial(): THREE.ShaderMaterial {
+  const m = new THREE.ShaderMaterial({
+    vertexShader: glowVertex,
+    fragmentShader: glowFragment,
+    uniforms: { uNight: { value: 0 }, uTime: { value: 0 }, uScale: { value: 500 }, uPixelRatio: { value: 1 } },
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    transparent: true,
+  });
+  glowMaterials.push(m);
+  return m;
+}
+
+/** Lamps as points of light, each with the haze round it: seen from any distance, all round. */
+export function glowField(lamps: { pos: THREE.Vector3; brightness: number; size: number; haze: number }[]): THREE.Points {
+  const pos: number[] = [], color: number[] = [], size: number[] = [], soft: number[] = [];
+  for (const l of lamps) {
+    for (const hazy of [false, true]) {
+      pos.push(l.pos.x, l.pos.y, l.pos.z);
+      const c = LAMP_COLOR.clone().multiplyScalar(hazy ? 0.05 : l.brightness);
+      color.push(c.r, c.g, c.b);
+      size.push(hazy ? l.haze : l.size);
+      soft.push(hazy ? 1 : 0);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(color, 3));
+  geo.setAttribute('size', new THREE.Float32BufferAttribute(size, 1));
+  geo.setAttribute('aim', new THREE.Float32BufferAttribute(new Float32Array(pos.length), 3));
+  geo.setAttribute('blink', new THREE.Float32BufferAttribute(new Float32Array(pos.length / 3), 1));
+  geo.setAttribute('soft', new THREE.Float32BufferAttribute(soft, 1));
+  const points = new THREE.Points(geo, glowMaterial());
+  points.frustumCulled = false;
+  return points;
+}
+
 export class PadLights {
   readonly group = new THREE.Group();
   readonly spots: THREE.SpotLight[] = [];
@@ -298,14 +339,7 @@ export class PadLights {
     geo.setAttribute('aim', new THREE.Float32BufferAttribute(glow.aim, 3));
     geo.setAttribute('blink', new THREE.Float32BufferAttribute(glow.blink, 1));
     geo.setAttribute('soft', new THREE.Float32BufferAttribute(glow.soft, 1));
-    this.glowMat = new THREE.ShaderMaterial({
-      vertexShader: glowVertex,
-      fragmentShader: glowFragment,
-      uniforms: { uNight: { value: 0 }, uTime: { value: 0 }, uScale: { value: 500 }, uPixelRatio: { value: 1 } },
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      transparent: true,
-    });
+    this.glowMat = glowMaterial();
     const points = new THREE.Points(geo, this.glowMat);
     points.frustumCulled = false;
     toFxLayer(points);
@@ -332,11 +366,15 @@ export class PadLights {
   /** Per frame: on with the night (the buildings' own lights' measure), beacons flashing by real time. */
   update(realTime: number, renderer: THREE.WebGLRenderer, camera: THREE.PerspectiveCamera): void {
     const night = buildingUniforms.uNight.value as number;
-    const u = this.glowMat.uniforms;
-    u.uNight.value = night;
-    u.uTime.value = realTime;
-    u.uPixelRatio.value = renderer.getPixelRatio();
-    u.uScale.value = renderer.domElement.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
+    for (const m of glowMaterials) {
+      const u = m.uniforms;
+      u.uNight.value = night;
+      u.uTime.value = realTime;
+      u.uPixelRatio.value = renderer.getPixelRatio();
+      u.uScale.value = renderer.domElement.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
+    }
+    // (The pools under the yard and street lamps: siteLight.ts.)
+    siteLightUniforms.uSiteLightK.value = 0.3 * night;
     this.lampMat.emissiveIntensity = 3 * night;
     for (const s of this.spots) {
       s.intensity = s.userData.candela * night;

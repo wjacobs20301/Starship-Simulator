@@ -19,7 +19,9 @@ import { PAD, PAD2 } from '../sim/constants';
 import { SITE_OUTLINE, SLAB_TOP, TRENCHES, insideTrench } from './launchSite';
 import { HIGHWAY_4, ROAD_HALF } from './siteOutline';
 import { EXTRA_FACILITIES } from './facilitiesExtra';
+import { SITE_LIGHT_GLSL, siteLightUniforms } from './siteLight';
 import { setSiteMask } from './terrain';
+import type { YardLamp } from './yardLights';
 import type { GardenVehicle } from './rocketGarden';
 
 interface Facility {
@@ -37,14 +39,22 @@ interface Facility {
   gable?: number;
   /** (Hand-added.) An office or parking structure: ribbons of windows / openings. */
   office?: boolean;
+  /** (Hand-added.) Part of the Starfactory: the survey's picture of its roof on it. */
+  factory?: boolean;
 }
+
+/**
+ * The Starfactory's roofs as NOAA's 2026 survey has them (public/media/starfactory-roof-2026.jpg,
+ * scripts/terrain/build-noaa.ts): pad east / north of the picture's south-west corner, its size, m.
+ */
+const ROOF_PHOTO = { e0: -3395, n0: -1165, w: 470, h: 440 };
 
 const R_EARTH = 6371000;
 /** Local (east, north, up) -> render world (x = E, y = U, z = -N). */
 const ENU_TO_WORLD = new THREE.Matrix4().set(1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1);
 
 /** Building styles (the shader's aInfo.z). */
-export const STYLE = { shed: 0, house: 1, bay: 2, plain: 3, office: 4 } as const;
+export const STYLE = { shed: 0, house: 1, bay: 2, plain: 3, office: 4, factory: 5 } as const;
 
 /** Wall colours (sRGB): mostly SpaceX white and light grey, some older tan and blue-grey sheds. */
 const SHED_COLORS = [0xe9ebec, 0xe2e4e6, 0xd9dcdf, 0xeceae4, 0xcfd4d9, 0xd8cfbd, 0xc5ccd3];
@@ -59,7 +69,18 @@ const CONCRETE = 0xb3b1ab;
 const ROOFTOP = 0xc4c7ca;
 
 /** Shared by every building: how dark it is (0 day .. 1 night), for their lit windows. */
-export const buildingUniforms = { uNight: { value: 0 } };
+export const buildingUniforms = {
+  uNight: { value: 0 },
+  uRoofPhoto: { value: null as THREE.Texture | null },
+  uRoofRect: { value: new THREE.Vector4(ROOF_PHOTO.e0, ROOF_PHOTO.n0, 1 / ROOF_PHOTO.w, 1 / ROOF_PHOTO.h) },
+  uRoofOn: { value: 0 },
+};
+new THREE.TextureLoader().load(`${import.meta.env.BASE_URL}media/starfactory-roof-2026.jpg`, (t) => {
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 8;
+  buildingUniforms.uRoofPhoto.value = t;
+  buildingUniforms.uRoofOn.value = 1;
+});
 
 /** Set from the sun's direction (render world, y up at the pad) each frame. */
 export function setBuildingNight(sunUp: number): void {
@@ -87,12 +108,16 @@ vObjN = normal;
 vInfo = aInfo;
 vDoor = aDoor;`,
     );
-  shader.uniforms.uNight = buildingUniforms.uNight;
+  Object.assign(shader.uniforms, buildingUniforms, siteLightUniforms);
   shader.fragmentShader = shader.fragmentShader
     .replace(
       '#include <common>',
       `#include <common>
 uniform float uNight;
+uniform sampler2D uRoofPhoto;
+uniform vec4 uRoofRect;
+uniform float uRoofOn;
+${SITE_LIGHT_GLSL}
 varying vec3 vObj;
 varying vec3 vObjN;
 varying vec4 vInfo;
@@ -122,6 +147,27 @@ float bGlass = 0.0;
 // Light from inside at night (windows, the bays' clerestories): colour, intensity.
 vec3 bLight = vec3(0.0);
 if (bWall > 0.5) {
+  if (bStyle == 5) {
+    // The Starfactory: flat insulated panels, their joints every 7.3 m along and 4.2 m up; a dark
+    // plinth; a dock door in one bay in three; and its front, the wall that looks north over the
+    // plaza, glazed from the ground to 11 m.
+    float joint = max(aaLine(bAlong, 7.3, 0.12), aaLine(bH, 4.2, 0.1));
+    diffuseColor.rgb *= 1.0 - 0.16 * joint * bDetail;
+    float cell = floor(bAlong / 21.9);
+    float cx = bAlong - (cell + 0.5) * 21.9;
+    float pick = fract(sin(dot(vec2(cell, vInfo.w * 17.0), vec2(127.1, 311.7))) * 43758.5453);
+    if (bN.z < -0.9 && bH > 0.6 && bH < 11.0) {
+      float mullion = max(aaLine(bAlong, 2.45, 0.16), aaLine(bH - 0.6, 3.45, 0.14));
+      diffuseColor.rgb = mix(vec3(0.17, 0.27, 0.36), vec3(0.2, 0.21, 0.22), mullion);
+      bGlass = 0.85 * (1.0 - mullion);
+      bLight = vec3(1.0, 0.93, 0.8) * 0.8 * (1.0 - mullion) * (0.45 + 0.55 * step(0.4, fract(sin(floor(bAlong / 9.8) * 91.7) * 4375.85)));
+    } else if (pick > 0.66 && abs(cx) < 3.3 && bH < 5.6) {
+      float slat = aaLine(bH, 0.5, 0.08);
+      diffuseColor.rgb = mix(diffuseColor.rgb, abs(cx) < 3.0 && bH < 5.3 ? vec3(0.42, 0.44, 0.46) * (1.0 - 0.25 * slat) : vec3(0.22, 0.23, 0.24), bDetail);
+    }
+    if (bH < 0.6) diffuseColor.rgb = vec3(0.3, 0.3, 0.3);
+    if (bH > bTop - 0.9) diffuseColor.rgb *= 0.62;
+  }
   if (bStyle == 0 || bStyle == 2) {
     // Corrugated steel: vertical ribs (in the lighting, below), panel seams every ~6 m. Each
     // fades out before it gets finer than a couple of pixels (it would shimmer into moire).
@@ -215,6 +261,9 @@ if (bWall > 0.5) {
   }
   // Weathering: dirt and splash near the ground.
   if (bStyle != 3) diffuseColor.rgb *= mix(0.72, 1.0, smoothstep(0.0, 2.2, bH));
+} else if (bN.y > 0.5 && bStyle == 5 && uRoofOn > 0.5) {
+  // The Starfactory's roof: the survey's picture of it (its units, drains, seams and stains).
+  diffuseColor.rgb = texture2D(uRoofPhoto, (vec2(vObj.x, -vObj.z) - uRoofRect.xy) * uRoofRect.zw).rgb;
 } else if (bN.y > 0.5) {
   // Flat roofs: a little darker, with faint sheet lines.
   diffuseColor.rgb *= 0.86 - 0.05 * (1.0 - smoothstep(0.0, 0.08, abs(fract(vObj.x / 1.5) - 0.5))) * bDetail;
@@ -228,7 +277,9 @@ roughnessFactor = mix(roughnessFactor, 0.1, bGlass);`,
     .replace(
       '#include <emissivemap_fragment>',
       `#include <emissivemap_fragment>
-totalEmissiveRadiance += bLight * uNight;`,
+totalEmissiveRadiance += bLight * uNight;
+// The yard's lamps on the walls near their feet (siteLight.ts: the light on the ground there).
+totalEmissiveRadiance += diffuseColor.rgb * siteLight(vec2(vObj.x, -vObj.z)) * 1.5 * exp(-max(vObj.y - vInfo.x, 0.0) / 12.0);`,
     )
     .replace(
       '#include <normal_fragment_maps>',
@@ -239,7 +290,7 @@ if (bRib != 0.0) {
 }`,
     );
 };
-buildingMaterial.customProgramCacheKey = () => 'starbase-buildings-v7';
+buildingMaterial.customProgramCacheKey = () => 'starbase-buildings-v9';
 
 /**
  * The tank farm's tanks and its pipes: white insulation jackets, matte (as polished metal they
@@ -494,10 +545,21 @@ export async function loadFacilities(): Promise<THREE.Group> {
     }
   };
 
+  /** The Starfactory's parts (facilitiesExtra.ts): what older footprints stand inside them go. */
+  const factory = facilities.filter((f) => f.factory && f.ring);
+  const within = (ring: number[][], e: number, n: number) => {
+    let inside = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      if (ring[i][1] > n !== ring[j][1] > n && e < ((ring[j][0] - ring[i][0]) * (n - ring[i][1])) / (ring[j][1] - ring[i][1]) + ring[i][0]) inside = !inside;
+    }
+    return inside;
+  };
+
   for (const f of facilities) {
     const [e, n] = f.center;
     // The V3 flame trenches and launch mounts are part of the pad model (OSM maps them as buildings).
     if (TRENCHES.some((t) => insideTrench(t, e, n))) continue;
+    if (!f.factory && f.kind === 'building' && factory.some((s) => within(s.ring!, e, n))) continue;
     // Ground in render space: terrain height above the pad ground, minus curvature drop.
     const y0 = f.base - PAD.groundAlt - (e * e + n * n) / (2 * R_EARTH);
     const seed = hash(e, n);
@@ -553,10 +615,11 @@ export async function loadFacilities(): Promise<THREE.Group> {
         style = f.office || (footprint < 250 && f.height <= 7 && seed < 0.55) ? STYLE.office : STYLE.shed;
         if (f.office) color.setHex(0xc9c8c3);
         color.setHex(SHED_COLORS[Math.floor(seed * SHED_COLORS.length)]);
-        // (The Starfactory: grey panels and long ribbons of glass, not a white shed.)
-        if (f.name === 'Starfactory') {
-          style = STYLE.office;
-          color.setHex(0x80848a);
+        // (The Starfactory: pale insulated panels, its high bay a shade greyer; its roofs the
+        // survey's picture of them.)
+        if (f.factory) {
+          style = STYLE.factory;
+          color.setHex(f.height > 20 ? 0xc3c7cb : 0xdcdfe1);
         }
         const tent = /tent/i.test(f.name ?? '');
         // A steel shed's roof: sheet, pitched a few degrees to a ridge along its length; a
@@ -566,7 +629,7 @@ export async function loadFacilities(): Promise<THREE.Group> {
           if (tent) roofColor = color.getHex();
         }
         if (style === STYLE.shed && !tent && footprint > 150 && f.height >= 4.5) door = [0, 0, 0, 1];
-        flatTop = !roofRise && !f.gable;
+        flatTop = !roofRise && !f.gable && !f.factory;
         // Rooftop units on the bigger flat-roofed ones.
         if (flatTop && footprint > 700 && f.height >= 5) roofUnits(shape, e, n, y0 + f.height, 2 + Math.floor(seed * 4), 2);
       }
@@ -598,6 +661,23 @@ export async function loadFacilities(): Promise<THREE.Group> {
       g = tankTag(mergeGeometries([g.toNonIndexed(), dome.toNonIndexed()])!, (_x, y) => y, () => 2);
       g.translate(e, y0, -n);
       parts.tank.push(g);
+      if (f.height >= 6 && r >= 1.5) {
+        // A standing tank's fittings: a caged ladder up one side, a rail round the top, an outlet
+        // at the foot.
+        const phi = seed * Math.PI * 2;
+        const steel = new THREE.Color(0x8d8f90);
+        const ladder = new THREE.BoxGeometry(0.7, f.height + 1.1, 0.5);
+        ladder.translate(r + 0.25, (f.height + 1.1) / 2, 0);
+        ladder.rotateY(phi);
+        ladder.translate(e, y0, -n);
+        parts.buildings.push(tag(ladder, steel, [y0, f.height + 1.1, STYLE.plain, seed]));
+        const rail = new THREE.TorusGeometry(r * 0.96, 0.05, 4, 28);
+        rail.rotateX(Math.PI / 2);
+        rail.translate(e, y0 + f.height + 1.05, -n);
+        parts.buildings.push(tag(rail, steel, [y0, 1, STYLE.plain, seed]));
+        const out = new THREE.Vector3(Math.cos(phi + 2.2), 0, Math.sin(phi + 2.2));
+        parts.tank.push(pipe(new THREE.Vector3(e, y0 + 0.8, -n).addScaledVector(out, r - 0.1), new THREE.Vector3(e, y0 + 0.8, -n).addScaledVector(out, r + 2.4), 0.2));
+      }
     } else {
       const r = f.diameter! / 2;
       const len = f.length!;
@@ -620,12 +700,30 @@ export async function loadFacilities(): Promise<THREE.Group> {
   }
 
   farmWorks(farm, parts);
-  siteDressing(facilities, parts);
+  /** The lamps of all this (yardLights.ts lights them): masts, wall lamps, the bays' floods. */
+  const lamps: YardLamp[] = [];
+  siteDressing(facilities, parts, lamps);
+  for (const f of facilities) {
+    if (f.kind !== 'building' || !f.ring || !(f.factory || f.material === 'bay')) continue;
+    // Along the Starfactory's walls, one every 30 m at two thirds of their height; on a high
+    // bay, a flood at each corner 30 m up.
+    let area = 0;
+    for (let i = 0; i < f.ring.length - 1; i++) area += f.ring[i][0] * f.ring[i + 1][1] - f.ring[i + 1][0] * f.ring[i][1];
+    const sign = area > 0 ? 1 : -1;
+    for (let i = 0; i < f.ring.length - 1; i++) {
+      const [a, b] = [f.ring[i], f.ring[i + 1]];
+      const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      const [oe, on] = [(sign * (b[1] - a[1])) / len, (-sign * (b[0] - a[0])) / len];
+      if (f.material === 'bay') lamps.push({ e: a[0] + oe * 2, n: a[1] + on * 2, h: 30, reach: 70, kind: 'mast' });
+      else for (let d = 15; d < len - 5; d += 30) lamps.push({ e: a[0] + ((b[0] - a[0]) * d) / len + oe * 1.2, n: a[1] + ((b[1] - a[1]) * d) / len + on * 1.2, h: Math.min(11, f.height * 0.66), reach: 30, kind: 'wall' });
+    }
+  }
   paintSiteMask(facilities);
 
   const group = new THREE.Group();
   group.name = 'Facilities';
   group.userData.garden = garden;
+  group.userData.lamps = lamps;
   for (const [m, geos] of Object.entries(parts) as [keyof typeof MATERIALS, THREE.BufferGeometry[]][]) {
     if (!geos.length) continue;
     const merged = mergeGeometries(geos.map((g) => (g.index ? g.toNonIndexed() : g)))!;
@@ -645,8 +743,15 @@ const MASK_RES = 2;
 /**
  * Round the launch site's tank farm: the blast wall along the ends of the tanks that face the
  * pads, with a return at each end of it (the farm is walled off from the mounts: dark concrete,
- * plain in every overhead photo), the propellant lines along its foot on their stands, and a
- * run from there to each tower's base.
+ * plain in every overhead photo), and what makes a row of tanks a plant, each thing where NOAA's
+ * 2026 survey shows its like (scripts/terrain/build-noaa.ts; sizes off it, to a metre or so):
+ *   - a pipe rack along the wall's pad side, two tiers of lines on steel portals, and a run from
+ *     it to each tower's base;
+ *   - a walkway over the tanks' tops, railed, with a stair down at each end; a manway and a vent
+ *     stack on each tank;
+ *   - at the tanks' far ends a header on stands, each tank piped to it; a low bund wall beyond
+ *     that, and past the wall the plant that feeds them: banks of vaporisers (tall finned
+ *     aluminium), pump skids, small standing vessels.
  */
 function farmWorks(farm: { e: number; n: number; r: number; len: number; angle: number; y0: number }[], parts: { buildings: THREE.BufferGeometry[]; tank: THREE.BufferGeometry[] }): void {
   if (farm.length < 4) return;
@@ -662,13 +767,32 @@ function farmWorks(farm: { e: number; n: number; r: number; len: number; angle: 
   const at = (uu: number, vv: number, h: number) => new THREE.Vector3(uu * a[0] + vv * c[0], y0 + h, -(uu * a[1] + vv * c[1]));
   const WALL = new THREE.Color(0x5a5b5c);
   const STAND = new THREE.Color(0x8d8f90);
-  const box = (uu: number, vv: number, du: number, dv: number, h: number, color: THREE.Color) => {
+  const STEEL = new THREE.Color(0x7c8085);
+  const ALUMINIUM = new THREE.Color(0xc3c8cc);
+  const SKID = new THREE.Color(0x4f5357);
+  const BUND = new THREE.Color(0xa9a79f);
+  const box = (uu: number, vv: number, du: number, dv: number, h: number, color: THREE.Color, base = 0) => {
     const g = new THREE.BoxGeometry(du, h, dv);
     // (Box x along the tanks' heading: turned from east by th about the vertical.)
     g.rotateY(th);
-    const p = at(uu, vv, h / 2);
+    const p = at(uu, vv, base + h / 2);
     g.translate(p.x, p.y, p.z);
-    parts.buildings.push(tag(g, color, [y0, h, STYLE.plain, 0.5]));
+    parts.buildings.push(tag(g, color, [y0 + base, h, STYLE.plain, 0.5]));
+  };
+  /** A square bar from one point to another (render world). */
+  const bar = (p: THREE.Vector3, q: THREE.Vector3, size: number, color: THREE.Color) => {
+    const len = p.distanceTo(q);
+    const g = new THREE.BoxGeometry(size, len, size);
+    g.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), q.clone().sub(p).normalize()));
+    g.translate((p.x + q.x) / 2, (p.y + q.y) / 2, (p.z + q.z) / 2);
+    parts.buildings.push(tag(g, color, [y0, 1, STYLE.plain, 0.5]));
+  };
+  /** A small standing vessel (the tanks' material), its foot at height `base`. */
+  const vessel = (uu: number, vv: number, r: number, h: number, base = 0) => {
+    const g = tankTag(new THREE.CylinderGeometry(r, r, h, 12), (_x, y) => y + h / 2, () => 2);
+    const p = at(uu, vv, base + h / 2);
+    g.translate(p.x, p.y, p.z);
+    parts.tank.push(g);
   };
   // Rows: tanks whose centres are within a tank's breadth and a bit of each other, across.
   const sorted = [...farm].sort((p, q) => v(p) - v(q));
@@ -686,10 +810,75 @@ function farmWorks(farm: { e: number; n: number; r: number; len: number; angle: 
     const uw = end + south * 4;
     box(uw, (v0 + v1) / 2, 1.2, v1 - v0, 5.5, WALL);
     for (const vv of [v0, v1]) box(uw - south * 6, vv, 12, 1.2, 5.5, WALL);
-    // The lines along the wall's pad side: three, on stands every 8 m.
-    const up = uw + south * 3.2;
-    for (let k = 0; k < 3; k++) parts.tank.push(pipe(at(up + south * 0.75 * k, v0, 1.6 + 0.35 * (k % 2)), at(up + south * 0.75 * k, v1, 1.6 + 0.35 * (k % 2)), 0.28));
-    for (let vv = v0 + 2; vv < v1; vv += 8) box(up + south * 0.75, vv, 2.6, 0.3, 1.3, STAND);
+    // The pipe rack along the wall's pad side: portals every 8 m, a tier of lines at 3 m and
+    // one at 5 m, a stringer along each side at the top.
+    const ur = uw + south * 4.4;
+    for (let vv = v0 + 1; vv <= v1 - 0.5; vv += 8) {
+      for (const side of [-1.6, 1.6]) box(ur + side, vv, 0.26, 0.26, 5.4, STEEL);
+      for (const h of [2.85, 4.85]) box(ur, vv, 3.6, 0.24, 0.26, STEEL, h);
+    }
+    for (const side of [-1.6, 1.6]) bar(at(ur + side, v0 + 1, 5.3), at(ur + side, v1 - 0.5, 5.3), 0.16, STEEL);
+    for (const [off, h, r] of [[-1.05, 3.11, 0.3], [-0.3, 3.11, 0.2], [0.35, 3.11, 0.2], [1.0, 3.11, 0.13], [-0.8, 5.11, 0.24], [0.0, 5.11, 0.15], [0.75, 5.11, 0.15]]) {
+      parts.tank.push(pipe(at(ur + off, v0 - 1, h + r), at(ur + off, v1 + 1, h + r), r));
+    }
+
+    const r0 = row[0].r;
+    const top = 0.6 + 2 * r0;
+    const mid = (v(row[0]) + v(row[row.length - 1])) / 2;
+    const span = v(row[row.length - 1]) - v(row[0]) + 1.2 * r0;
+    const um = row.reduce((sum, t) => sum + u(t), 0) / row.length;
+    // The walkway over the tops: a deck on short legs, a rail each side, a stair down at each end.
+    box(um, mid, 1.1, span, 0.1, STAND, top + 0.3);
+    for (const side of [-0.55, 0.55]) {
+      for (const h of [0.95, 1.5]) bar(at(um + side, mid - span / 2, top + h), at(um + side, mid + span / 2, top + h), 0.06, STAND);
+    }
+    for (const t of row) {
+      for (const side of [-0.55, 0.55]) bar(at(um + side, v(t), top - 0.05), at(um + side, v(t), top + 1.5), 0.07, STAND);
+      // Its manway beside the walkway, and its vent stack near the far end.
+      vessel(u(t) + 2.2, v(t), 0.42, 0.5, top - 0.08);
+      const uv = u(t) - south * (t.len / 2 - 2.6);
+      parts.tank.push(pipe(at(uv, v(t), top - 0.1), at(uv, v(t), top + 2.8), 0.11));
+    }
+    for (const end of [-1, 1]) {
+      const ve = mid + (end * span) / 2;
+      for (const side of [-0.45, 0.45]) {
+        bar(at(um + side, ve, top + 0.3), at(um + side, ve + end * (top + 0.3) * 1.1, 0), 0.12, STAND);
+        bar(at(um + side, ve, top + 1.3), at(um + side, ve + end * (top + 0.3) * 1.1, 1.0), 0.06, STAND);
+      }
+    }
+
+    // The far ends: a header along them on stands, each tank piped down to it.
+    const far = Math[south < 0 ? 'max' : 'min'](...row.map((t) => u(t) - (south * t.len) / 2));
+    const uh = far - south * 1.6;
+    parts.tank.push(pipe(at(uh, v0 + 1, 1.0), at(uh, v1 - 1, 1.0), 0.3));
+    for (let vv = v0 + 3; vv < v1; vv += 6) box(uh, vv, 0.9, 0.3, 0.7, STAND);
+    for (const t of row) {
+      const ue = u(t) - (south * t.len) / 2;
+      const hh = 0.6 + 0.45 * t.r;
+      parts.tank.push(pipe(at(ue + south * 0.4, v(t), hh), at(uh, v(t), hh), 0.16));
+      parts.tank.push(pipe(at(uh, v(t), hh), at(uh, v(t), 1.0), 0.16));
+    }
+    // The bund: a low wall beyond the header and back down each side to the blast wall.
+    const ub = far - south * 3.4;
+    box(ub, (v0 + v1) / 2, 0.3, v1 - v0 + 0.3, 0.9, BUND);
+    for (const vv of [v0, v1]) box((ub + uw) / 2, vv, Math.abs(ub - uw), 0.3, 0.9, BUND);
+    // The plant past the bund, in bays of 13 m along it: a bank of vaporisers (four finned
+    // towers in a frame), or a pump skid with its standing vessels; some bays left open.
+    for (let k = 0, vv = v0 + 7; vv < v1 - 5; vv += 13, k++) {
+      const pick = hash(vv * 0.37 + um, k * 1.7 + 3.1);
+      const ue = far - south * 7.5;
+      if (pick < 0.42) {
+        for (let i = 0; i < 4; i++) box(ue, vv - 3.6 + 2.4 * i, 2.6, 1.9, 7.0, ALUMINIUM, 0.5);
+        for (const [du, dv] of [[-1.5, -4.8], [1.5, -4.8], [-1.5, 4.8], [1.5, 4.8]]) box(ue + du, vv + dv, 0.2, 0.2, 7.9, STEEL);
+        box(ue, vv, 3.2, 9.8, 0.2, STEEL, 7.7);
+      } else if (pick < 0.82) {
+        box(ue, vv, 2.8, 7.5, 0.35, STAND);
+        box(ue - south * 0.3, vv - 1.6, 1.6, 3.2, 1.5, SKID, 0.35);
+        vessel(ue, vv + 1.6, 0.75, 3.2, 0.35);
+        vessel(ue, vv + 3.2, 0.55, 2.4, 0.35);
+        parts.tank.push(pipe(at(ue, vv - 3.4, 1.3), at(uh, vv - 3.4, 1.3), 0.14));
+      }
+    }
   }
   // From the lines to each tower's base: the nearest point of the nearest row's run, straight.
   const towers = [
@@ -701,7 +890,7 @@ function farmWorks(farm: { e: number; n: number; r: number; len: number; angle: 
     for (const row of rows) {
       if (row.length < 3) continue;
       const end = Math[south < 0 ? 'min' : 'max'](...row.map((t) => u(t) + (south * t.len) / 2));
-      const uu = end + south * 7.2;
+      const uu = end + south * 11;
       const tv = te * c[0] + tn * c[1];
       const vv = Math.min(Math.max(tv, v(row[0])), v(row[row.length - 1]));
       const d = Math.hypot(te - (uu * a[0] + vv * c[0]), tn - (uu * a[1] + vv * c[1]));
@@ -729,7 +918,7 @@ function farmWorks(farm: { e: number; n: number; r: number; len: number; angle: 
  * equipment skids in the open ground between the buildings, clear of the mounts, the trenches,
  * the towers and the tanks. Placed by a fixed scatter: the same every run.
  */
-function siteDressing(facilities: Facility[], parts: { buildings: THREE.BufferGeometry[] }): void {
+function siteDressing(facilities: Facility[], parts: { buildings: THREE.BufferGeometry[] }, lamps: YardLamp[]): void {
   const y0 = SLAB_TOP;
   const n = SITE_OUTLINE.length;
   /** How far inside the site's outline (east, north) is, m (< 0 outside). */
@@ -783,6 +972,7 @@ function siteDressing(facilities: Facility[], parts: { buildings: THREE.BufferGe
       box(e, nn, 28.2, [0.3, 0.3, 3.6], heading, 0x8f9396);
       box(e + Math.cos(heading) * 0.35, nn + Math.sin(heading) * 0.35, 28.5, [0.35, 1.3, 3.2], heading, 0x3d4043);
       taken.push([e, nn, 3]);
+      lamps.push({ e, n: nn, h: 28.5, reach: 75, kind: 'mast' });
     }
     carried -= len;
   }
@@ -862,8 +1052,10 @@ function paintSiteMask(facilities: Facility[]): void {
   }
   // The launch site's fill, round its slab (blue, added to what's there): the compacted ground
   // the pads were built up on, spreading out past the concrete and thinning into the flats
-  // (blurred over ~25 m here; the terrain's shader frays its edge). Without it the slab was a
-  // sheet of card laid on the marsh.
+  // (blurred over ~10 m here; the terrain's shader frays its edge). Without it the slab was a
+  // sheet of card laid on the marsh. (It reached 25 m out, over imagery in which Pad 2 was bare
+  // sand. The 2026 survey has the real edge of the site in it, a retaining wall with the flats
+  // at its foot, and the outline follows that: a band that wide lay over the inlet's pond.)
   // (Drawn by itself first, so that it can be kept off the road and off everything beyond it:
   // the site is all on the road's south side, and the fill's blurred edge reached across to lie
   // along the far verge as a band of its own.)
@@ -871,9 +1063,9 @@ function paintSiteMask(facilities: Facility[]): void {
   fillCanvas.width = canvas.width;
   fillCanvas.height = canvas.height;
   const fill = fillCanvas.getContext('2d')!;
-  fill.filter = `blur(${9 / MASK_RES}px)`;
+  fill.filter = `blur(${5 / MASK_RES}px)`;
   fill.fillStyle = fill.strokeStyle = 'rgb(0,0,255)';
-  fill.lineWidth = (2 * 9) / MASK_RES;
+  fill.lineWidth = (2 * 5) / MASK_RES;
   fill.beginPath();
   SITE_OUTLINE.forEach(([e, n], i) => (i ? fill.lineTo(...px(e, n)) : fill.moveTo(...px(e, n))));
   fill.closePath();
@@ -901,11 +1093,25 @@ function paintSiteMask(facilities: Facility[]): void {
   ctx.stroke();
   ctx.filter = 'none';
   ctx.globalCompositeOperation = 'source-over';
-  const tex = new THREE.CanvasTexture(canvas);
+  // Onto black, for the texture: a canvas keeps a soft edge in its transparency, the colour under
+  // it whole, and the terrain's shader reads the colour. (So the fill's blurred edge reached it as
+  // a hard one, twenty metres out where the blur's tail gave way to nothing, and toothed there
+  // by the rounding of nearly-clear pixels: a saw's edge down the slanted west fence.)
+  const flat = document.createElement('canvas');
+  flat.width = canvas.width;
+  flat.height = canvas.height;
+  const fc = flat.getContext('2d')!;
+  fc.fillStyle = 'rgb(0,0,0)';
+  fc.fillRect(0, 0, flat.width, flat.height);
+  fc.drawImage(canvas, 0, 0);
+  const tex = new THREE.CanvasTexture(flat);
   tex.colorSpace = THREE.NoColorSpace;
   tex.minFilter = THREE.LinearMipmapLinearFilter;
   tex.magFilter = THREE.LinearFilter;
   tex.generateMipmaps = true;
+  // (Seen at a slant, as the ground is from any camera near it, the mask was read from a mipmap
+  // of 8 m pixels: too coarse for an edge a few metres wide.)
+  tex.anisotropy = 8;
   setSiteMask(tex, [minE, minN, maxE - minE, maxN - minN]);
 }
 

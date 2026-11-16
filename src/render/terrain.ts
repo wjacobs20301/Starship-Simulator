@@ -11,6 +11,7 @@ import { FAR_SHADOW_GLSL, bindFarShadow } from './farShadows';
 import { SEA_MESH_GLSL, seaMeshUniforms } from './oceanSurface';
 import { TRENCHES } from './launchSite';
 import { ROAD_GLSL, bindRoads } from './roads';
+import { SITE_LIGHT_GLSL, siteLightUniforms } from './siteLight';
 import { DEG, PAD } from '../sim/constants';
 import type { V3 } from '../sim/math';
 import type { FloatingOrigin } from './floatingOrigin';
@@ -31,8 +32,24 @@ interface TerrainIndex {
   img: Record<string, string>;
   dem: Record<string, string>;
 }
+/** A newer survey laid over part of the terrain's imagery: its own tiles, indexed the same way. */
+interface OverlayIndex {
+  /** The folder its tiles are in (a new one each time they're rebuilt: tiles are cached for weeks). */
+  dir: string;
+  minZoom: number;
+  maxZoom: number;
+  ranges: Record<string, Range>;
+  img: Record<string, string>;
+}
 
 const BASE = `${import.meta.env.BASE_URL}terrain/`;
+/**
+ * NOAA's January 2026 aerial survey of Starbase (scripts/terrain/build-noaa.ts): the launch site,
+ * the production site and the road between, at 0.3 m a pixel, one zoom level finer than the 2022
+ * survey the rest of the ground is, and with Pad 2, the roundabout and the Starfactory in it.
+ * Shown wherever it has a tile; where its folder isn't on the server, the ground is as before.
+ */
+const OVERLAY = 'noaa2026';
 const GRID = TERRAIN_GRID; // vertices per tile edge
 /**
  * Tiles kept built (each a 256 px image, 44 kB on the GPU compressed with its mipmaps, ~350 kB
@@ -120,6 +137,7 @@ function makeMaterial(map: THREE.Texture | null, holes: boolean, array: THREE.Te
     bindFarShadow(shader);
     shader.uniforms.uSiteRect = uniforms.uSiteRect;
     bindRoads(shader);
+    Object.assign(shader.uniforms, siteLightUniforms);
     bindSea(shader, seaState);
     shader.uniforms.uMaskN = seaMeshUniforms.uMaskN;
     shader.uniforms.uMaskNC = seaMeshUniforms.uMaskNC;
@@ -152,6 +170,7 @@ float siteVNoise(vec2 p) {
   return mix(mix(siteVHash(i), siteVHash(i + vec2(1.0, 0.0)), f.x), mix(siteVHash(i + vec2(0.0, 1.0)), siteVHash(i + vec2(1.0, 1.0)), f.x), f.y);
 }
 ${ROAD_GLSL}
+${SITE_LIGHT_GLSL}
 ${array ? 'uniform sampler2DArray uTiles;\nvarying float vLayer;\nvarying vec2 vTileUv;' : ''}
 varying float vHeight;
 varying vec2 vEN;
@@ -236,6 +255,12 @@ if (water > 0.001) {
 }`,
       )
       .replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+// Lamplight on the ground by night: the pools under the yard and street lamps (siteLight.ts).
+totalEmissiveRadiance += diffuseColor.rgb * siteLight(vEN) * (1.0 - water);`,
+      )
+      .replace(
         '#include <roughnessmap_fragment>',
         `#include <roughnessmap_fragment>
 // As rough as the waves too fine to draw make it (ocean.ts), the foam matte.
@@ -261,7 +286,7 @@ gl_FragColor.a = 1.0 - 0.5 * water * (1.0 - gSeaFoam);
 #endif`,
       );
   };
-  mat.customProgramCacheKey = () => `terrain-v18${holes ? '-holes' : ''}${array ? '-array' : ''}`;
+  mat.customProgramCacheKey = () => `terrain-v19${holes ? '-holes' : ''}${array ? '-array' : ''}`;
   return mat;
 }
 
@@ -302,10 +327,18 @@ class Tile {
   }
 }
 
+/** An overlay tile that wouldn't load: its tile is built again without it. */
+class OverlayMissing extends Error {}
+
 export class Terrain {
   readonly group = new THREE.Group();
   private index!: TerrainIndex;
   private bits: Record<number, { img: Uint8Array; dem: Uint8Array | null }> = {};
+  private overlay: { dir: string; ranges: Record<string, Range>; bits: Record<number, Uint8Array> } | null = null;
+  /** The finest imagery there is anywhere: the terrain's own, or the overlay's. */
+  private maxZoom = 0;
+  /** Overlay tiles that failed to load (z/x/y): the terrain's own imagery there from then on. */
+  private overlayGone = new Set<string>();
   private roots: Tile[] = [];
   private tiles = new Map<string, Tile>();
   private queue: Tile[] = [];
@@ -327,7 +360,22 @@ export class Terrain {
       tex.colorSpace = THREE.SRGBColorSpace;
       uniforms.uGlobe.value = tex;
     });
-    this.index = (await (await fetch(`${BASE}index.json`)).json()) as TerrainIndex;
+    // (The overlay's index asked for afresh each time: the server lets a browser keep what's
+    // under terrain/ for a month, a "not there" included.)
+    const [index, over] = await Promise.all([
+      fetch(`${BASE}index.json`).then((r) => r.json() as Promise<TerrainIndex>),
+      fetch(`${BASE}${OVERLAY}/index.json`, { cache: 'no-cache' })
+        .then((r) => (r.ok ? (r.json() as Promise<OverlayIndex>) : null))
+        .catch(() => null),
+    ]);
+    this.index = index;
+    this.maxZoom = index.maxZoom;
+    if (over?.dir && over.img && over.ranges) {
+      const bits: Record<number, Uint8Array> = {};
+      for (const [z, b] of Object.entries(over.img)) bits[Number(z)] = Uint8Array.from(atob(b), (c) => c.charCodeAt(0));
+      this.overlay = { dir: over.dir, ranges: over.ranges, bits };
+      this.maxZoom = Math.max(this.maxZoom, over.maxZoom);
+    }
     uniforms.uWaterLevel.value = this.index.waterLevel - PAD.groundAlt;
     for (let z = this.index.minZoom; z <= this.index.maxZoom; z++) {
       const dem = this.index.dem[z];
@@ -351,11 +399,19 @@ export class Terrain {
     return ((b[i >> 3] >> (i & 7)) & 1) === 1;
   }
 
+  /** Has the overlay a tile there? */
+  private over(z: number, x: number, y: number): boolean {
+    const r = this.overlay?.ranges[z];
+    if (!r || x < r.x0 || x > r.x1 || y < r.y0 || y > r.y1) return false;
+    const i = (y - r.y0) * (r.x1 - r.x0 + 1) + (x - r.x0);
+    return ((this.overlay!.bits[z][i >> 3] >> (i & 7)) & 1) === 1 && !this.overlayGone.has(`${z}/${x}/${y}`);
+  }
+
   private tile(z: number, x: number, y: number): Tile {
     const key = `${z}/${x}/${y}`;
     let t = this.tiles.get(key);
     if (!t) {
-      t = new Tile(z, x, y, this.has('img', z, x, y));
+      t = new Tile(z, x, y, this.has('img', z, x, y) || this.over(z, x, y));
       this.tiles.set(key, t);
     }
     return t;
@@ -484,7 +540,7 @@ export class Terrain {
         const dT = Math.hypot(t.center[0] - target[0], t.center[1] - target[1], t.center[2] - target[2]);
         pixels = Math.max(pixels, (t.size / Math.max(1, Math.abs(dT - orbit) - t.radius)) * focal);
       }
-      if (!beyond && pixels > SPLIT_PIXELS && t.z < this.index.maxZoom && t.hasImagery) {
+      if (!beyond && pixels > SPLIT_PIXELS && t.z < this.maxZoom && t.hasImagery) {
         const kids = this.childrenOf(t);
         if (kids.some((k) => k.hasImagery)) {
           for (const k of kids) {
@@ -524,7 +580,7 @@ export class Terrain {
     const n0 = (lon + 180) / 360;
     const r = (lat * Math.PI) / 180;
     const m0 = (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2;
-    for (let z = this.index.maxZoom; z >= this.index.minZoom; z--) {
+    for (let z = this.maxZoom; z >= this.index.minZoom; z--) {
       const fx = n0 * 2 ** z;
       const fy = m0 * 2 ** z;
       const t = this.tiles.get(`${z}/${Math.floor(fx)}/${Math.floor(fy)}`);
@@ -566,8 +622,12 @@ export class Terrain {
           t.fails = 0;
         })
         .catch((err) => {
-          console.warn(`terrain tile ${t.key} failed`, err);
           t.state = 'failed';
+          if (err instanceof OverlayMissing) {
+            t.retryAt = this.frame + 1;
+            return;
+          }
+          console.warn(`terrain tile ${t.key} failed`, err);
           // (Again in a few seconds, then longer: 4, 8, 16... s at 60 frames a second.)
           t.retryAt = this.frame + 120 * 2 ** ++t.fails;
         })
@@ -642,19 +702,40 @@ export class Terrain {
    * flats.) Only where nothing above has imagery is it left to the water shader. Returns the
    * image's address and where the tile sits in it (uv offset and scale).
    */
-  private imagery(t: Tile): { url: string | null; off: [number, number]; scale: number } {
-    if (t.hasImagery) return { url: `${BASE}img/${t.key}.jpg`, off: [0, 0], scale: 1 };
-    for (let d = 1; t.z - d >= this.index.minZoom; d++) {
-      const ax = t.x >> d, ay = t.y >> d;
-      if (!this.has('img', t.z - d, ax, ay)) continue;
+  private imagery(t: Tile): { url: string | null; off: [number, number]; scale: number; over: string | null } {
+    for (let d = 0; t.z - d >= this.index.minZoom; d++) {
+      const az = t.z - d, ax = t.x >> d, ay = t.y >> d;
+      // (The overlay's tile first, at each level: it has the terrain's own imagery in it where
+      // the newer survey ends.)
+      const over = this.over(az, ax, ay);
+      const dir = over ? `${OVERLAY}/${this.overlay!.dir}` : this.has('img', az, ax, ay) ? 'img' : null;
+      if (!dir) continue;
       const scale = 2 ** -d;
-      return { url: `${BASE}img/${t.z - d}/${ax}/${ay}.jpg`, off: [(t.x - (ax << d)) * scale, (t.y - (ay << d)) * scale], scale };
+      return { url: `${BASE}${dir}/${az}/${ax}/${ay}.jpg`, off: [(t.x - (ax << d)) * scale, (t.y - (ay << d)) * scale], scale, over: over ? `${az}/${ax}/${ay}` : null };
     }
-    return { url: null, off: [0, 0], scale: 1 };
+    return { url: null, off: [0, 0], scale: 1, over: null };
   }
 
   private async build(t: Tile): Promise<void> {
-    const { url, off, scale: texScale } = this.imagery(t);
+    const src = this.imagery(t);
+    try {
+      await this.buildFrom(t, src);
+    } catch (err) {
+      // (An overlay tile the index lists and the server hasn't: left there, the ground had a
+      // hole in it for good. The tile is tried again at once, with the terrain's own imagery;
+      // and after a few such, the overlay is taken to be missing altogether: found out a tile
+      // at a time, level by level, the ground took a minute to come in.)
+      if (!src.over) throw err;
+      this.overlayGone.add(src.over);
+      if (this.overlayGone.size >= 4) {
+        this.overlay = null;
+        this.maxZoom = this.index.maxZoom;
+      }
+      throw new OverlayMissing(src.over);
+    }
+  }
+
+  private async buildFrom(t: Tile, { url, off, scale: texScale }: { url: string | null; off: [number, number]; scale: number }): Promise<void> {
     const c = t.center;
     // Skirts hang below the tile edges to hide cracks between detail levels.
     const drop = Math.max(2, t.size * 0.02);

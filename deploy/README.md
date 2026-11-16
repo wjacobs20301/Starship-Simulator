@@ -55,6 +55,20 @@ rsync -a --delete --exclude .DS_Store public/terrain USER@SERVER:~/starship/tile
 rsync -a --delete --exclude .DS_Store public/globe/tiles USER@SERVER:~/starship/tiles/globe/
 ```
 
+The 2026 survey of Starbase (`public/terrain/noaa2026`, `npm run terrain:noaa`, ~75 MB) is laid
+over the terrain's own tiles: nothing of theirs is changed, and a build of the game from before it
+ignores the folder. Send its tiles first and its index last, so that nobody is ever told of a
+tile the server hasn't got yet (the server lets a "not found" be kept for a month like any tile):
+
+```bash
+rsync -a --exclude .DS_Store --exclude index.json public/terrain/noaa2026 USER@SERVER:~/starship/tiles/terrain/
+rsync -a --delete --exclude .DS_Store public/terrain/noaa2026 USER@SERVER:~/starship/tiles/terrain/
+```
+
+After a rebuild that changes its picture, bump `VERSION` in `scripts/terrain/build-noaa.ts` (the
+tiles go in a new folder: none of the old ones, kept by browsers for a month, is shown among
+the new).
+
 ### 4. The Cloudflare tunnel
 
 Cloudflare dashboard → Zero Trust → Networks → Tunnels → **Create a tunnel** → Cloudflared → name it

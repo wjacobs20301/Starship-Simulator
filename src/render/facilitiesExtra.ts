@@ -2,17 +2,6 @@
 // (facilities.ts). Traced over the aerial imagery (2022) or from current OpenStreetMap; positions
 // are pad-local east / north metres, `base` the ground height above the ellipsoid like the rest.
 
-/** Axis of the long sheds and the Starfactory (east / north unit vector along their length), and across. */
-const U: [number, number] = [0.714, 0.7];
-const V: [number, number] = [0.7, -0.714];
-
-/** A rotated rectangle's ring from its north-east / north-west corner, length (back along U) and width (along V). */
-function rect(corner: [number, number], length: number, width: number): number[][] {
-  const [e, n] = corner;
-  const p = (a: number, b: number) => [e - U[0] * a + V[0] * b, n - U[1] * a + V[1] * b];
-  return [p(0, 0), p(0, width), p(length, width), p(length, 0), p(0, 0)];
-}
-
 export interface ExtraFacility {
   kind: 'building';
   name: string;
@@ -25,6 +14,11 @@ export interface ExtraFacility {
   gable?: number;
   /** Drawn as an office / parking structure (window or opening ribbons). */
   office?: boolean;
+  /**
+   * Part of the Starfactory: its roof is the survey's own picture of it (facilities.ts), and
+   * whatever older footprint lies under it is left out.
+   */
+  factory?: boolean;
 }
 
 const centre = (ring: number[][]) => {
@@ -35,12 +29,22 @@ const centre = (ring: number[][]) => {
 const make = (f: Omit<ExtraFacility, 'center' | 'kind' | 'material'>): ExtraFacility => ({ kind: 'building', material: 'industrial', center: centre(f.ring), ...f });
 
 export const EXTRA_FACILITIES: ExtraFacility[] = [
-  // The Starfactory: a steel frame in the 2022 imagery, since clad and finished.
-  make({ name: 'Starfactory', ring: [[-3279, -848], [-3224, -902], [-3305, -983], [-3361, -929], [-3279, -848]], base: 1.5, height: 30 }),
-  // The three long gable-roofed production sheds south of it.
-  make({ name: 'Production shed', ring: rect([-3222, -905], 150, 56), base: 1.5, height: 16, gable: 6 }),
-  make({ name: 'Production shed', ring: rect([-3172, -955], 190, 56), base: 1.5, height: 16, gable: 6 }),
-  make({ name: 'Production shed', ring: rect([-3125, -1003], 190, 56), base: 1.5, height: 16, gable: 6 }),
+  // The Starfactory, as NOAA's January 2026 survey has it (scripts/terrain/build-noaa.ts): one
+  // building some 450 m long, its roofs traced off the survey to a metre or two. (Four boxes
+  // before, a quarter of its size, from when it was a steel frame and three sheds.) Heights from
+  // the shadows in the survey (their length about the height at 1 pm in January): approximate.
+  //   - the high bay along its north-west side, grey-roofed;
+  make({ name: 'Starfactory', ring: [[-3183, -739], [-3130, -793], [-3319, -986], [-3381, -941], [-3183, -739]], base: 1.5, height: 24, factory: true }),
+  //   - the low annex on that bay's north-west wall;
+  make({ name: 'Starfactory', ring: [[-3244, -800], [-3265, -782], [-3300, -833], [-3286, -844], [-3244, -800]], base: 1.5, height: 12, factory: true }),
+  //   - the main hall, white-roofed, with the front block and the wing along the highway.
+  make({
+    name: 'Starfactory',
+    ring: [[-3130, -793], [-3077, -841], [-3054, -817], [-3050, -767], [-2993, -769], [-2973, -761], [-2937, -823], [-2936, -834], [-2969, -883], [-3000, -929], [-3051, -994], [-3213, -1151], [-3360, -1000], [-3319, -986], [-3130, -793]],
+    base: 1.5,
+    height: 17,
+    factory: true,
+  }),
   // Multi-storey parking garage (current OpenStreetMap).
   make({
     name: 'Parking garage',

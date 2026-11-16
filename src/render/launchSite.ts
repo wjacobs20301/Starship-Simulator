@@ -1,7 +1,13 @@
 // The Starbase launch site's ground: one concrete surface over the whole compound (both pads,
-// the tank farm and GSE), replacing the aerial imagery there. The imagery is from 2022, before
-// Pad 2 and the V3 rebuilds, so it can't show today's pads; the 3D pads, trenches and
-// facilities are built on top of this surface.
+// the tank farm and GSE), over the terrain's imagery there; the 3D pads, trenches and facilities
+// are built on top of this surface.
+//
+// Its picture is the site's own ground where there's a clean one of it: NOAA's January 2026
+// survey (public/media/launch-site-2026.jpg, scripts/terrain/build-noaa.ts), 0.3 m a pixel: the
+// real pours and patches, the stains, the painted bays, the tyre marks, the drains. Where the
+// survey can't be used it is concrete drawn here (SITE_DRAWN): an aerial photo lays anything
+// tall over on its side, so both towers lie across the ground in it, with their shadows; and
+// Pad 1 was being rebuilt that month, its mount gone and its ground dug up.
 //
 // The slab sits on fill a little above the flattened terrain, with a sloped edge down to the
 // surrounding ground, like the built-up pad sites. Coordinates: pad-local east/north metres
@@ -11,6 +17,7 @@ import * as THREE from 'three';
 import { PAD, PAD2, type Trench } from '../sim/constants';
 import { FAR_SHADOW_GLSL, bindFarShadow } from './farShadows';
 import { M_PER_DEG_LAT, M_PER_DEG_LON } from './geo';
+import { SITE_LIGHT_GLSL, siteLightUniforms } from './siteLight';
 import { SITE_EDGE, SITE_OUTLINE } from './siteOutline';
 
 export { SITE_OUTLINE };
@@ -54,6 +61,51 @@ export function insideTrench(t: TrenchOpening, e: number, n: number): boolean {
   const u = de * t.axis[0] + dn * t.axis[1];
   const v = -de * t.axis[1] + dn * t.axis[0];
   return Math.abs(u) < t.half[0] && Math.abs(v) < t.half[1];
+}
+
+/** The survey's picture of the site: pad east / north of its south-west corner, its size, m. */
+const SITE_PHOTO = { e0: -470, n0: -100, w: 620, h: 330 };
+
+/**
+ * Where the slab is drawn, not photographed (pad east / north, m), each shape's edge blurred
+ * over a few metres:
+ *   - Pad 2: its tower as the survey has it, laid over to the north-west; the tower's shadow,
+ *     north to the road; the mount, whose deck the photo puts metres from its foot;
+ *   - Pad 1: the pad's whole ground, a building site in the survey and bare sand beyond its wall,
+ *     with its tower laid over it; and that tower's shadow across the tank farm.
+ */
+const SITE_DRAWN: { ring?: [number, number][]; circle?: [number, number, number] }[] = [
+  { ring: [[-353, 99], [-381, 85], [-431, 184], [-403, 198]] },
+  { ring: [[-366, 90], [-332, 90], [-332, 216], [-366, 216]] },
+  { circle: [-367.2, 66.5, 50] },
+  { ring: [[-80, -84], [132, -84], [132, 78], [-80, 78]] },
+  { ring: [[-31, 70], [-3, 70], [-3, 160], [-31, 160]] },
+];
+
+/** How far the survey's picture is to be trusted across the site (1: all the way; 0: drawn). */
+function sitePhotoTrust(): THREE.CanvasTexture {
+  const RES = 2;
+  const c = document.createElement('canvas');
+  c.width = Math.ceil(SITE_PHOTO.w / RES);
+  c.height = Math.ceil(SITE_PHOTO.h / RES);
+  const g = c.getContext('2d')!;
+  const px = (e: number, n: number): [number, number] => [(e - SITE_PHOTO.e0) / RES, (SITE_PHOTO.n0 + SITE_PHOTO.h - n) / RES];
+  g.fillStyle = 'rgb(255,255,255)';
+  g.fillRect(0, 0, c.width, c.height);
+  // (Black on white, both opaque: the blur is then in the colour, which is what the shader reads.)
+  g.filter = `blur(${5 / RES}px)`;
+  g.fillStyle = 'rgb(0,0,0)';
+  for (const s of SITE_DRAWN) {
+    g.beginPath();
+    if (s.ring) s.ring.forEach(([e, n], i) => (i ? g.lineTo(...px(e, n)) : g.moveTo(...px(e, n))));
+    else g.arc(...px(s.circle![0], s.circle![1]), s.circle![2] / RES, 0, Math.PI * 2);
+    g.closePath();
+    g.fill();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.NoColorSpace;
+  t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+  return t;
 }
 
 /** Top of the concrete above the pad ground level, m. */
@@ -157,8 +209,23 @@ export function createLaunchSite(): THREE.Group {
   const mat = new THREE.MeshStandardMaterial({ map, roughnessMap: rough, roughness: 0.95, metalness: 0 });
   // (Each pad's mount, and which way its trench runs: in the render world's x, z.)
   const pads = TRENCHES.map((t) => new THREE.Vector4(t.center[0], -t.center[1], t.axis[0], -t.axis[1]));
+  // The survey's picture of the ground (shown once it has loaded; the drawn concrete till then).
+  const photo = {
+    uSitePhoto: { value: null as THREE.Texture | null },
+    uSiteTrust: { value: sitePhotoTrust() },
+    uSitePhotoRect: { value: new THREE.Vector4(SITE_PHOTO.e0, SITE_PHOTO.n0, 1 / SITE_PHOTO.w, 1 / SITE_PHOTO.h) },
+    uSitePhotoOn: { value: 0 },
+  };
+  new THREE.TextureLoader().load(`${import.meta.env.BASE_URL}media/launch-site-2026.jpg`, (t) => {
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.anisotropy = 8;
+    t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+    photo.uSitePhoto.value = t;
+    photo.uSitePhotoOn.value = 1;
+  });
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uPads = { value: pads };
+    Object.assign(shader.uniforms, photo, siteLightUniforms);
     bindFarShadow(shader);
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nvarying vec2 vSiteXZ;')
@@ -169,7 +236,12 @@ export function createLaunchSite(): THREE.Group {
         `#include <common>
         varying vec2 vSiteXZ;
         uniform vec4 uPads[${TRENCHES.length}];
+        uniform sampler2D uSitePhoto;
+        uniform sampler2D uSiteTrust;
+        uniform vec4 uSitePhotoRect;
+        uniform float uSitePhotoOn;
         ${FAR_SHADOW_GLSL}
+        ${SITE_LIGHT_GLSL}
         float siteHash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
         float siteNoise(vec2 p) {
           vec2 i = floor(p), f = fract(p);
@@ -181,6 +253,7 @@ export function createLaunchSite(): THREE.Group {
         '#include <map_fragment>',
         `#include <map_fragment>
         vec2 P = vSiteXZ;
+        vec3 siteTex = diffuseColor.rgb;
         // (How much ground a pixel spans, m: the fine grain and the tyre tracks fade to their
         // average once finer than the pixels, not sparkle.)
         float sitePx = max(length(dFdx(P)), length(dFdy(P)));
@@ -213,7 +286,24 @@ export function createLaunchSite(): THREE.Group {
         float stain = siteNoise(P / 8.0 + 21.0) * siteNoise(P / 29.0 + 4.0);
         diffuseColor.rgb *= 1.0 - 0.28 * smoothstep(0.3, 0.55, stain);
         diffuseColor.rgb *= 0.88 + 0.22 * big;
+        // The survey's picture of this ground, where it can be trusted. Finer than its pixels
+        // (0.3 m: within a couple of hundred metres) it's a blur, and takes the drawn concrete's
+        // grain and joints.
+        vec2 siteUv = (vec2(P.x, -P.y) - uSitePhotoRect.xy) * uSitePhotoRect.zw;
+        float trust = uSitePhotoOn * texture2D(uSiteTrust, siteUv).r * step(0.0, siteUv.x) * step(siteUv.x, 1.0) * step(0.0, siteUv.y) * step(siteUv.y, 1.0);
+        if (trust > 0.003) {
+          vec3 ph = texture2D(uSitePhoto, siteUv).rgb;
+          float closeK = 1.0 - smoothstep(0.1, 0.4, sitePx);
+          ph *= mix(1.0, dot(siteTex, vec3(0.3333)) / 0.47, 0.55 * closeK) * mix(1.0, 0.93 + 0.14 * siteNoise(P * 2.3), fineK);
+          diffuseColor.rgb = mix(diffuseColor.rgb, ph, trust);
+        }
         diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(0.3, 0.29, 0.28), clamp(soot, 0.0, 0.85) * (0.65 + 0.35 * siteNoise(P / 5.0 + 13.0)));`,
+      )
+      .replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+        // (The pools under the site's floodlight masts by night: siteLight.ts.)
+        totalEmissiveRadiance += diffuseColor.rgb * siteLight(vec2(vSiteXZ.x, -vSiteXZ.y));`,
       )
       .replace(
         '#include <dithering_fragment>',
@@ -222,7 +312,7 @@ export function createLaunchSite(): THREE.Group {
         gl_FragColor.rgb *= 1.0 - farShadow(vec2(vSiteXZ.x, -vSiteXZ.y));`,
       );
   };
-  mat.customProgramCacheKey = () => 'site-concrete-v3';
+  mat.customProgramCacheKey = () => 'site-concrete-v5';
 
   // Slab top: the outline, UVs in world metres / TILE.
   const shape = new THREE.Shape(SITE_OUTLINE.map(([e, n]) => new THREE.Vector2(e, n)));
