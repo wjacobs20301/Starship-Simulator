@@ -89,8 +89,6 @@ const mountAt = (pad: number): [number, number] => {
   const p = pad === 0 ? PAD : PAD2;
   return [(p.lonDeg - PAD.lonDeg) * 111_320 * Math.cos((PAD.latDeg * Math.PI) / 180), (p.latDeg - PAD.latDeg) * 110_800];
 };
-/** How far out from the carriage (the middle of the line between its hinges) the arms hold a vehicle, m, per pad. */
-const CATCH_REACH: number[] = PAD_COLLIDERS.map((_, i) => Math.hypot(mountAt(i)[0] - HINGES[i][0], mountAt(i)[1] - HINGES[i][1]));
 
 /**
  * How far an arm's own line (through its hinge, along the arm) passes from the centre of a
@@ -106,19 +104,18 @@ const ARM_LINE = 5.6;
  * As on the real towers, the two hinges stand side by side at the tower's corner, fixed to the
  * carriage, and each arm has its own actuator: there is nothing that turns the pair as one
  * piece. Shut on a vehicle over the mount the arms are a narrow V (that is the model as built:
- * swing 0). To carry a vehicle to the side, both arms swing the same way, each staying against
- * the hull: its line passes the vehicle's centre ARM_LINE off, as it does over the mount.
+ * swing 0). To carry a vehicle to the side, both arms turn the same way by the same angle, at
+ * the same rate: slewDeg is that angle. The V between them keeps its shape and turns with them,
+ * so what they hold stays held, turning with them and shifting a little along the rails
+ * (catchPoint: the two hinges being apart, the V's point moves as it turns).
+ *
+ * (Each arm had an angle of its own before, worked out to keep its line against a vehicle
+ * carried round the carriage's middle on a circle: the two differed by a few degrees and moved
+ * at different rates, and here and there on the way round one stood a hair off the hull, which
+ * let go of a ship held with the arms stopped.)
  */
-export function armSwing(pad: number, side: ArmSide, angleDeg: number, slewDeg = 0): number {
-  const open = ((side === 'L' ? 1 : -1) * angleDeg * Math.PI) / 180;
-  if (slewDeg === 0) return open;
-  const s = (clampSlew(slewDeg) * Math.PI) / 180;
-  const D = CATCH_REACH[pad];
-  const hx = PAD_COLLIDERS[pad].hinges[side][0];
-  // (In the carriage's frame: the vehicle at (-D sin s, -D cos s), this hinge at (hx, 0); a swing
-  // th turns the arm, from where it stands shut over the mount, by th.)
-  const line = (vx: number, vz: number) => Math.atan2(vx, vz) + (side === 'L' ? 1 : -1) * Math.asin(Math.min(1, ARM_LINE / Math.hypot(vx, vz)));
-  const th = line(D * Math.sin(s) + hx, D * Math.cos(s)) - line(hx, D) + open;
+export function armSwing(_pad: number, side: ArmSide, angleDeg: number, slewDeg = 0): number {
+  const th = ((side === 'L' ? 1 : -1) * angleDeg * Math.PI) / 180 + (clampSlew(slewDeg) * Math.PI) / 180;
   // (And no further out than square to where it stands shut: an arm opened wide and swung its
   // own way as well would fold back into the tower.)
   return side === 'L' ? Math.min(th, ARM_OUT_MAX) : Math.max(th, -ARM_OUT_MAX);
@@ -351,17 +348,46 @@ export function awayFromTower(pad: number): V3 {
 }
 
 /**
- * Where the arms hold a vehicle (pad ENU, horizontal), swung by `slewDeg` about the carriage's
- * pivot: the launch mount's centre at 0.
+ * Each pad's arms shut over its mount, in plan (pad ENU): per arm, its hinge, the unit direction
+ * of its line out from the hinge, and the unit normal from that line toward the vehicle. The
+ * line passes ARM_LINE from the mount's centre, on the hinge's own side of it.
+ */
+const ARM_LINES = PAD_COLLIDERS.map((p, pad) => {
+  const [me, mn] = mountAt(pad);
+  const centre = HINGES[pad];
+  const lines = {} as Record<ArmSide, { h: [number, number]; d: [number, number]; n: [number, number] }>;
+  for (const side of ['L', 'R'] as const) {
+    const at = placeColumns([[0, 0, 0, 0]], p.carriage.pos, yawOf(p.carriage.rot), 0, 0, p.hinges[side]);
+    const h: [number, number] = [at[0], at[1]];
+    const w = [me - h[0], mn - h[1]];
+    const dist = Math.hypot(w[0], w[1]);
+    // (A hinge left of the line from the carriage to the mount has its arm pass left of the vehicle.)
+    const left = (me - centre[0]) * (h[1] - centre[1]) - (mn - centre[1]) * (h[0] - centre[0]) > 0 ? 1 : -1;
+    const a = Math.atan2(w[1], w[0]) + left * Math.asin(Math.min(1, ARM_LINE / dist));
+    const d: [number, number] = [Math.cos(a), Math.sin(a)];
+    lines[side] = { h, d, n: left > 0 ? [d[1], -d[0]] : [-d[1], d[0]] };
+  }
+  return lines;
+});
+
+/**
+ * Where the arms hold a vehicle (pad ENU, horizontal) with both swung by `slewDeg` (armSwing):
+ * the point ARM_LINE from each arm's line, between them. The launch mount's centre at 0.
  */
 export function catchPoint(pad: number, slewDeg: number): [number, number] {
   const [me, mn] = MOUNTS[pad];
   if (slewDeg === 0) return [me, mn];
-  const [he, hn] = HINGES[pad];
   const a = (clampSlew(slewDeg) * Math.PI) / 180;
   const c = Math.cos(a);
   const s = Math.sin(a);
-  return [he + (me - he) * c - (mn - hn) * s, hn + (me - he) * s + (mn - hn) * c];
+  const { L, R } = ARM_LINES[pad];
+  // (Each line turned about its own hinge: n . (p - h) = ARM_LINE for both.)
+  const nl = [L.n[0] * c - L.n[1] * s, L.n[0] * s + L.n[1] * c];
+  const nr = [R.n[0] * c - R.n[1] * s, R.n[0] * s + R.n[1] * c];
+  const kl = ARM_LINE + nl[0] * L.h[0] + nl[1] * L.h[1];
+  const kr = ARM_LINE + nr[0] * R.h[0] + nr[1] * R.h[1];
+  const det = nl[0] * nr[1] - nl[1] * nr[0];
+  return [(kl * nr[1] - kr * nl[1]) / det, (nl[0] * kr - nr[0] * kl) / det];
 }
 
 /** Height of what's under a point (pad ENU) near the pads: a launch mount, or the ground (0). */

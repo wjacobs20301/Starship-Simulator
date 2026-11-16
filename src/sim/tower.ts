@@ -6,8 +6,13 @@
 export const ARMS = {
   /** Top of the arms' landing rails with the carriage at its home (catch) position, m. */
   homeTop: 99.5,
-  /** Carriage travel relative to home, m (arm tops from ~50 m up to just under the tower top). */
-  minOffset: -50,
+  /**
+   * Carriage travel relative to home, m: arm tops from 38 m up to just under the tower top. (Low
+   * enough to stand a ship on the ground beside the mount: its catch fittings are 38.5 m above
+   * its base. It stopped 11 m higher before, and a ship carried to the side could only be
+   * dropped the rest of the way.)
+   */
+  minOffset: -61.5,
   maxOffset: 36,
   /** Where the arms sit for launch and stay for the booster catch: high up the tower. */
   launchOffset: 34,

@@ -85,6 +85,8 @@ export interface ManeuverNode {
 export const RAILS_ALT = 140e3;
 /** Chopsticks capture radius: a hull this close to the catch point (at arm height) gets centred, m. */
 const CAPTURE_RADIUS = 2.5;
+/** A ship comes to rest on a booster under it only slower than this, m/s (a hand's breadth of fall): faster, it's a drop. */
+const SET_DOWN_SPEED = 1.5;
 /** Speed into a structure (m/s) that wrecks both it and the vehicle. */
 const CRASH_SPEED = { arm: 4, tower: 3, qd: 6 };
 /** Pushing on the ship QD arm faster than this bends it out of the way (wrecks it), m/s. */
@@ -643,8 +645,12 @@ export class Simulation {
       if ((v.status === 'held' || v.status === 'landed') && !this.toppling.has(v.id)) {
         // Closed on it at its lifting points and lifting: the arms take it (off the stack, for a ship).
         if (this.pickUp(v)) continue;
-        const push = this.armPush(v, this.t + dt);
-        if (push) this.startTopple(v, push, this.t + dt);
+        // (At this.t: a standing vehicle isn't moved on to the step's end until further down.
+        // Taken at the end, it was looked for 4 m west of where it stood, the pad having turned
+        // on with the Earth meanwhile: an arm closing on a ship set down beside the mount found
+        // it early, on one side only, and pushed it over.)
+        const push = this.armPush(v, this.t);
+        if (push) this.startTopple(v, push, this.t);
       }
       if (this.toppling.has(v.id)) {
         this.topple(v, dt);
@@ -655,6 +661,9 @@ export class Simulation {
         // Let go: a ship set down on a booster standing on the mount is stacked again.
         const under = this.standingUnder(v, this.t + dt);
         if (v.id === 'ship' && under?.id === 'booster' && this.restack(under, v, this.t + dt)) continue;
+        // (Let go from where the arms have it at the step's end. Left where it was at the step's
+        // start, it began its fall 4 m west of the arms: the pad had turned on with the Earth.)
+        this.hang(v, this.t + dt);
         this.release(v);
       } else if (v.status === 'caught') {
         // Hanging on the arms: engines shut down.
@@ -691,7 +700,20 @@ export class Simulation {
         const nearPad = downrange(v.r, tEnd) < 4000;
         // The launch mounts stand 25 m proud of the pad; the transport stands a few metres.
         const surface = nearPad ? PAD.groundAlt + surfaceUnder(eciToPad(v.r, tEnd)) : 0;
-        if (baseH < surface && sinceLiftoff > 5) {
+        // Coming down on a vehicle that stands there (a ship let go over its booster): set down
+        // gently and square it's stacked; dropped, both are lost.
+        const below = nearPad ? this.standingBelow(v, this.hull(v, aux, tEnd), tEnd) : undefined;
+        if (below) {
+          const vz = -dot(aux.vAir, up);
+          if (v.id === 'ship' && below.id === 'booster' && vz < SET_DOWN_SPEED && this.restack(below, v, tEnd)) continue;
+          this.destroy(v, `${v.name} came down on ${below.name} at ${vz.toFixed(1)} m/s`);
+          this.destroy(below, `${below.name} destroyed under ${v.name}`);
+          continue;
+        }
+        // (Not in the first seconds of a launch, the stack still at the mount's height. With no
+        // launch yet there is nothing to wait for: a ship the arms dropped before one fell
+        // through the mount, the ground and on down for ever.)
+        if (baseH < surface && (sinceLiftoff > 5 || this.mission.liftoffT === null)) {
           const vz = -dot(aux.vAir, up);
           const vh = norm(sub(aux.vAir, scale(up, -vz)));
           const km = (downrange(v.r, tEnd) / 1000).toFixed(0);
@@ -1377,8 +1399,10 @@ export class Simulation {
   private armsLetGo(v: Vehicle): boolean {
     const arms = this.towers[v.caughtPad];
     if (arms.disabled) return true;
-    const closing = arms.targetAngle < arms.angle - 0.01;
-    return !arms.contact && !closing;
+    // (Opening, and off the hull. Not merely stopped and found off it: closed on a vehicle and
+    // stopped, the arms hold it wherever they take it, and the test for "against the hull", a
+    // probe 0.3 deg further shut, is not to be trusted to that margin all the way round.)
+    return !arms.contact && arms.targetAngle > arms.angle + 0.01;
   }
 
   /**
@@ -1448,6 +1472,20 @@ export class Simulation {
       if (!aux) return false;
       const c = this.hull(o, aux, t);
       return Math.hypot(c.b[0] - e, c.b[1] - n) < 1.5 && c.b[2] > c.a[2];
+    });
+  }
+
+  /**
+   * A vehicle standing right under one that is falling (its hull at t, base first), if the
+   * falling one's base has reached it: within its own top and bottom, over its axis.
+   */
+  private standingBelow(v: Vehicle, hull: Cylinder, t: number): Vehicle | undefined {
+    return this.vehicles.find((o) => {
+      if (o === v || (o.status !== 'held' && o.status !== 'landed') || this.toppling.has(o.id)) return false;
+      const aux = this.aux.get(o.id);
+      if (!aux) return false;
+      const c = this.hull(o, aux, t);
+      return hull.a[2] < c.b[2] && hull.a[2] > c.a[2] && Math.hypot(hull.a[0] - c.b[0], hull.a[1] - c.b[1]) < c.r + 1;
     });
   }
 
