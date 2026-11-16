@@ -24,6 +24,8 @@ export interface PreparingDeps {
 export interface Preparing {
   /** Cover the start of a new flight until it's ready (midFlight: a mission starting part-way through, shown at once). */
   showPreparing(midFlight: boolean): void;
+  /** A new flight isn't ready to look at yet (the screen up, or about to be). */
+  busy(): boolean;
   /** A frame was drawn. */
   frameDrawn(): void;
   /** Load the launch pad's ground ahead, as the launch camera will see it. */
@@ -45,9 +47,11 @@ export function createPreparing(deps: PreparingDeps): Preparing {
   /** Longest the screen waits for the ground (a slow connection flies with it still arriving), ms. */
   const PREPARING_MAX_MS = 20000;
   let preparingRun = 0;
+  let waiting = false;
 
   function showPreparing(midFlight: boolean): void {
     const run = ++preparingRun;
+    waiting = true;
     preparing.querySelector('.pp-title')!.textContent = midFlight ? 'Preparing mission' : 'Loading';
     preparing.querySelector('.pp-name')!.textContent = tracker.mission.title;
     const sub = preparing.querySelector<HTMLElement>('.pp-sub')!;
@@ -66,6 +70,7 @@ export function createPreparing(deps: PreparingDeps): Preparing {
       // (Ready at once, as when the ground is already loaded: no screen at all.)
       settled = ready ? settled + 1 : 0;
       if (settled >= 3 || waited > PREPARING_MAX_MS) {
+        waiting = false;
         if (shown) window.setTimeout(() => preparing.classList.remove('on'), 300);
         return;
       }
@@ -98,6 +103,7 @@ export function createPreparing(deps: PreparingDeps): Preparing {
 
   return {
     showPreparing,
+    busy: () => waiting,
     frameDrawn: () => {
       framesDrawn++;
     },

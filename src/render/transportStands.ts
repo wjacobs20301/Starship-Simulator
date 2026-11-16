@@ -15,7 +15,7 @@ import { SLAB_TOP } from './launchSite';
 const TRAILER = { length: 15.6, width: 2.6, deck: 1.5, axles: 9, apart: 4.6 };
 const RING_R = 4.5;
 /** The ring's top above the slab the trailers stand on, m (the physics has it STAND_HEIGHT above the pad's ground, the slab SLAB_TOP). */
-const TOP = STAND_HEIGHT - SLAB_TOP;
+export const STAND_TOP = STAND_HEIGHT - SLAB_TOP;
 
 const WHITE = new THREE.Color(0xd9dad6);
 const TYRE = new THREE.Color(0x1c1d1f);
@@ -72,7 +72,7 @@ function stand(): THREE.BufferGeometry[] {
   const base = TRAILER.deck;
   for (const x of [-3.6, 3.6]) box(x, base + 0.25, 0, 0.5, 0.5, TRAILER.apart + TRAILER.width, steel);
   for (const z of [-3.6, 3.6]) box(0, base + 0.25, z, 9, 0.5, 0.5, steel);
-  const top = TOP - 0.5;
+  const top = STAND_TOP - 0.5;
   const at = (k: number, y: number, r = RING_R) => new THREE.Vector3(Math.cos((k / 8) * Math.PI * 2 + Math.PI / 8) * r, y, Math.sin((k / 8) * Math.PI * 2 + Math.PI / 8) * r);
   for (let k = 0; k < 8; k++) {
     parts.push(bar(at(k, base + 0.5), at(k, top), 0.34, steel));
@@ -80,7 +80,7 @@ function stand(): THREE.BufferGeometry[] {
   }
   const ring = new THREE.TorusGeometry(RING_R, 0.26, 8, 48);
   ring.rotateX(Math.PI / 2);
-  ring.translate(0, TOP - 0.26, 0);
+  ring.translate(0, STAND_TOP - 0.26, 0);
   parts.push(tinted(ring, steel));
   const inner = new THREE.TorusGeometry(RING_R - 0.9, 0.12, 6, 40);
   inner.rotateX(Math.PI / 2);
@@ -92,7 +92,7 @@ function stand(): THREE.BufferGeometry[] {
       const a = (k / 20) * Math.PI * 2;
       const g = new THREE.BoxGeometry(0.5, 0.34, 0.7);
       g.rotateY(-a);
-      g.translate(Math.cos(a) * (RING_R + 0.35), TOP - 0.3, Math.sin(a) * (RING_R + 0.35));
+      g.translate(Math.cos(a) * (RING_R + 0.35), STAND_TOP - 0.3, Math.sin(a) * (RING_R + 0.35));
       parts.push(tinted(g, WHITE));
     }
   }

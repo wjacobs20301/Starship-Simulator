@@ -13,7 +13,8 @@ import { SLAB_TOP, createLaunchSite } from './render/launchSite';
 import { PadLights, lampLightAll } from './render/padLights';
 import { Scrub } from './render/scrub';
 import { insideSite } from './render/siteOutline';
-import { TransportStands } from './render/transportStands';
+import { STAND_TOP, TransportStands } from './render/transportStands';
+import { STAND_HEIGHT } from './sim/padCollision';
 import { createYardLights } from './render/yardLights';
 import { Moon } from './render/moon';
 import { WEATHER_NAME, onSettingsChange, settings, updateSettings } from './settings';
@@ -235,6 +236,8 @@ let curr: Received | null = null;
 const motion = new SnapshotClock<Snapshot>();
 /** The flight or scene (the worker's count of them) its snapshots are of. */
 let motionScene = 0;
+/** The worker's count of jumps within a scene (a rollout's film skipping up the road), as last heard. */
+let motionCuts = 0;
 let warp = 1;
 /** Warping ahead to a maneuver / the autopilot's next event (the worker drives it). */
 let warpTo: FromWorker['warpTo'] = null;
@@ -255,8 +258,9 @@ worker.onmessage = (ev: MessageEvent<WorkerMessage>) => {
   const at = performance.now();
   // (A new flight or scene: nothing of the last one to draw between. During a replay too: the
   // clock goes on with the live flight, so it's in step when the replay ends.)
-  if (ev.data.sceneId !== motionScene) {
+  if (ev.data.sceneId !== motionScene || ev.data.cuts !== motionCuts) {
     motionScene = ev.data.sceneId;
+    motionCuts = ev.data.cuts;
     motion.reset();
   }
   motion.push(ev.data.snapshot, ev.data.snapshot.t, at);
@@ -368,6 +372,9 @@ const views = createViewModes({
   world,
   send,
   showToast,
+  showTitle,
+  cuts: () => motionCuts,
+  busy: () => preparing.busy(),
   live: () => ({ prev, curr }),
   setLive: (p, c) => {
     prev = p;
@@ -515,8 +522,9 @@ function resetFlight(): void {
   // Hand-flown missions (and free roam) start with the player at the controls, autopilot off
   // for what they fly: set up for where it starts.
   flight.trackedId = setup.fly ?? (start === 'rollout' ? 'ship' : 'stack');
-  // Watched flights get the auto camera (K turns it off; touching the camera does too).
-  views.restartDirector(tracker.mission.group === 'auto');
+  // Watched flights get the auto camera (K turns it off; touching the camera does too). A
+  // rollout too: it's filmed down the highway to the pad, and the camera handed back there.
+  views.restartDirector(tracker.mission.group === 'auto' || start === 'rollout');
   const fly = setup.fly;
   pilotCtl.manualVehicles.clear();
   if (fly) pilotCtl.manualVehicles.add(fly);
@@ -704,6 +712,17 @@ function showToast(text: string): void {
   clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => toast.classList.remove('on'), 3500);
 }
+// A title over the picture, low on the left, for a few seconds (the auto camera's, on a rollout).
+const titleCard = document.createElement('div');
+titleCard.id = 'title-card';
+document.body.append(titleCard);
+let titleTimer = 0;
+function showTitle(head: string, sub: string): void {
+  titleCard.replaceChildren(Object.assign(document.createElement('b'), { textContent: head }), Object.assign(document.createElement('span'), { textContent: sub }));
+  titleCard.classList.add('on');
+  clearTimeout(titleTimer);
+  titleTimer = window.setTimeout(() => titleCard.classList.remove('on'), 6500);
+}
 // (The player took the camera: the auto camera stands down, game/viewModes.ts.)
 world.renderer.domElement.addEventListener('pointerdown', views.stopDirector);
 world.renderer.domElement.addEventListener('wheel', views.stopDirector, { passive: true });
@@ -859,7 +878,6 @@ function aimCameraStep(m: FrameMotion, target: CameraTarget | null, watching: Bl
 function placeWorldStep(snap: Snapshot, simTime: number, placements: FxVehicle[], cam: V3, m: FrameMotion): void {
   origin.apply(world.statics);
   moon.update(simTime, world.skyRotation, world.sunDir, origin, PAD_UP, buildingUniforms.uNight.value);
-  for (const pl of placements) origin.place(pl.mesh.root, pl.world);
   // The transport under a vehicle rolling out: where that vehicle is drawn, its wheels on the
   // road there (the terrain's height; the slab's, once on the launch site); arrived, on its stand's place.
   {
@@ -867,8 +885,13 @@ function placeWorldStep(snap: Snapshot, simTime: number, placements: FxVehicle[]
     const riding = tr && !tr.arrived ? placements.find((pl) => pl.snap.id === tr.id) : null;
     const [x, z] = riding ? [riding.world[0], riding.world[2]] : tr ? [tr.e, -tr.n] : [0, 0];
     const ground = insideSite(x, -z) ? SLAB_TOP : ((terrain.groundHeight(PAD.latDeg - z / M_PER_DEG_LAT, PAD.lonDeg + x / M_PER_DEG_LON) ?? PAD.groundAlt) - PAD.groundAlt);
+    // (And the vehicle sat on the transport's ring, wherever the road has it. The simulation
+    // carries it at the stand's height over the pad's own level, and the road, a metre or so
+    // under that for most of the way, left it hovering over the ring by as much.)
+    if (riding) riding.world[1] += ground + STAND_TOP - STAND_HEIGHT;
     transportStands.update(tr, tr ? [x, ground - (x * x + z * z) / (2 * 6371000), z] : null, (o, w) => origin.place(o, w));
   }
+  for (const pl of placements) origin.place(pl.mesh.root, pl.world);
   farCull.update(cam, world.renderer.domElement.height / (2 * Math.tan(THREE.MathUtils.degToRad(world.camera.fov) / 2)));
   // Stages down in the sea: afloat on the waves, the spray off them.
   afloatFx.update(simTime, placements, fx.particles);
@@ -886,12 +909,21 @@ function placeWorldStep(snap: Snapshot, simTime: number, placements: FxVehicle[]
 }
 
 /** The globe, the ground round the camera (and the pad's ahead, behind the main menu), the towers. */
+const warmCam = new THREE.PerspectiveCamera(50, 1, 1, 5e6);
 function groundStep(snap: Snapshot, cam: V3, now: number): void {
   globeTiles.update(world.camera, cam);
   terrain.update(world.camera, cam, now / 1000, rig.mode === 'orbit' && !rig.map ? rig.distance : 0);
   scrub.update(cam, now / 1000);
   preparing.frameDrawn();
   if (menu.kind === 'main') preparing.warmPad();
+  // (A film's next clip: the ground it will see, loaded while this one plays.)
+  const ahead = views.warmView();
+  if (ahead) {
+    warmCam.aspect = world.camera.aspect;
+    warmCam.updateProjectionMatrix();
+    warmCam.lookAt(ahead.look[0] - ahead.pos[0], ahead.look[1] - ahead.pos[1], ahead.look[2] - ahead.pos[2]);
+    terrain.warm(warmCam, ahead.pos);
+  }
   padRig?.update(snap.missionTime, snap.towers);
 }
 

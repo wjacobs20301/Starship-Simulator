@@ -18,6 +18,8 @@ export type ToWorker =
   /** A main-menu backdrop (from a reset). */
   | { type: 'scene'; kind: MenuScene; /** The pad the stack stands on ('pad' scene), 0 = Pad 1. */ pad?: number }
   | { type: 'warp'; value: number }
+  /** A rollout filmed in clips: the transport on at once to this far along its way, m (Simulation.skipRollout). */
+  | { type: 'rolloutSkip'; gone: number }
   | { type: 'pause'; value: boolean }
   /** Tower arms: lift +1 up / -1 down / 0 stop; swing +1 open / -1 close / 0 stop. */
   | { type: 'arms'; pad: number; lift: -1 | 0 | 1 | null; swing: -1 | 0 | 1 | null; slew?: -1 | 0 | 1 | null }
@@ -61,6 +63,8 @@ export type FromWorker = {
   paused: boolean;
   /** How many menu scenes have been set up (so the menu knows when the latest is ready). */
   sceneId: number;
+  /** How many times the flight has jumped on within a scene (a rollout's film skipping up the road): nothing is drawn between the snapshots either side of one. */
+  cuts: number;
   /** Warping ahead to this (and when it'll stop, sim time), or null. */
   warpTo: { target: WarpTarget; at: number } | null;
   /** Predicted trajectories, attached only when recomputed (a few times a second). */

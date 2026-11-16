@@ -28,6 +28,41 @@ describe('rollout: the ship comes from the Starfactory on its transport', () => 
     }
   });
 
+  it('filmed in clips, the transport is taken on up the road: never back, never onto the stand, and still upright there', () => {
+    const sim = new Simulation();
+    sim.reset();
+    sim.startAt('rollout');
+    const ship = sim.find('ship')!;
+    const length = routeLength(sim.transport!.route);
+    for (let i = 0; i < 300; i++) sim.step();
+    sim.skipRollout(1500);
+    expect(sim.transport!.s).toBe(1500);
+    expect(sim.transport!.v).toBe(ROLL.speed);
+    const at = routeAt(sim.transport!.route, 1500);
+    const p = eciToPad(ship.r, sim.t);
+    expect(Math.hypot(p[0] - at.e, p[1] - at.n)).toBeLessThan(0.01);
+    expect(eciDirToPad(qrot(ship.q, [1, 0, 0]), sim.t)[2]).toBeGreaterThan(0.99999);
+    expect(sim.snapshot().transport?.progress).toBeCloseTo(1500 / length, 9);
+    // (On from there as ever.)
+    for (let i = 0; i < 100; i++) sim.step();
+    expect(sim.transport!.s).toBeCloseTo(1500 + ROLL.speed, 1);
+    sim.skipRollout(400);
+    expect(sim.transport!.s).toBeGreaterThan(1500);
+    // (To the end: short of the stand, at the crawl, and it drives onto it.)
+    sim.skipRollout(length + 100);
+    expect(length - sim.transport!.s).toBeCloseTo(8, 6);
+    expect(sim.transport!.v).toBe(ROLL.crawl);
+    expect(sim.transport!.arrived).toBe(false);
+    let steps = 0;
+    while (!sim.transport!.arrived && steps++ < 100 * 60) sim.step();
+    expect(sim.transport!.arrived).toBe(true);
+    const end = eciToPad(ship.r, sim.t);
+    expect(Math.hypot(end[0] - STANDS[0].at[0], end[1] - STANDS[0].at[1])).toBeLessThan(0.05);
+    // (Nothing to skip once it's there.)
+    sim.skipRollout(10);
+    expect(sim.transport!.arrived).toBe(true);
+  });
+
   for (const pad of [0, 1]) {
     it(`Pad ${pad + 1}: it arrives on the stand, is lifted off it, stacked on the booster, and the stack can launch`, { timeout: 240_000 }, () => {
       const sim = new Simulation();
@@ -60,6 +95,9 @@ describe('rollout: the ship comes from the Starfactory on its transport', () => 
       expect(Math.hypot(at[0] - STANDS[pad].at[0], at[1] - STANDS[pad].at[1])).toBeLessThan(0.05);
       expect(ship.status).toBe('landed');
       expect(sim.snapshot().transport?.arrived).toBe(true);
+      // (How far along it is, for the cameras and the music: all the way, and stopped.)
+      expect(sim.snapshot().transport?.progress).toBeCloseTo(1, 6);
+      expect(sim.snapshot().transport?.speed).toBe(0);
       // The arms round to it, down to its fittings, closed, up; back over the mount; down onto the booster.
       // (Nearly shut before they swing: open wide, the arm nearer the mount would be over the
       // booster still when the pair is as far round as it goes, and the carriage would wait up

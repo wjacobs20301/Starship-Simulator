@@ -191,7 +191,7 @@ export interface Snapshot {
   vehicles: VehicleSnapshot[];
   events: SimEvent[];
   /** A vehicle's transport (rollout): the pad it's bound for, where it is (pad east, north; m), the way it faces (rad from east), and whether it has arrived. */
-  transport?: { id: string; pad: number; e: number; n: number; heading: number; arrived: boolean } | null;
+  transport?: { id: string; pad: number; e: number; n: number; heading: number; arrived: boolean; /** How far along its way it is, 0..1, and how fast, m/s. */ progress: number; speed: number } | null;
   /** Catch arms per pad: carriage height relative to home (m), opening (deg) and rail top (m). */
   towers: {
     offset: number;
@@ -1148,6 +1148,23 @@ export class Simulation {
     this.log(`Starship rolling out from the Starfactory on its transport: ${(routeLength(this.transport.route) / 1000).toFixed(1)} km to Pad ${pad + 1}`);
   }
 
+  /**
+   * A rollout shown as a film, in clips (render/director.ts): the transport taken on at once to
+   * `gone` metres along its way, going as it would be there. Never back; and never onto the
+   * stand: the last few metres are always driven.
+   */
+  skipRollout(gone: number): void {
+    const tr = this.transport;
+    const v = tr && !tr.arrived ? this.find(tr.id) : undefined;
+    if (!tr || !v) return;
+    const length = routeLength(tr.route);
+    const s = Math.min(gone, length - 8);
+    if (!(s > tr.s)) return;
+    tr.s = s;
+    tr.v = length - s > ROLL.crawlFor ? ROLL.speed : ROLL.crawl;
+    this.placeOnTransport(v, this.t);
+  }
+
   /** One step of the ride: up to speed, along the way, down to a crawl onto the stand, stopped there. */
   private ride(v: Vehicle, dt: number): void {
     const tr = this.transport!;
@@ -1845,7 +1862,9 @@ export class Simulation {
       phase: this.mission.phase,
       vehicles,
       events: this.drainEvents(),
-      transport: this.transport ? { id: this.transport.id, pad: this.transport.pad, ...routeAt(this.transport.route, this.transport.s), arrived: this.transport.arrived } : null,
+      transport: this.transport
+        ? { id: this.transport.id, pad: this.transport.pad, ...routeAt(this.transport.route, this.transport.s), arrived: this.transport.arrived, progress: this.transport.s / routeLength(this.transport.route), speed: this.transport.v }
+        : null,
       towers: this.towers.map((a, pad) => ({
         offset: a.offset,
         angle: a.angle,

@@ -593,6 +593,14 @@
         padding: 8px 16px; background: rgba(10, 12, 16, 0.78); border: 1px solid rgba(255, 255, 255, 0.18); font-size: 12px;
         letter-spacing: 0.14em; text-transform: uppercase; transition: opacity 0.3s, transform 0.3s; }
       #toast.on { opacity: 1; transform: translate(-50%, 0); }
+      /* A title over the picture (the auto camera's, on a rollout): a heading, a rule, a line under it. */
+      #title-card { position: fixed; left: 7vw; bottom: 30vh; z-index: 40; opacity: 0; transform: translateX(-14px); pointer-events: none; color: #fff;
+        text-shadow: 0 2px 22px rgba(0, 0, 0, 0.75), 0 0 2px rgba(0, 0, 0, 0.6); transition: opacity 1.4s var(--ease), transform 1.8s var(--ease); zoom: var(--ui-scale, 1); }
+      #title-card.on { opacity: 1; transform: none; }
+      #title-card b { display: block; font-size: 46px; font-weight: 600; letter-spacing: 0.42em; text-transform: uppercase; padding-bottom: 12px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.55); }
+      #title-card span { display: block; margin-top: 12px; font-size: 13px; letter-spacing: 0.3em; text-transform: uppercase; color: rgba(255, 255, 255, 0.86); }
+      body.photo #title-card { visibility: hidden; }
       .gp-focus { outline: 1px solid rgba(255, 255, 255, 0.85) !important; outline-offset: 2px; }
       /* Keyboard focus in the menus and panels (Tab, the arrows). */
       #menu button:focus-visible, #menu .mn-card:focus-visible, #results button:focus-visible, #maneuver button:focus-visible, #return button:focus-visible {

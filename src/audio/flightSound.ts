@@ -17,6 +17,7 @@ import type { Ambience } from './ambience';
 import type { AudioEngine } from './engine';
 import type { LaunchAudio } from './launchAudio';
 import type { MenuAudio } from './menuAudio';
+import { RolloutScore } from './rolloutScore';
 import { type Heard, type SoundField, plumePower } from './soundField';
 
 export interface FlightSoundDeps {
@@ -53,6 +54,8 @@ export function createFlightSound(deps: FlightSoundDeps): FlightSound {
   let menuMusic: boolean | null = null;
   /** How fast each pad's arms are moving (0 = still, 1 ~ a full-speed motion), from the snapshots. */
   const towerMotion = [0, 0];
+  /** The music under a rollout (rolloutScore.ts). */
+  const score = new RolloutScore(audioEngine);
 
   function noteTowers(prev: Received | null, curr: Received): void {
     // Tower machinery: rates of the carriage, arms, slew and QD arm, per sim second.
@@ -101,6 +104,7 @@ export function createFlightSound(deps: FlightSoundDeps): FlightSound {
 
   function audioStep(snap: Snapshot, placements: FxVehicle[], heard: Heard, cam: V3, camAlt: number, simTime: number, frameDt: number, wx: { rain: number }): void {
     audio.update(heard.level, heard.distance, Math.exp(-Math.max(0, camAlt) / 8500), flight.paused);
+    score.update(snap.transport, flight.paused || menu.kind !== null);
     // Everything else you hear: wind, surf, air rush, tower machinery, deluge, venting.
     const mt = snap.missionTime;
     const sm = (x: number, a: number, b: number) => {

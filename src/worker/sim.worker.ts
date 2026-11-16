@@ -13,6 +13,7 @@ let land: Land | null = null;
 let weather: FlightWeather | null = null;
 let warp = 1;
 let sceneId = 0;
+let cuts = 0;
 let paused = false;
 let accumulator = 0;
 let last = performance.now();
@@ -72,6 +73,10 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
     case 'warp':
       warp = msg.value;
       warpTo = null;
+      break;
+    case 'rolloutSkip':
+      sim.skipRollout(msg.gone);
+      cuts++;
       break;
     case 'warpTo':
       warpTo = msg.target;
@@ -157,7 +162,7 @@ setInterval(() => {
     }
     if (n === MAX_STEPS_PER_TICK) accumulator = 0; // can't keep up: drop time rather than spiral
   }
-  const out: FromWorker = { type: 'snapshot', snapshot: sim.snapshot(), warp, effectiveWarp, rails, paused, sceneId, warpTo: warpTo && warpAt !== null ? { target: warpTo, at: warpAt } : null };
+  const out: FromWorker = { type: 'snapshot', snapshot: sim.snapshot(), warp, effectiveWarp, rails, paused, sceneId, cuts, warpTo: warpTo && warpAt !== null ? { target: warpTo, at: warpAt } : null };
   if (now - lastPredict >= PREDICT_EVERY) {
     lastPredict = now;
     out.trajectories = sim.predictTrajectories();

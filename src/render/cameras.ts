@@ -32,7 +32,8 @@ const GROUND_CLEARANCE = 2;
 const GLIDE_REACH = 400;
 const GLIDE_MS = 1600;
 
-export type CameraMode = 'orbit' | 'chase' | 'pad' | 'tower' | 'spectator' | 'inspect' | 'bay' | 'baytop' | 'hull' | 'satellite';
+export type CameraMode = 'orbit' | 'chase' | 'pad' | 'tower' | 'spectator' | 'inspect' | 'bay' | 'baytop' | 'hull' | 'satellite' | 'roadside';
+/** (The cameras the camera key steps through. Not the roadside camera: the auto camera sets that one down where it wants it.) */
 export const CAMERA_MODES: CameraMode[] = ['orbit', 'chase', 'pad', 'tower', 'spectator', 'inspect', 'bay', 'baytop', 'hull', 'satellite'];
 export const CAMERA_LABELS: Record<CameraMode, string> = {
   orbit: 'Orbit (drag / scroll)',
@@ -45,6 +46,7 @@ export const CAMERA_LABELS: Record<CameraMode, string> = {
   baytop: 'Payload bay camera (top)',
   hull: 'Hull camera (payload door)',
   satellite: 'Starlink camera',
+  roadside: 'Roadside camera',
 };
 /**
  * Camera modes that need something: the payload door to look from (a Starlink ship), a satellite
@@ -123,6 +125,15 @@ export class CameraRig {
   private aimedSize = 0;
   private aimedTime = 0;
   private gliding: { off: V3; size: number; t0: number } | null = null;
+  /**
+   * The roadside camera: a tripod stood somewhere (world; lifted to head height if that's in the
+   * ground) that pans with the vehicle as it comes past, and its lens (deg; null: zoomed to keep
+   * the vehicle in the picture). The auto camera's, for a rollout.
+   */
+  fixedAt: V3 | null = null;
+  fixedFov: number | null = null;
+  /** The free and roadside cameras aim this far up the vehicle from its middle, m (down its length to the transport: negative). */
+  aimShift = 0;
   /** Map view: orbiting the Earth's centre in the Earth-fixed frame (longitude / latitude). */
   map = false;
   mapLon = 0;
@@ -315,12 +326,13 @@ export class CameraRig {
   update(camera: THREE.PerspectiveCamera, given: CameraTarget, now = performance.now()): V3 {
     if (this.map) return this.updateMap(camera);
     const target = this.glide(given, now);
-    const c = target.center;
+    let c = target.center;
     this.carryFrame(target);
     // (A camera left on something that's no longer there: the vehicle gone over Starbase's horizon,
-    // the satellite it rode long gone. Back to the free camera.)
+    // the satellite it rode long gone, the tripod never stood. Back to the free camera.)
     const need = NEEDS[this.mode];
-    if ((need === 'ground' && !CameraRig.groundSees(c)) || (need === 'sat' && !target.sat)) this.mode = 'orbit';
+    if ((need === 'ground' && !CameraRig.groundSees(c)) || (need === 'sat' && !target.sat) || (this.mode === 'roadside' && !this.fixedAt)) this.mode = 'orbit';
+    if (this.aimShift && (this.mode === 'orbit' || this.mode === 'roadside')) c = [c[0] + this.up.x * this.aimShift, c[1] + this.up.y * this.aimShift, c[2] + this.up.z * this.aimShift];
     let pos: V3;
     let fov = 50;
     switch (this.mode) {
@@ -443,6 +455,13 @@ export class CameraRig {
         const at: V3 = [s[0] + away.x * 5 + over.x * 2, s[1] + away.y * 5 + over.y * 2, s[2] + away.z * 5 + over.z * 2];
         const zoom = THREE.MathUtils.clamp(2 * Math.atan((target.size * 0.9) / (d + 5)) * THREE.MathUtils.RAD2DEG, 36, 62);
         return this.aim(camera, at, new THREE.Vector3(...c), over, zoom);
+      }
+      case 'roadside': {
+        pos = this.fixedAt!;
+        const d = Math.hypot(c[0] - pos[0], c[1] - pos[1], c[2] - pos[2]);
+        // (A lens of its own, or one that holds the vehicle in the picture: wide as it comes by.)
+        fov = this.fixedFov ?? THREE.MathUtils.clamp(2 * Math.atan((target.size * 0.75) / d) * THREE.MathUtils.RAD2DEG, 6, 72);
+        break;
       }
       case 'pad':
       case 'spectator': {

@@ -135,3 +135,60 @@ describe('the free camera round a ship in orbit', () => {
     expect(CameraRig.groundSees([300e3, -6e3, 0])).toBe(false);
   });
 });
+
+describe('the roadside camera', () => {
+  const ship = (e: number): CameraTarget => ({ center: [e, 28, -40], axis: [0, 1, 0], size: 52, id: 'ship' });
+
+  it('stands where it was put and pans with the vehicle, its lens wide as it comes by and long as it goes', () => {
+    const rig = new CameraRig(el);
+    const camera = new THREE.PerspectiveCamera(50, 1.6, 1, 1e7);
+    rig.mode = 'roadside';
+    rig.fixedAt = [0, 2, 0];
+    const dir = new THREE.Vector3();
+    const looks: number[] = [];
+    const lenses: number[] = [];
+    for (const e of [-600, -60, 60, 600]) {
+      expect(rig.update(camera, ship(e), 0)).toEqual([0, 2, 0]);
+      camera.getWorldDirection(dir);
+      looks.push(dir.x);
+      lenses.push(camera.fov);
+    }
+    expect(rig.mode).toBe('roadside');
+    // (Looking west at it coming, east after it going.)
+    expect(looks[0]).toBeLessThan(-0.9);
+    expect(looks[3]).toBeGreaterThan(0.9);
+    expect(lenses[1]).toBeGreaterThan(lenses[0] * 3);
+    expect(lenses[0]).toBeGreaterThanOrEqual(6);
+    expect(lenses[1]).toBeLessThanOrEqual(72);
+    // (A lens of its own is kept.)
+    rig.fixedFov = 66;
+    rig.update(camera, ship(300), 0);
+    expect(camera.fov).toBe(66);
+  });
+
+  it('with nowhere to stand, it is the free camera; an aim down the vehicle is lower', () => {
+    const rig = new CameraRig(el);
+    const camera = new THREE.PerspectiveCamera(50, 1.6, 1, 1e7);
+    rig.mode = 'roadside';
+    rig.update(camera, ship(0), 0);
+    expect(rig.mode).toBe('orbit');
+    // (The free camera goes round the point it aims at: lower on the vehicle, and it's lower with it.)
+    rig.elevation = 0;
+    rig.distance = 100;
+    const level = rig.update(camera, ship(0), 0);
+    rig.aimShift = -20;
+    const low = rig.update(camera, ship(0), 0);
+    expect(low[1]).toBeCloseTo(level[1] - 20, 3);
+    // (From its tripod, the roadside camera looks lower.)
+    rig.mode = 'roadside';
+    rig.fixedAt = [0, 2, 60];
+    const dir = new THREE.Vector3();
+    rig.update(camera, ship(0), 0);
+    camera.getWorldDirection(dir);
+    const down = dir.y;
+    rig.aimShift = 0;
+    rig.update(camera, ship(0), 0);
+    camera.getWorldDirection(dir);
+    expect(down).toBeLessThan(dir.y - 0.1);
+  });
+});
