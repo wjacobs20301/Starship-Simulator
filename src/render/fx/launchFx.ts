@@ -8,7 +8,7 @@
 //  - camera shake from the received sound level (so it arrives with the sound).
 
 import * as THREE from 'three';
-import { P0 } from '../../sim/constants';
+import { P0, PAD } from '../../sim/constants';
 import { BOOSTER_LENGTH } from '../../sim/config/starshipV3';
 import type { V3 } from '../../sim/math';
 import type { VehicleSnapshot } from '../../sim/simulation';
@@ -102,13 +102,14 @@ const smooth = (x: number, a: number, b: number) => {
   return t * t * (3 - 2 * t);
 };
 
-/** V3 launch stand (art/blender/pad_v3.py): tunnel half-length along the trench (pier base),
- *  tunnel roof and deck heights, m. */
-const STAND_HALF = 17;
-const TUNNEL_TOP = 11.5;
-const DECK_TOP = 24.5;
-/** Launch table half-size (art/blender/pad_v3.py TABLE_HALF), m. */
-const TABLE_HALF = 10;
+/** V3 launch mount (art/blender/pad_v3.py): how far out along the trench the exhaust leaves
+ *  the tunnel under it (between the ribs, short of their feet), the tunnel's roof and the
+ *  deck's top, m. */
+const STAND_HALF = 19;
+const TUNNEL_TOP = 9;
+const DECK_TOP = PAD.mountHeight - 1;
+/** The deck's half-size (art/blender/pad_v3.py DECK_HALF), m. */
+const TABLE_HALF = 11.75;
 /** Deluge nozzles per ring on the launch deck. */
 const DECK_NOZZLES = 24;
 

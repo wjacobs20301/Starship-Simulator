@@ -26,8 +26,8 @@ export interface TrenchOpening {
   trench: Trench;
 }
 
-/** Trench wall thickness at grade (art/blender/pad_v3.py WALL): 19 m inside + walls = OSM 23.5 m. */
-const TRENCH_WALL = 2.25;
+/** Trench wall thickness at grade (art/blender/pad_v3.py RIB): 17.2 m inside + walls = OSM 23.5 m. */
+const TRENCH_WALL = 3.15;
 
 export const TRENCHES: TrenchOpening[] = [PAD, PAD2].map((p) => {
   const a = (p.trench.axisDeg * Math.PI) / 180;

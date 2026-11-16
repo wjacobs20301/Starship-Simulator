@@ -37,8 +37,8 @@ export const PAD = {
   mountHeight: 18,
   /** Tower center relative to the mount, m (east, north) and tower height, m. */
   tower: { e: -32, n: 0, height: 143 },
-  /** V3 flame trench under the mount: OSM footprint 85 x 23.5 m outside the walls (19 m inside); depth approx / tune. */
-  trench: { axisDeg: 47.9, length: 85, width: 19, depth: 6 },
+  /** V3 flame trench under the mount: OSM footprint 85 x 23.5 m outside the walls; 17.2 m between them and 6 m deep under the mount (off photos of Pad 2's: approx). */
+  trench: { axisDeg: 47.9, length: 85, width: 17.2, depth: 6 },
 };
 
 /** Starbase Pad 2 ("Pad B"): tower 35.5 m north of its mount (OpenStreetMap). */
@@ -47,7 +47,7 @@ export const PAD2 = {
   latDeg: 25.99673,
   lonDeg: -97.15809,
   tower: { e: 0, n: 35.5, height: 144.5 },
-  trench: { axisDeg: -36.8, length: 85, width: 19, depth: 6 },
+  trench: { axisDeg: -36.8, length: 85, width: 17.2, depth: 6 },
 };
 
 /** A V3 pad's flame trench: axis direction (degrees counter-clockwise from east), size in m. */

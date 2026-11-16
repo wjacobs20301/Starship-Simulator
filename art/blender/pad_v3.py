@@ -1,20 +1,47 @@
 """Starbase V3 launch mount and flame trench (Pad 2 as built, and Pad 1 as rebuilt to match).
 
-Built from published descriptions and photos (NASASpaceflight incl. side-on shots of Pad 2's
-mount, overhead imagery, Wikipedia "SpaceX Starbase"),
-with the trench footprint from OpenStreetMap. Dimensions not published are estimated from
-photos and marked approx:
+Measured off photographs of Pad 2's mount, finished (none free to reuse: looked at, not copied;
+nothing of them is in the model but the shapes and sizes read off them):
 
-  Flame trench   85 x 23.5 m (OSM), ~6 m deep (approx): a steel-lined concrete "bathtub",
-                 open-ended, the floor ramping back up to grade at both ends.
-  Flame diverter a double-sided flame bucket under the mount: a ridge of water-cooled steel
-                 pipes (with a ridge cap) splitting the exhaust down both arms of the trench.
-  Launch mount   a massive concrete bridge over the trench: two sloped piers (truncated
-                 pyramids) joined by a thick span over a tunnel the exhaust flows out
-                 through, a row of vents along the span, and the steel launch table on top
-                 (20 hold-down clamps, water-cooled deck, booster QD, equipment house). Deck
-                 height matches the sim's PAD.mountHeight.
+  - RGV Aerial Photography's oblique view down on it after a static fire (2026): the whole
+    form, the deck and its clamps, the hoods, the tunnel mouth and the diverter in it, the
+    aprons either end. The ring the booster stands in, 12.5 m across, to scale by.
+  - Starship Gazer's view from the ground straight through the tunnel (2026): the deck's depth,
+    the two sides' different slopes, the hoods' height, the pipe along the deck's lip, and
+    daylight under the deck down to the diverter's ridge.
+  - A view of a booster on it from the other side (Mar 2026).
+  - RGV Aerial Photography's views from straight above (2026): where the two hoods stand round
+    the opening and which way each points.
+
+with the trench's footprint from OpenStreetMap (85 x 23.5 m). What they show, and what's here:
+
+  Launch mount   NOT two piers and a bridge: one squat pyramid with the trench tunnelling
+                 through it. On top a steel deck 23.5 m square and 8 m deep, flat, pale, with
+                 the round opening the booster stands in (20 hold-down clamps inside its rim).
+                 Either side of the tunnel a wall 3 m thick whose ends run down to the ground
+                 14 m out along the trench, at 50 deg: the pyramid's ribs. The side away from
+                 the tower is a slope of steel plate (62 deg) down to the ground; the tower's
+                 side is all but sheer. Along the deck's lip over each tunnel mouth, a pipe a
+                 metre through.
+  Hoods          two boxed ducts (the booster's propellant and power connections), each straight
+                 out from the opening's rim like a spoke, 4.4 m wide: one 5 deg off square to
+                 the plated side, out over the deck's edge and down onto the slope; the other
+                 70 deg round toward the far tunnel mouth, out over the deck's lip there and
+                 down in front of it to the soffit. A bare steel cabin at the rim, 4.6 m tall,
+                 then a pale roof falling outward to an eave, and a pale wall hanging below it.
+                 (The angles off two views from straight above, which give -3 and 65 deg and
+                 11 and 80: tall things lean in such views. From the ground along the trench
+                 the first is nine metres across and the second seven or eight, as boxes of
+                 that width turned so would be.)
+  Flame trench   a pit 6 m deep under the mount, its floor ramping back up to grade both ways;
+                 the far end's slab rises on above grade. A tall wing wall beside the mouth on
+                 the tower's side, tapering away; low kerbs elsewhere.
+  Flame diverter two-sided, of water-cooled steel tubes laid DOWN the slope: from a ridge under
+                 the middle of the booster, 4 m above grade (daylight shows over it, through
+                 the tunnel), down a hollow curve either way to the pit's floor 20 m out.
   Tower plinth   a wide concrete base with sloped sides.
+
+Deck height matches the sim's PAD.mountHeight. Sizes are scaled from the photos: approx (10%).
 
 Local frame for a pad: origin at the mount center on the ground, X along the trench axis,
 Y across it, Z up. Everything is rotated into the pad's east/north frame at the end.
@@ -26,25 +53,20 @@ from mathutils import Matrix, Vector
 
 from lib import MeshBuilder
 
-# Approx / tune (not published): proportions from photos of Pad 2's mount.
-CONCRETE_BELOW_DECK = 4.5  # top of the concrete bridge below the deck, m (the steel table brings it to PAD.mountHeight)
-SPAN_DEPTH = 5.0  # the bridge span's depth over the tunnel, m
-SPAN_X = 11.0  # half-depth of the span / piers' tops along the trench, m
-PIER_BASE_X = 17.0  # half-depth of the piers at the ground, m
-PIER_BASE_W = 14.0  # pier width across the trench at the ground, m
-PIER_TOP_W = 7.0  # ... and at the top, m
-HOLE = 6.5  # half-size of the flame hole through the span, m
-TABLE_HALF = 10.0  # steel launch table, half-size, m
-DECK_THICK = 1.2
-OPENING_R = 6.2  # central opening in the deck, m (booster radius 4.5 + clamps)
+DECK_HALF = 11.75  # the deck, half its side (the trench's outer width, OSM)
+DECK_DEPTH = 8.0  # its depth: the tunnel's soffit below its top
+RIB = 3.15  # the tunnel's side walls' thickness (the channel between them 17.2 m)
+MOUTH_RUN = 14.3  # their sloped ends' feet, out along the trench from the deck's edge
+FLANK_RUN = 9.0  # the plated slope's foot, out from the deck's edge (away from the tower)
+BACK_RUN = 1.5  # the tower side's (all but sheer)
+OPENING_R = 6.25  # the opening in the deck (the booster's 4.5 m and the clamps round it)
+RIDGE = 3.6  # the diverter's ridge above grade
+FOOT = 20.6  # its feet, out along the trench
+RAMP_END = 38.0  # where the pit's floor is back up at grade
+FAR_RISE = 1.2  # the far slab's end above grade
 PLINTH_BASE = 26.0  # tower plinth, square at the ground, m
 PLINTH_TOP = 17.5  # ... at its top (the tower's width), m
 PLINTH_H = 7.0
-RAMP = 16.0  # length of the trench's end ramps, m
-DIVERTER_HALF = 17.0  # half-length of the flame bucket along the trench, m
-DIVERTER_TOP = -0.6  # ridge cap height (just below grade), m
-PIPE_D = 0.55  # diverter pipe diameter, m
-WALL = 2.25  # trench wall thickness at grade, m (19 m channel + walls = OSM 23.5 m)
 N_CLAMPS = 20
 
 
@@ -113,122 +135,218 @@ def _frustum(mb, bottom, top, z0, z1, flip_y=False):
         mb.add_face([lo[i], lo[j], hi[j], hi[i]], [(0, 0), (w, 0), (w, hgt), (0, hgt)])
 
 
+def _convex(mb, faces, uv_size=3.0):
+    """A convex solid from its faces (each a list of points, any winding): every face is turned
+    to look away from the solid's middle."""
+    pts = [Vector(p) for f in faces for p in f]
+    mid = sum(pts, Vector((0, 0, 0))) / len(pts)
+    for f in faces:
+        f = [Vector(p) for p in f]
+        n = (f[1] - f[0]).cross(f[2] - f[0])
+        if n.dot(f[0] - mid) < 0:
+            f.reverse()
+            n = -n
+        n.normalize()
+        u = (f[1] - f[0]).normalized()
+        v = n.cross(u)
+        mb.add_face(f, [((q - f[0]).dot(u) / uv_size, (q - f[0]).dot(v) / uv_size) for q in f])
+
+
+def _slab(mb, profile, y0, y1):
+    """A convex outline in the XZ plane (points (x, z)) made a slab from y0 to y1."""
+    a = [(x, y0, z) for x, z in profile]
+    b = [(x, y1, z) for x, z in profile]
+    n = len(profile)
+    _convex(mb, [a, b] + [[a[i], a[(i + 1) % n], b[(i + 1) % n], b[i]] for i in range(n)])
+
+
+def _joints(mb, a, b, c, d, pitch_u=2.6, pitch_v=1.8, w=0.07):
+    """The joints between the plates on a flat four-sided face (corners a, b along its foot, d, c
+    above them): thin dark strips standing a finger proud of it, courses along it and staggered
+    uprights between them."""
+    a, b, c, d = (Vector(p) for p in (a, b, c, d))
+    n = (b - a).cross(d - a).normalized()
+    rows = max(2, round((d - a).length / pitch_v))
+
+    def strip(p, q):
+        along = (q - p).normalized()
+        side = n.cross(along) * (w / 2)
+        lift = n * 0.02
+        pts = [p - side + lift, q - side + lift, q + side + lift, p + side + lift]
+        mb.add_face(pts, [(0, 0), (1, 0), (1, 1), (0, 1)])
+        mb.add_face(list(reversed(pts)), [(0, 0), (1, 0), (1, 1), (0, 1)])
+
+    for i in range(1, rows):
+        strip(a.lerp(d, i / rows), b.lerp(c, i / rows))
+    for i in range(rows):
+        p0, q0 = a.lerp(d, i / rows), b.lerp(c, i / rows)
+        p1, q1 = a.lerp(d, (i + 1) / rows), b.lerp(c, (i + 1) / rows)
+        cols = max(1, round((q0 - p0).length / pitch_u))
+        for j in range(1, cols + (i % 2)):
+            f = (j - 0.5 * (i % 2)) / cols
+            strip(p0.lerp(q0, f), p1.lerp(q1, f))
+
+
 def build_v3_pad(root, mats, geo, spec):
     """spec: {prefix, mount: [east, north], tower: [east, north] (relative to the mount), trench}."""
     pre = spec["prefix"]
     tr = spec["trench"]
     pad = geo["pad"]
-    L, W, D = tr["length"], tr["width"], tr["depth"]
+    L, D = tr["length"], tr["depth"]
     deck_top = pad["mountHeight"] - 1.0  # the booster sits on the clamps, ~1 m above the plate
-    concrete_top = pad["mountHeight"] - CONCRETE_BELOW_DECK
-    tunnel_top = concrete_top - SPAN_DEPTH  # soffit of the tunnel over the trench
+    soffit = deck_top - DECK_DEPTH
     to_world = Matrix.Translation((spec["mount"][0], spec["mount"][1], 0.0)) @ Matrix.Rotation(math.radians(tr["axisDeg"]), 4, "Z")
-    # Direction to the tower in the local (trench) frame, for the booster QD.
+    # The tower's side of the trench (the mount's all but sheer side), and the other, where the
+    # plated slope and the hoods are. The tunnel mouth at -X is the one nearer the tower.
     tower_local = to_world.to_3x3().inverted() @ Vector((spec["tower"][0], spec["tower"][1], 0.0))
-    tower_dir = Vector((tower_local.x, tower_local.y)).normalized()
+    st = 1 if tower_local.y > 0 else -1
+    if tower_local.x > 0:
+        to_world = to_world @ Matrix.Rotation(math.pi, 4, "Z")
+        st = -st
+    sh = -st
+    h, half = DECK_HALF, L / 2
+    yc = h - RIB  # the channel's half-width
+    xr = h + MOUTH_RUN  # the ribs' feet
+
+    def floor(x):
+        """The channel's floor along the trench: the diverter's hollow slopes, the pit, the ramps."""
+        ax = abs(x)
+        if ax <= FOOT:
+            return -D + (RIDGE + D) * (1 - ax / FOOT) ** 1.8
+        if x > 0:
+            return -D + (D + FAR_RISE) * min(1.0, (ax - FOOT) / (half - FOOT))
+        return -D + (D - 0.3) * min(1.0, (ax - FOOT) / (RAMP_END - FOOT))
 
     objs = []
 
-    # --- Flame trench ---------------------------------------------------------
-    lining = MeshBuilder()  # stainless steel lining: floor, ramps and walls
-    xs = [-L / 2, -L / 2 + RAMP, L / 2 - RAMP, L / 2]
-    zs = [0.0, -D, -D, 0.0]
-    # Floor + ramps (one strip across the trench).
-    rows = [[(x, -W / 2, z) for x, z in zip(xs, zs)], [(x, W / 2, z) for x, z in zip(xs, zs)]]
-    lining.add_grid(rows, [[(x / 4, -W / 8) for x in xs], [(x / 4, W / 8) for x in xs]], smooth=False)
-    # Side walls from the floor profile up to grade.
-    for y, flip in ((-W / 2, True), (W / 2, False)):
-        bottom = [(x, y, z) for x, z in zip(xs, zs)]
-        top = [(x, y, 0.0) for x in xs]
-        r = [top, bottom] if flip else [bottom, top]
-        lining.add_grid(r, [[(x / 4, z / 4) for x, _, z in row] for row in r], smooth=False)
+    # --- Flame trench: the pit's floor and ramps ------------------------------------
+    lining = MeshBuilder()  # steel plate at the diverter's feet
+    apron = MeshBuilder()  # concrete beyond
+    for mb, x0, x1 in ((lining, FOOT, FOOT + 7.0), (apron, FOOT + 7.0, half)):
+        for sx in (-1, 1):
+            xs = [sx * (x0 + (x1 - x0) * k / 6) for k in range(7)]
+            rows = [[(x, -yc * sx, floor(x)) for x in xs], [(x, yc * sx, floor(x)) for x in xs]]
+            mb.add_grid(rows, [[(x / 4, -yc / 4) for x in xs], [(x / 4, yc / 4) for x in xs]], smooth=False)
+    # (The far slab's end, standing above grade.)
+    apron.add_box((half - 0.15, 0, FAR_RISE / 2), (0.3, 2 * yc, FAR_RISE))
     objs.append(lining.build(pre + "Trench_Lining", mats.trench_steel, parent=root))
 
-    # Concrete wall caps at grade along both sides (the visible edge of the trench).
-    caps = MeshBuilder()
-    for y in (-W / 2 - WALL / 2, W / 2 + WALL / 2):
-        caps.add_box((0, y, -0.2), (L, WALL, 1.0), uv_size=2.0)
-    objs.append(caps.build(pre + "Trench_Caps", mats.concrete, parent=root))
-
-    # Double-sided flame bucket: pipes laid across the trench along a concave profile on each
-    # side of a central ridge.
+    # --- Flame diverter: tubes laid down the slope, either way from the ridge --------
     bucket = MeshBuilder()
-    def profile(x):
-        t = min(1.0, abs(x) / DIVERTER_HALF)
-        return -D + (DIVERTER_TOP + D) * (1 - t) ** 2
-    s = 0.0
-    x = 0.0
-    # Walk along the curve at pipe-diameter spacing (arc length), both sides.
-    samples = [0.0]
-    while x < DIVERTER_HALF:
-        dx = 0.05
-        while True:
-            z0, z1 = profile(x), profile(x + dx)
-            if math.hypot(dx, z1 - z0) >= PIPE_D * 1.02 or x + dx >= DIVERTER_HALF:
-                break
-            dx += 0.05
-        x += dx
-        samples.append(min(x, DIVERTER_HALF))
-    for xp in samples:
-        for sign in ((1,) if xp == 0 else (1, -1)):
-            zc = profile(xp) + PIPE_D / 2
-            _pipe(bucket, (sign * xp, -W / 2, zc), (sign * xp, W / 2, zc), PIPE_D / 2)
+    pitch = 0.45
+    ny = round(2 * yc / pitch)
+    ys = []
+    for k in range(ny):
+        y = -yc + 2 * yc * k / ny
+        ys += [(y, 0.0), (y + yc / ny, 0.16)]
+    ys.append((yc, 0.0))
+    for sx in (-1, 1):
+        xs = [sx * FOOT * (k / 14) ** 1.3 for k in range(15)]
+        rows = [[(x, -y * sx, floor(x) + up) for y, up in ys] for x in xs]
+        bucket.add_grid(rows, [[(x / 2, y / 2) for y, _ in ys] for x in xs], smooth=False)
     objs.append(bucket.build(pre + "FlameDiverter", mats.diverter, parent=root))
     cap = MeshBuilder()
-    cap.add_box((0, 0, DIVERTER_TOP + 0.5), (1.4, W, 0.8))  # ridge cap
+    _pipe(cap, (0, -yc, RIDGE + 0.1), (0, yc, RIDGE + 0.1), 0.45, 12)
     objs.append(cap.build(pre + "Diverter_RidgeCap", mats.trench_steel, parent=root))
 
-    # --- Launch mount: a concrete bridge over the trench ------------------------------
-    # Two sloped concrete piers (truncated pyramids) on either side of the trench, joined by a
-    # thick span over a tall tunnel the exhaust flows out through; the steel launch table sits
-    # on top. Proportions from side-on and overhead photos of Pad 2 (approx / tune).
-    y_in = W / 2  # piers' inner faces line the trench channel
+    # --- The mount's concrete: the tunnel's side walls and their ribs, the pit's walls,
+    # the wing walls and kerbs, the tower's side ---------------------------------------
     walls = MeshBuilder()
     for sy in (-1, 1):
-        # Pier: bottom (x +-PIER_BASE_X, y from y_in to y_in + PIER_BASE_W), top narrower.
-        _frustum(walls,
-                 (-PIER_BASE_X, PIER_BASE_X, y_in, y_in + PIER_BASE_W),
-                 (-SPAN_X, SPAN_X, y_in, y_in + PIER_TOP_W),
-                 0.0, concrete_top, flip_y=sy < 0)
-    # Span over the tunnel, with the flame hole through its middle.
-    hx, hy = HOLE, HOLE
-    for x0, x1, y0, y1 in ((-SPAN_X, -hx, -y_in, y_in), (hx, SPAN_X, -y_in, y_in),
-                           (-hx, hx, -y_in, -hy), (-hx, hx, hy, y_in)):
-        walls.add_box(((x0 + x1) / 2, (y0 + y1) / 2, (tunnel_top + concrete_top) / 2),
-                      (x1 - x0, y1 - y0, concrete_top - tunnel_top), uv_size=3.0)
-    objs.append(walls.build(pre + "LaunchMount_Concrete", mats.mount_concrete, parent=root))
+        y0, y1 = sorted((sy * yc, sy * h))
+        # The pit's wall, from its floor up to a kerb at grade.
+        _slab(walls, [(-half, -D - 0.4), (half, -D - 0.4), (half, 0.3), (-half, 0.3)], y0, y1)
+        # The tunnel's side wall: up to the deck, its ends sloping down to the ground.
+        _slab(walls, [(-xr, 0.3), (xr, 0.3), (h, deck_top - 0.06), (-h, deck_top - 0.06)], y0, y1)
+        if sy == st:
+            # The tall wing wall beside the mouth on the tower's side, tapering away; a lower
+            # one along the far slab.
+            _slab(walls, [(-half + 1.5, 0.3), (-xr + 4.0, 0.3), (-xr + 7.0, 8.4), (-half + 1.5, 1.2)], y0, y1)
+            _slab(walls, [(xr - 4.0, 0.3), (half, 0.3), (half, FAR_RISE + 0.5), (xr - 4.0, 4.6)], y0, y1)
+        else:
+            _slab(walls, [(xr - 2.0, 0.3), (half, 0.3), (half, FAR_RISE + 0.5), (xr - 2.0, FAR_RISE + 0.5)], y0, y1)
+    # The tower's side: all but sheer.
+    yb = st * (h + BACK_RUN)
+    t1, t2 = (-h, st * h, deck_top - 0.06), (h, st * h, deck_top - 0.06)
+    b1, b2, b3, b4 = (-xr, st * h, 0.0), (xr, st * h, 0.0), (xr, yb, 0.0), (-xr, yb, 0.0)
+    _convex(walls, [[t1, t2, b3, b4], [t1, b4, b1], [t2, b2, b3], [b1, b2, b3, b4]])
+    walls_obj = walls.build(pre + "LaunchMount_Concrete", mats.mount_concrete, parent=root)
+    objs.append(walls_obj)
+    objs.append(apron.build(pre + "Trench_Caps", mats.concrete, parent=root))
 
-    # Dark details: the row of vents along the top of the span (both tunnel faces) and
-    # doorways in the piers' inner faces.
+    # --- The plated slope away from the tower, its plates' joints, its doors and vents ---
+    yf = sh * (h + FLANK_RUN)
+    t1, t2 = Vector((-h, sh * h, deck_top - 0.06)), Vector((h, sh * h, deck_top - 0.06))
+    b1, b2, b3, b4 = Vector((-xr, sh * h, 0.0)), Vector((xr, sh * h, 0.0)), Vector((xr, yf, 0.0)), Vector((-xr, yf, 0.0))
+    clad = MeshBuilder()
+    _convex(clad, [[t1, t2, b3, b4], [t1, b4, b1], [t2, b2, b3], [b1, b2, b3, b4]])
+    joints = MeshBuilder()
+    _joints(joints, b4, b3, t2, t1)
+    for sx, (ba, bb, tt) in ((-1, (b1, b4, t1)), (1, (b3, b2, t2))):
+        _joints(joints, ba, bb, tt, tt, pitch_u=2.4)
+
+    def on_slope(x, up):
+        """A point on the slope: x along the trench, `up` its height."""
+        return Vector((x, sh * (h + FLANK_RUN * (1 - up / (deck_top - 0.06))), up))
+
+    white = MeshBuilder()
+    for x, up in ((-15.0, 3.2), (-7.5, 9.5), (8.0, 9.0), (15.5, 3.4), (2.0, 4.6)):
+        p = on_slope(x, up)
+        clad.add_box(p + Vector((0, sh * 0.7, 0.2)), (2.2, 2.0, 1.7))
+        white.add_box(p + Vector((0, sh * 0.9, 1.15)), (2.5, 2.6, 0.12), Matrix.Rotation(sh * -0.5, 4, "X"))
     dark = MeshBuilder()
-    for sx in (-1, 1):
-        for k in range(9):
-            y = -y_in + (k + 0.5) * (2 * y_in / 9)
-            dark.add_box((sx * (SPAN_X + 0.05), y, concrete_top - 2.2), (0.2, 1.1, 1.3))
-        for sy in (-1, 1):
-            dark.add_box((sx * 6.0, sy * (y_in + 0.05), 1.6), (1.8, 0.2, 3.2))
-    objs.append(dark.build(pre + "LaunchMount_Openings", mats.dark, parent=root))
+    for x in (-19.5, 11.0):
+        clad.add_box((x, yf - sh * 1.5, 1.9), (3.8, 3.0, 3.8))
+        dark.add_box((x, yf + sh * 0.03, 1.7), (3.0, 0.1, 3.2))
+    objs.append(joints.build(pre + "LaunchMount_Joints", mats.tower, parent=root))
 
-    # Steel launch table on the concrete: plated sides with ribs, the water-cooled deck plate.
-    h = TABLE_HALF
+    # --- The deck: a steel box with the round opening, the pipe along its lip over each
+    # tunnel mouth ----------------------------------------------------------------------
     table = MeshBuilder()
-    t = 1.2
-    z0, z1 = concrete_top, deck_top - DECK_THICK
-    for sx in (-1, 1):
-        table.add_box((sx * (h - t / 2), 0, (z0 + z1) / 2), (t, 2 * h, z1 - z0), uv_size=2.0)
-        table.add_box((0, sx * (h - t / 2), (z0 + z1) / 2), (2 * h - 2 * t, t, z1 - z0), uv_size=2.0)
-    for k in range(-4, 5):
-        off = k * (2 * h / 9)
-        for sx in (-1, 1):
-            table.add_box((sx * (h + 0.2), off, (z0 + z1) / 2), (0.4, 0.4, z1 - z0))
-            table.add_box((off, sx * (h + 0.2), (z0 + z1) / 2), (0.4, 0.4, z1 - z0))
-    # Equipment house on the side away from the tower (seen on Pad 2's table).
-    away = -Vector((tower_dir.x, tower_dir.y, 0))
-    table.add_box(tuple(away * (h - 3.5) + Vector((0, 0, deck_top + 2.5))), (7.0, 7.0, 5.0), Matrix.Rotation(math.atan2(away.y, away.x), 4, "Z"))
+    _ring_deck(table, h, OPENING_R, soffit, deck_top)
     objs.append(table.build(pre + "LaunchTable", mats.tower_light, parent=root))
-    deck = MeshBuilder()
-    _ring_deck(deck, h, OPENING_R, deck_top - DECK_THICK, deck_top)
-    objs.append(deck.build(pre + "LaunchMount_Deck", mats.steel_dark, parent=root))
+    pipes = MeshBuilder()
+    for sx in (-1, 1):
+        x = sx * (h + 0.6)
+        y_end = sh * (3.0 if sx > 0 else yc + 1.0)  # (the far mouth's runs into the hood there)
+        _pipe(pipes, (x, st * (yc + 1.0), deck_top - 0.7), (x, y_end, deck_top - 0.7), 0.5, 14)
+        _pipe(pipes, (x, st * (yc + 1.0), deck_top - 0.7), (x, st * (yc + 1.0), soffit - 2.5), 0.5, 14)
+        pipes.add_box((x, y_end, deck_top - 0.7), (0.95, 0.12, 0.95))
+        for y in (st * 6.0, st * 1.5, sh * 1.7):
+            pipes.add_box((sx * (h + 0.25), y, deck_top - 0.7), (0.5, 0.5, 1.5))
+    objs.append(pipes.build(pre + "LaunchMount_Manifold", mats.diverter, parent=root))
+
+    # --- The hoods: two boxed ducts, each straight out from the opening's rim like a spoke.
+    # One near the middle of the plated side, out over the deck's edge and down onto the slope;
+    # the other round toward the far tunnel mouth, out over the deck's lip there and down in
+    # front of it to the soffit. At the rim a bare steel cabin as tall as a house, with a door;
+    # from its roof a pale roof falling outward to an eave at deck level, and under the eave a
+    # pale wall hanging down the mount's side. --------------------------------------------
+    for ang, edge, z_end in ((5.0, h / math.cos(math.radians(5.0)), deck_top - 9.5), (70.0, h / math.sin(math.radians(70.0)), soffit - 0.2)):
+        # (Its own frame: u out from the mount's middle, v across the duct.)
+        a = math.radians(ang)
+        out, across = Vector((math.sin(a), sh * math.cos(a), 0.0)), Vector((math.cos(a), -sh * math.sin(a), 0.0))
+        top = deck_top + 4.6
+        r0, r1, r2 = OPENING_R + 0.35, OPENING_R + 4.1, edge + 3.6
+        w = 2.2
+
+        def duct(mb, prof, half_w):
+            lo = [out * r + across * -half_w + Vector((0, 0, z)) for r, z in prof]
+            hi = [out * r + across * half_w + Vector((0, 0, z)) for r, z in prof]
+            n = len(prof)
+            _convex(mb, [lo, hi] + [[lo[i], lo[(i + 1) % n], hi[(i + 1) % n], hi[i]] for i in range(n)])
+
+        duct(clad, [(r0, deck_top - 0.2), (r0, top), (r1, top), (r1, deck_top - 0.2)], w)
+        # (The pale part is wider than the cabin: six metres to its 4.4.)
+        duct(white, [(r1, deck_top - 0.2), (r1, top), (r2, deck_top + 0.3), (r2, deck_top - 0.2)], w + 0.8)
+        duct(white, [(edge - 0.6, z_end), (edge - 0.6, deck_top + 0.28), (r2, deck_top + 0.28), (r2, z_end)], w + 0.78)
+        # (The cabin's door, on its side toward the other hood.)
+        side = -1 if ang < 30 else 1
+        door = out * (r0 + 1.9) + across * (side * (w + 0.03)) + Vector((0, 0, deck_top + 1.1))
+        dark.add_box(door, (1.0, 0.08, 2.1), Matrix.Rotation(math.atan2(out.y, out.x), 4, "Z"))
+    objs.append(dark.build(pre + "LaunchMount_Openings", mats.dark, parent=root))
+    objs.append(clad.build(pre + "LaunchMount_Cladding", mats.tower_light, parent=root))
+    objs.append(white.build(pre + "LaunchMount_Covers", mats.tank_white, parent=root))
 
     # Tower plinth: a wide concrete base with sloped sides, square to the tower (which stands
     # with a corner toward the mount, see tower_kit.py).
@@ -240,25 +358,17 @@ def build_v3_pad(root, mats, geo, spec):
     pl.matrix_world = (Matrix.Translation((spec["mount"][0] + spec["tower"][0], spec["mount"][1] + spec["tower"][1], 0.0))
                        @ Matrix.Rotation(corner_on, 4, "Z"))
 
-    # 20 hold-down clamps around the opening, each an arm reaching over the booster's skirt.
+    # 20 hold-down clamps inside the opening's rim: a housing each, set into the deck, and an
+    # arm reaching in under the booster's skirt.
+    housings = MeshBuilder()
     clamps = MeshBuilder()
     booster_r = geo["booster"]["radius"]
     for k in range(N_CLAMPS):
-        a = 2 * math.pi * (k + 0.5) / N_CLAMPS
-        rot = Matrix.Rotation(a, 4, "Z")
-        base = rot @ Vector((OPENING_R + 1.3, 0, deck_top + 1.2))
-        clamps.add_box(tuple(base), (2.2, 1.1, 2.4), rot)
-        tip = rot @ Vector((booster_r + 0.35, 0, pad["mountHeight"] + 0.9))
-        clamps.add_beam(tuple(base + Vector((0, 0, 0.8))), tuple(tip), 0.7, 0.9)
+        rot = Matrix.Rotation(2 * math.pi * (k + 0.5) / N_CLAMPS, 4, "Z")
+        housings.add_box(tuple(rot @ Vector((OPENING_R - 0.75, 0, deck_top - 0.55))), (1.5, 1.35, 1.9), rot)
+        clamps.add_beam(tuple(rot @ Vector((OPENING_R - 1.0, 0, deck_top + 0.2))), tuple(rot @ Vector((booster_r + 0.3, 0, pad["mountHeight"] + 0.5))), 0.7, 0.8)
+    objs.append(housings.build(pre + "LaunchMount_ClampHousings", mats.tower_light, parent=root))
     objs.append(clamps.build(pre + "LaunchMount_Clamps", mats.chopstick, parent=root))
-
-    # Booster quick disconnect: a hood on the deck edge facing the tower.
-    bqd = MeshBuilder()
-    d = Vector((tower_dir.x, tower_dir.y, 0))
-    rot = Matrix.Rotation(math.atan2(d.y, d.x), 4, "Z")
-    bqd.add_box(tuple(rot @ Vector((booster_r + 2.2, 0, deck_top + 2.5))), (2.6, 4.2, 5.0), rot)
-    bqd.add_box(tuple(rot @ Vector((booster_r + 4.6, 0, deck_top + 1.5))), (2.4, 5.4, 3.0), rot)
-    objs.append(bqd.build(pre + "BoosterQD", mats.tower, parent=root))
 
     for o in objs:
         o.matrix_world = to_world
