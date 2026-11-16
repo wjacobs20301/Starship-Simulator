@@ -84,23 +84,50 @@ describe('the auto camera', () => {
     expect(clips.filter((s) => s.skipTo !== undefined).length).toBeGreaterThanOrEqual(6);
     expect(clips.some((s) => s.mode === 'roadside' && s.roadside !== undefined)).toBe(true);
     expect(clips.filter((s) => s.mode === 'orbit').every((s) => s.orbit?.ahead === true)).toBe(true);
-    // There: round it with a title, twice, at time's own pace; and the last shot hands the camera back.
+    // There: round it with a title, the arms set to stacking it; a shot for each step of that,
+    // none shorter than three seconds; a title on the stack; and the last shot hands the camera back.
     const there = d.update(t + 1, roll(L, true, ['Starship at Pad 1, on its stand beside the mount: the chopsticks can take it']))!;
     expect(there.title?.[0]).toBe('Pad 1');
     expect(there.pace).toBe(1);
+    expect(there.stack).toBe(0);
     expect(there.last).toBeUndefined();
-    const after = [];
-    for (let u = t + 2; u < t + 60; u += 1) {
-      const s = d.update(u, roll(L, true));
-      if (s) after.push(s);
-      // (The game turns the auto camera off on that shot: game/viewModes.ts.)
-      if (s?.last) break;
+    const stacking = (stage: string | null) => ({ ...roll(L, true), stacking: stage });
+    expect(d.update(t + 3, stacking('close'))).toBeNull();
+    let u = t + 8;
+    const shots: Record<string, NonNullable<ReturnType<Director['update']>>> = {};
+    for (const stage of ['reach', 'grip', 'lift', 'swing', 'lower', 'clear']) {
+      const s = d.update(u, stacking(stage))!;
+      expect(s, stage).not.toBeNull();
+      expect(s.mode).toBe('orbit');
+      expect(s.pace).toBeGreaterThanOrEqual(1);
+      expect(s.last).toBeUndefined();
+      expect(d.update(u + 1, stacking(stage))).toBeNull();
+      shots[stage] = s;
+      u += 4;
     }
-    expect(after.length).toBe(2);
-    expect(after[0].last).toBeUndefined();
-    expect(after[1].last).toBe(true);
-    expect(after[1].mode).toBe('orbit');
-    expect(after[1].pace).toBe(1);
+    expect(shots.reach.pace).toBeGreaterThan(1);
+    expect(shots.grip.pace).toBe(1);
+    expect(shots.lower.pace).toBe(1);
+    expect(shots.clear.title?.[0]).toBe('Stacked');
+    expect(shots.clear.track).toBe('stack');
+    // (A step that's over in two seconds doesn't cut the shot before it short.)
+    const e = new Director();
+    e.update(0, roll(L - 5));
+    e.update(1, roll(L, true, ['Starship at Pad 1, on its stand beside the mount: the chopsticks can take it']));
+    expect(e.update(8, stacking('reach'))).not.toBeNull();
+    expect(e.update(9, stacking('grip'))).toBeNull();
+    expect(e.update(11.5, stacking('grip'))).not.toBeNull();
+    // Stacked: the camera is handed back, once.
+    const last = d.update(u + 5, stacking(null))!;
+    expect(last.last).toBe(true);
+    expect(last.mode).toBe('orbit');
+    expect(last.pace).toBe(1);
+    // (And with nothing stacking it, the player's own arms: handed back after the arrival's shot.)
+    const f = new Director();
+    f.update(0, roll(L - 5));
+    expect(f.update(1, roll(L, true, ['Starship at Pad 1, on its stand beside the mount: the chopsticks can take it']))!.stack).toBe(0);
+    expect(f.update(4, roll(L, true))).toBeNull();
+    expect(f.update(9, roll(L, true))!.last).toBe(true);
     // (Turned on again later, the ship still on its stand: the pad's usual shots, nothing of the rollout.)
     d.reset();
     const later = d.update(t + 200, roll(L, true))!;

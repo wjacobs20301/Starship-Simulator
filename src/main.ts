@@ -275,6 +275,7 @@ worker.onmessage = (ev: MessageEvent<WorkerMessage>) => {
   flight.paused = ev.data.paused;
   warpTo = ev.data.warpTo;
   flight.workerSceneId = ev.data.sceneId;
+  flight.stacking = ev.data.stacking;
   plot.record(curr.snap);
   flightSound.noteTowers(prev, curr);
   views.noteEvents(curr.snap.events);
@@ -374,6 +375,7 @@ const views = createViewModes({
   showToast,
   showTitle,
   cuts: () => motionCuts,
+  stacking: () => flight.stacking,
   busy: () => preparing.busy(),
   live: () => ({ prev, curr }),
   setLive: (p, c) => {

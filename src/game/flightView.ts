@@ -3,6 +3,8 @@
 // one small state object, made once in main.ts and handed to each. (Moved out of main.ts: its
 // module-level trackedId, satFocus, paused, launchPad, scenesSent and workerSceneId.)
 
+import type { StackStage } from '../sim/autoStack';
+
 export interface FlightView {
   /** The vehicle the cameras (and the player's controls) are on, by id. */
   trackedId: string;
@@ -15,10 +17,12 @@ export interface FlightView {
   /** Menu scenes asked for, and the worker's count of those it has set up. */
   scenesSent: number;
   workerSceneId: number;
+  /** A ship being stacked without hands: the step the arms are at (sim/autoStack.ts), or null. */
+  stacking: StackStage | null;
 }
 
 export function createFlightView(): FlightView {
-  return { trackedId: 'stack', satFocus: null, paused: false, launchPad: 0, scenesSent: 0, workerSceneId: 0 };
+  return { trackedId: 'stack', satFocus: null, paused: false, launchPad: 0, scenesSent: 0, workerSceneId: 0, stacking: null };
 }
 
 /** The worker has caught up with the last scene / mission set-up asked for. */

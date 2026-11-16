@@ -4,10 +4,11 @@
 //
 // Here: the way it goes (pad ENU, horizontal), and where it is along it. The highway is
 // OpenStreetMap's line (render/roadLines.ts: plain data); the way across the launch site is laid
-// over NOAA's 2026 survey, clear of the tank farm, the buildings and the flame trenches: the
-// east drive in from the roundabout, along the south side of the tank farm, and up to the stand
-// beside the mount's wall (for Pad 2, on by the drive round the head of the inlet between the
-// pads). Approximate: the real route across the site isn't published.
+// over NOAA's 2026 survey, clear of the tank farm and its pipe rack, the buildings and the flame
+// trenches (tests/rollout.test.ts holds it to that): the east drive in from the roundabout, west
+// across the open slab south of the tank farm, and up to the stand beside the mount's wall (for
+// Pad 2, on past Pad 1 and round the head of the inlet between the pads). Approximate: the real
+// route across the site isn't published.
 
 import { HIGHWAY_4_WEST } from '../render/roadLines';
 import { PAD, PAD2 } from './constants';
@@ -16,20 +17,34 @@ import { STANDS } from './padCollision';
 /** How fast the transport goes, m/s (the real ones walk; this is a brisk 22 km/h), how hard it starts and stops, and its crawl onto the stand. */
 export const ROLL = { speed: 6, accel: 0.4, crawl: 1.2, crawlFor: 30 };
 
-/** Where the highway is left for the site's east drive, then the way to the south side of the tank farm (east, north; m). */
+/**
+ * Where the highway is left for the site's east drive, down it onto the slab, and west across
+ * the open slab toward Pad 1's mount (east, north; m). Well south of the tank farm: its tanks'
+ * ends, the blast wall along them and the pipe rack on the wall's pad side reach to about
+ * n = 60 here, and the transport is 13 m wide. (It went along n = 75 before, through the ends
+ * of the tanks and the rack.)
+ */
 const INTO_SITE: [number, number][] = [
   [158, 114],
   [139, 68],
-  [115, 31],
-  [90, 62],
-  [40, 75],
+  [122, 44],
+  [60, 41],
 ];
-/** From there to Pad 2's apron: west past the tank farm and round the head of the inlet. */
+/**
+ * From there to Pad 2's apron: on west between the tank farm's pipe rack and Pad 1 (over the
+ * lines from the rack to Pad 1's tower, which go under plates where the way crosses them:
+ * render/facilities.ts), along under the western tanks' rack as it climbs north-west, through
+ * the gap between the buildings and the head of the inlet, and down to the apron.
+ */
 const TO_PAD_2: [number, number][] = [
-  [-60, 78],
-  [-118, 72],
-  [-170, 86],
-  [-215, 100],
+  [22, 49],
+  [-26, 53],
+  [-62, 57],
+  [-112, 69],
+  [-160, 84],
+  [-190, 96],
+  [-216, 99],
+  [-242, 92],
   [-262, 80],
 ];
 

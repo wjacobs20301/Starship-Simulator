@@ -30,6 +30,8 @@ export interface ViewModesDeps {
   showToast(text: string): void;
   /** A title over the picture for a few seconds: a heading and a line under it. */
   showTitle(head: string, sub: string): void;
+  /** A ship being stacked without hands: the step the arms are at, or null (the worker's word: protocol.ts stacking). */
+  stacking(): string | null;
   /** The worker's count of jumps within a scene (a rollout's film skipping up the road: protocol.ts cuts). */
   cuts(): number;
   /** A new flight isn't ready to look at yet (its screen is over it). */
@@ -208,6 +210,7 @@ export function createViewModes(deps: ViewModesDeps): ViewModes {
     }
     const shot = director.update(now / 1000, {
       transport: transportView(snap),
+      stacking: deps.stacking(),
       missionTime: snap.missionTime,
       vehicles: snap.vehicles.map((v) => ({
         id: v.id,
@@ -270,6 +273,7 @@ export function createViewModes(deps: ViewModesDeps): ViewModes {
     }
     const next = director.upcoming(transportView(snap));
     warm = next && route ? shotView(next.shot, route, Math.max(gone, next.at)) : null;
+    if (shot.stack !== undefined) send({ type: 'autoStack', pad: shot.stack });
     if (shot.title && !busy) {
       deps.showTitle(...shot.title);
       if (tr && !tr.arrived) showToast(`A drag, or ${keyText('director')}, takes the camera: the rollout then runs at its own pace`);

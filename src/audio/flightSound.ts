@@ -104,7 +104,7 @@ export function createFlightSound(deps: FlightSoundDeps): FlightSound {
 
   function audioStep(snap: Snapshot, placements: FxVehicle[], heard: Heard, cam: V3, camAlt: number, simTime: number, frameDt: number, wx: { rain: number }): void {
     audio.update(heard.level, heard.distance, Math.exp(-Math.max(0, camAlt) / 8500), flight.paused);
-    score.update(snap.transport, flight.paused || menu.kind !== null);
+    score.update(snap.transport, flight.paused || menu.kind !== null, flight.stacking !== null);
     // Everything else you hear: wind, surf, air rush, tower machinery, deluge, venting.
     const mt = snap.missionTime;
     const sm = (x: number, a: number, b: number) => {

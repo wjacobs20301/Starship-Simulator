@@ -10,7 +10,9 @@
 //   nearly half          the theme, on horns: eight bars, the second four a third higher
 //   two thirds           high strings over it, a swell and a cymbal into each fourth bar
 //   three quarters       the drums driving, the short strings doubled, the theme an octave up
-//   on its stand         one chord of D major, a drum and a cymbal, left to ring
+//   on its stand         one chord of D major, a drum and a cymbal, left to ring (if the arms
+//                        go on to stack it by themselves, everything plays on through that,
+//                        and the chord comes when the stack stands)
 //
 // Everything is scheduled a bar at a time on the audio clock (scoreBar), from update() each
 // frame. The bar and the last chord are plain functions of an audio context, so they can be
@@ -275,6 +277,9 @@ export class RolloutScore {
   private endsAt = 0;
   private held = false;
   private progress = 0;
+  /** When the transport was first seen on its stand (audio s; 0: not yet), and whether a stacking has been seen since. */
+  private arrivedAt = 0;
+  private stacked = false;
 
   constructor(engine: AudioEngine) {
     engine.onStart((ctx, out) => {
@@ -283,8 +288,11 @@ export class RolloutScore {
     }, 'world');
   }
 
-  /** Each frame. tr: the vehicle rolling out (the snapshot's transport), if one is; paused: time stopped, or a menu up. */
-  update(tr: { progress: number; arrived: boolean } | null | undefined, paused: boolean): void {
+  /**
+   * Each frame. tr: the vehicle rolling out (the snapshot's transport), if one is; paused: time
+   * stopped, or a menu up; stacking: the arms are stacking it by themselves.
+   */
+  update(tr: { progress: number; arrived: boolean } | null | undefined, paused: boolean, stacking = false): void {
     const ctx = this.ctx;
     if (!ctx || !this.dest) return;
     const now = ctx.currentTime;
@@ -306,10 +314,15 @@ export class RolloutScore {
     }
     if (paused) return;
     if (tr.arrived) {
-      scoreEnd(this.bus!, now + 0.06);
-      this.state = 'ending';
-      this.endsAt = now + 13;
-      return;
+      if (!this.arrivedAt) this.arrivedAt = now;
+      if (stacking) this.stacked = true;
+      // The last chord: as the stack stands; or, nothing stacking it within a second, on arrival.
+      if (!stacking && (this.stacked || now - this.arrivedAt > 1)) {
+        scoreEnd(this.bus!, now + 0.06);
+        this.state = 'ending';
+        this.endsAt = now + 13;
+        return;
+      }
     }
     // The next bar, a little before it's due. (Frames stopped a while, the tab away: on from now.)
     if (this.nextBar < now) this.nextBar = now + 0.06;
@@ -327,6 +340,8 @@ export class RolloutScore {
     this.out.connect(this.dest!);
     this.bus = scoreBus(ctx, this.out);
     this.state = 'playing';
+    this.arrivedAt = 0;
+    this.stacked = false;
     this.held = false;
     this.progress = progress;
     this.bar = 0;

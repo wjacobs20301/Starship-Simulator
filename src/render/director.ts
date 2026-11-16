@@ -9,13 +9,16 @@
 //
 // A rollout is a film, not a webcast: ten minutes of road told in a minute and a half. Its clips
 // are a fixed list (rollClips), each begun at its own place on the way, so the transport is
-// taken on up the road between them, and some of them run fast, as time lapses: an establishing
+// taken on up the road between them (most of the road is never shown), and a few run fast, as
+// time lapses: an establishing
 // shot high over the Starfactory with a title; low ahead of the transport, looking up the ship;
 // a drone behind and above with the miles going by; a tripod on the verge it comes past; the
 // wheels past a wide lens; straight down on it; off its bow; a long lens far up the road;
-// in across the launch site with the pad beyond; onto its stand. Then round it twice where it
-// stands, and the camera is handed back for the stacking. (Taking the camera at any point ends
-// the film: the rollout goes on from where it had got to, at its own pace.)
+// in across the launch site with the pad beyond; onto its stand. There the tower's arms stack it
+// on the booster by themselves (sim/autoStack.ts), a shot for each step of that, the long ones
+// run fast; a last look at the stack, and the camera is handed back. (Taking the camera at any
+// point ends the film: the rollout goes on from where it had got to, at its own pace, and a
+// stacking already begun is finished. A hand on the arms' controls ends the stacking too.)
 
 import type { CameraMode } from './cameras';
 
@@ -41,6 +44,8 @@ export interface DirectorView {
   tracked: string;
   /** A vehicle on its transport, rolling out: the pad it's bound for, how far it has come and has to go (m), and whether it's there. */
   transport?: DirectorTransport | null;
+  /** A ship being stacked without hands: the step the arms are at (sim/autoStack.ts StackStage), or null. */
+  stacking?: string | null;
 }
 
 export interface DirectorTransport {
@@ -74,15 +79,17 @@ export interface Shot {
   pace?: number;
   /** A title over it: a heading and a line under. */
   title?: [string, string];
+  /** Have the tower's arms at this pad stack the ship that has rolled out to it (0 = Pad 1). */
+  stack?: number;
   /** The last shot: the auto camera turns itself off on it. */
   last?: boolean;
 }
 
-type Situation = 'roll' | 'rollArrived' | 'rollEnd' | 'pad' | 'liftoff' | 'ascent' | 'staging' | 'boostback' | 'boosterLanding' | 'boosterDown' | 'coast' | 'deploy' | 'entry' | 'shipLanding' | 'shipDown';
+type Situation = 'roll' | 'rollArrived' | 'stacking' | 'rollEnd' | 'pad' | 'liftoff' | 'ascent' | 'staging' | 'boostback' | 'boosterLanding' | 'boosterDown' | 'coast' | 'deploy' | 'entry' | 'shipLanding' | 'shipDown';
 
 /** Events that start a new situation at once (and how long it lasts, s, unless the state moves on). */
 const CUES: [RegExp, Situation, number][] = [
-  [/^Starship at Pad \d, on its stand/, 'rollArrived', 16],
+  [/^Starship at Pad \d, on its stand/, 'rollArrived', 6],
   [/^Liftoff/, 'liftoff', 14],
   [/^Booster MECO|^Ship engine ignition|^Stage separation/, 'staging', 9],
   [/^Boostback burn startup/, 'boostback', 30],
@@ -95,6 +102,38 @@ const CUES: [RegExp, Situation, number][] = [
 ];
 
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
+
+/**
+ * The shot for a step of the stacking. Placed, like the rollout's, from the way the transport
+ * came onto the stand (the same at either pad, seen from the mount: the tower some 50 degrees
+ * to the right of it, the stand 120), so that the tower stands behind the ship. From the stand
+ * itself the tower is dead ahead and the mount 65 degrees to the left: the close shots there
+ * are from behind and to the left, over the open slab, with neither in the way.
+ */
+function stackShot(stage: string, tr: DirectorTransport): Shot {
+  const round = (azimuth: number, elevation: number, distance: number) => ({ azimuth, elevation, distance, ahead: true });
+  switch (stage) {
+    // The arms down the tower and round to the stand: from high and wide, fast.
+    case 'close':
+    case 'reach':
+      return { mode: 'orbit', track: tr.id, orbit: round(1.9, 0.35, 330), drift: { azimuth: -0.03, zoom: -0.012 }, pace: 6 };
+    // Shut on the ship: close in at the fittings.
+    case 'grip':
+      return { mode: 'orbit', track: tr.id, orbit: round(2.5, 0.05, 79), aim: 12, drift: { azimuth: 0.03 }, pace: 1 };
+    // Up off the stand: from the ground, looking up it as it goes.
+    case 'lift':
+      return { mode: 'orbit', track: tr.id, orbit: round(2.55, -0.3, 150), aim: 4, drift: { azimuth: 0.02 }, pace: 4 };
+    // Round over the mount.
+    case 'swing':
+      return { mode: 'orbit', track: tr.id, orbit: round(2.4, 0.25, 260), drift: { azimuth: -0.03 }, pace: 3 };
+    // Down onto the booster: close on where they meet.
+    case 'lower':
+      return { mode: 'orbit', track: tr.id, orbit: round(1.3, 0, 72), aim: -24, drift: { azimuth: 0.02 }, pace: 1 };
+    // The arms off it and away up the tower: the whole stack, slowly round.
+    default:
+      return { mode: 'orbit', track: 'stack', orbit: round(1.9, 0.1, 330), drift: { azimuth: 0.04, zoom: 0.01 }, pace: 1, title: ['Stacked', `Starship on Super Heavy · Pad ${tr.pad + 1}`] };
+  }
+}
 
 /** A clip of a rollout's film: where on the way it begins (m from the gate), how long it's held (s), and its shot. */
 export interface Clip {
@@ -125,18 +164,21 @@ function rollClips(tr: DirectorTransport): Clip[] {
     // (Cut as it comes abreast: past that, the lens is full of hull.)
     { at: 0.45 * L, hold: 5.5, shot: { mode: 'roadside', track: id, roadside: { ahead: 34, side: -7.5, up: -20, fov: 66 }, aim: -21 } },
     // Straight down on it, turning, the road reeling under.
-    { at: 0.52 * L, hold: 7, shot: { mode: 'orbit', track: id, orbit: round(0, 1.36, 240), drift: { azimuth: 0.035 }, pace: 10 } },
+    { at: 0.52 * L, hold: 7, shot: { mode: 'orbit', track: id, orbit: round(0, 1.36, 240), drift: { azimuth: 0.035 }, pace: 3 } },
     // Off its other bow, keeping pace.
     { at: 0.7 * L, hold: 6, shot: { mode: 'orbit', track: id, orbit: round(1.1, -0.12, 90), drift: { azimuth: 0.014 } } },
     // A long lens far up the road, the ship coming on through it. (Not the tower's own camera:
     // from out here it looks back through the framework of the tower's top.)
-    { at: 0.78 * L, hold: 6, shot: { mode: 'roadside', track: id, roadside: { ahead: 330, side: -9, up: -20 }, pace: 4 } },
+    { at: 0.78 * L, hold: 6, shot: { mode: 'roadside', track: id, roadside: { ahead: 330, side: -9, up: -20 }, pace: 3 } },
     // In through the gate: behind it, the pad and the tower it's making for beyond.
-    { at: L - 330, hold: 8, shot: { mode: 'orbit', track: id, orbit: round(Math.PI - 0.3, 0.09, 230), drift: { azimuth: 0.012, zoom: -0.008 }, pace: 4 } },
+    { at: L - 330, hold: 8, shot: { mode: 'orbit', track: id, orbit: round(Math.PI - 0.3, 0.09, 230), drift: { azimuth: 0.012, zoom: -0.008 }, pace: 2 } },
     // Across the site, from high up.
-    { at: L - 120, hold: 6, shot: { mode: 'orbit', track: id, orbit: round(-1.1, 0.55, 380), drift: { azimuth: -0.02 }, pace: 3 } },
-    // Onto its stand, from close and low: held until it's there.
-    { at: L - 26, hold: 40, shot: { mode: 'orbit', track: id, orbit: round(-0.55, -0.3, 120), aim: -9, drift: { azimuth: 0.014 }, pace: 3 } },
+    { at: L - 110, hold: 6, shot: { mode: 'orbit', track: id, orbit: round(-1.1, 0.55, 380), drift: { azimuth: -0.02 }, pace: 2 } },
+    // Onto its stand, from low on the open slab behind it, the tower beyond: held until it's there.
+    // (Not from ahead of it: that way are the tank farm's rack and the mount.)
+    // (And from where it has turned onto its last straight: the cameras are set by the way it's
+    // heading, and halfway round that corner this one was among the containers to the south.)
+    { at: L - 22, hold: 40, shot: { mode: 'orbit', track: id, orbit: round(2.3, -0.3, 100), aim: -9, drift: { azimuth: 0.012 }, pace: 3 } },
   ];
 }
 
@@ -151,11 +193,14 @@ export class Director {
   private rolled = false;
   /** Which of a rollout's clips is playing (-1: none yet). */
   private clip = -1;
+  /** The step of a stacking the shot on screen is of. */
+  private stage: string | null = null;
 
   /** Start afresh (a new flight). */
   reset(): void {
     this.rolled = false;
     this.clip = -1;
+    this.stage = null;
     this.cue = null;
     this.situation = null;
     this.shotAt = -Infinity;
@@ -169,6 +214,15 @@ export class Director {
       if (c) this.cue = { s: c[1], until: now + c[2] };
     }
     if (v.transport && !v.transport.arrived) return this.film(now, v.transport);
+    // A ship being stacked: a shot for each step of it, once the arrival's own has had its time
+    // (and none shorter than three seconds: the arms are shut on the ship in two).
+    if (v.stacking && v.transport && !(this.cue && now < this.cue.until)) {
+      this.situation = 'stacking';
+      if (v.stacking === this.stage || now - this.shotAt < 3) return null;
+      this.stage = v.stacking;
+      this.shotAt = now;
+      return stackShot(v.stacking, v.transport);
+    }
     const s = this.situationNow(now, v);
     const changed = s !== this.situation;
     // A new situation: cut now (or as soon as the last cut is most of a second old); else at the
@@ -209,7 +263,7 @@ export class Director {
     this.shotLen = clips[i].hold;
     const shot: Shot = { pace: 1, ...clips[i].shot };
     // (Up the road to where the clip begins, if that's any way off.)
-    if (clips[i].at > tr.gone + 15) shot.skipTo = clips[i].at;
+    if (clips[i].at > tr.gone + 4) shot.skipTo = clips[i].at;
     return shot;
   }
 
@@ -249,12 +303,12 @@ export class Director {
     const id = tr?.id ?? 'ship';
     switch (s) {
       case 'roll':
+      case 'stacking':
         return [];
       case 'rollArrived':
         return [
-          // (Round it where it stands: low, then high.)
-          { mode: 'orbit', track: id, orbit: { azimuth: -0.7, elevation: -0.25, distance: 185, ahead: true }, aim: -4, drift: { azimuth: 0.04 }, hold: [8, 8], pace: 1, title: [`Pad ${(tr?.pad ?? 0) + 1}`, 'Starship on its stand · the chopsticks can take it'] },
-          { mode: 'orbit', track: id, orbit: { azimuth: 0.6, elevation: 0.5, distance: 420, ahead: true }, drift: { azimuth: -0.035, zoom: -0.01 }, hold: [8, 8], pace: 1 },
+          // (Round it where it stands, from over the trench's ramp; and the arms set to stacking it.)
+          { mode: 'orbit', track: id, orbit: { azimuth: 2.45, elevation: 0.06, distance: 125, ahead: true }, aim: -4, drift: { azimuth: 0.03 }, hold: [8, 8], pace: 1, stack: tr?.pad ?? 0, title: [`Pad ${(tr?.pad ?? 0) + 1}`, 'Starship on its stand · the chopsticks take it from here'] },
         ];
       case 'rollEnd':
         // (The view the stacking is done from.)

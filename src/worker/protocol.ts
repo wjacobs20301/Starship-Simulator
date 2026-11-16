@@ -1,3 +1,4 @@
+import type { StackStage } from '../sim/autoStack';
 import type { PilotCommand } from '../sim/pilot';
 import type { FlightOptions, ManeuverNode, MenuScene, MissionStart, SimEvent, Snapshot } from '../sim/simulation';
 import type { ReturnTarget } from '../sim/shipReturn';
@@ -18,6 +19,8 @@ export type ToWorker =
   /** A main-menu backdrop (from a reset). */
   | { type: 'scene'; kind: MenuScene; /** The pad the stack stands on ('pad' scene), 0 = Pad 1. */ pad?: number }
   | { type: 'warp'; value: number }
+  /** A ship rolled out to this pad's stand: stack it on the booster with the tower's arms, no hands (sim/autoStack.ts). Any order to the arms from the player ends it. */
+  | { type: 'autoStack'; pad: number }
   /** A rollout filmed in clips: the transport on at once to this far along its way, m (Simulation.skipRollout). */
   | { type: 'rolloutSkip'; gone: number }
   | { type: 'pause'; value: boolean }
@@ -65,6 +68,8 @@ export type FromWorker = {
   sceneId: number;
   /** How many times the flight has jumped on within a scene (a rollout's film skipping up the road): nothing is drawn between the snapshots either side of one. */
   cuts: number;
+  /** A ship being stacked without hands: the step the arms are at (sim/autoStack.ts), or null. */
+  stacking: StackStage | null;
   /** Warping ahead to this (and when it'll stop, sim time), or null. */
   warpTo: { target: WarpTarget; at: number } | null;
   /** Predicted trajectories, attached only when recomputed (a few times a second). */

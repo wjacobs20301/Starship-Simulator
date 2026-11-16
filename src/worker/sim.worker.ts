@@ -1,6 +1,7 @@
 // Runs the simulation off the main thread at a fixed 100 Hz physics rate
 // (times warp), and posts a snapshot ~60 times a second.
 
+import { AutoStack } from '../sim/autoStack';
 import { DEFAULT_ENV } from '../sim/dynamics';
 import { DT, PHYSICS_WARP_MAX, Simulation } from '../sim/simulation';
 import { Land } from '../weather/model';
@@ -14,6 +15,8 @@ let weather: FlightWeather | null = null;
 let warp = 1;
 let sceneId = 0;
 let cuts = 0;
+/** A ship being stacked without hands (the 'autoStack' message), or null. */
+let stacker: AutoStack | null = null;
 let paused = false;
 let accumulator = 0;
 let last = performance.now();
@@ -69,6 +72,7 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       warpTo = null;
       accumulator = 0;
       lastPredict = -Infinity;
+      stacker = null;
       break;
     case 'warp':
       warp = msg.value;
@@ -85,7 +89,12 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       paused = msg.value;
       break;
     case 'arms':
+      // (The player's hand on the arms: they're the player's.)
+      if (stacker && (msg.lift || msg.swing || msg.slew)) stacker = null;
       sim.commandArms(msg.pad, msg.lift, msg.swing, msg.slew ?? null);
+      break;
+    case 'autoStack':
+      stacker = new AutoStack(sim, msg.pad);
       break;
     case 'pilot':
       sim.pilot.set(msg.cmd);
@@ -121,6 +130,7 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
         warpTo = null;
         accumulator = 0;
         lastPredict = -Infinity;
+        stacker = null;
         reply({ type: 'loaded', events: sim.events, weather: weather?.cfg ?? null });
       } catch (err) {
         reply({ type: 'loadFailed', reason: err instanceof Error ? err.message : String(err) });
@@ -156,13 +166,15 @@ setInterval(() => {
     accumulator += real * effectiveWarp;
     let n = 0;
     while (accumulator >= DT && n < MAX_STEPS_PER_TICK) {
+      stacker?.step();
       sim.step(DT);
       accumulator -= DT;
       n++;
     }
     if (n === MAX_STEPS_PER_TICK) accumulator = 0; // can't keep up: drop time rather than spiral
   }
-  const out: FromWorker = { type: 'snapshot', snapshot: sim.snapshot(), warp, effectiveWarp, rails, paused, sceneId, cuts, warpTo: warpTo && warpAt !== null ? { target: warpTo, at: warpAt } : null };
+  if (stacker && !stacker.stage) stacker = null;
+  const out: FromWorker = { type: 'snapshot', snapshot: sim.snapshot(), warp, effectiveWarp, rails, paused, sceneId, cuts, stacking: stacker?.stage ?? null, warpTo: warpTo && warpAt !== null ? { target: warpTo, at: warpAt } : null };
   if (now - lastPredict >= PREDICT_EVERY) {
     lastPredict = now;
     out.trajectories = sim.predictTrajectories();

@@ -888,6 +888,10 @@ function farmWorks(farm: { e: number; n: number; r: number; len: number; angle: 
     }
   }
   // From the lines to each tower's base: the nearest point of the nearest row's run, straight.
+  const PLATE = new THREE.Color(0x4a4d50);
+  /** The transports' ways across the site (pad east, north), and how near one the lines go under it: half the transport's width and room to spare, m. */
+  const ways = [0, 1].map((pad) => rolloutRoute(pad).filter(([e]) => e > -500));
+  const WAY_CLEAR = 10.5;
   const towers = [
     [TRENCHES[0].center[0] + PAD.tower.e, TRENCHES[0].center[1] + PAD.tower.n],
     [TRENCHES[1].center[0] + PAD2.tower.e, TRENCHES[1].center[1] + PAD2.tower.n],
@@ -906,15 +910,53 @@ function farmWorks(farm: { e: number; n: number; r: number; len: number; angle: 
     if (!best || best.d > 400) continue;
     const from = at(best.uu, best.vv, 1.6);
     const to = new THREE.Vector3(te, y0 + 1.6, -tn);
-    const side = new THREE.Vector3().subVectors(to, from).normalize().cross(new THREE.Vector3(0, 1, 0));
-    for (let k = -1; k <= 1; k++) parts.tank.push(pipe(from.clone().addScaledVector(side, 0.75 * k), to.clone().addScaledVector(side, 0.75 * k), 0.28));
-    const n = Math.floor(best.d / 8);
-    for (let i = 1; i < n; i++) {
-      const p = from.clone().lerp(to, i / n);
-      const g = new THREE.BoxGeometry(0.3, 1.3, 2.6);
-      g.rotateY(Math.atan2(-(to.z - from.z), to.x - from.x));
-      g.translate(p.x, y0 + 0.65, p.z);
-      parts.buildings.push(tag(g, STAND, [y0, 1.3, STYLE.plain, 0.5]));
+    const along = new THREE.Vector3().subVectors(to, from).normalize();
+    const side = along.clone().cross(new THREE.Vector3(0, 1, 0));
+    const turn = Math.atan2(-(to.z - from.z), to.x - from.x);
+    // Where a transport's way to a pad crosses the lines, or runs beside them, they go under
+    // the slab: a trench with steel plates over it, flush, that the transport rolls across. (A
+    // run on stands straight from the rack to each tower lay across the only ways there are
+    // from the gate to Pad 2: between the rack and Pad 1, and through the gap by the inlet.)
+    const under = (d: number): boolean => {
+      const p = from.clone().addScaledVector(along, d);
+      return ways.some((way) => distanceToLine([p.x, -p.z], way) < WAY_CLEAR);
+    };
+    const spans: { d0: number; d1: number; under: boolean }[] = [];
+    for (let d = 0; d < best.d; d += 1) {
+      const u0 = under(d + 0.5);
+      const last = spans[spans.length - 1];
+      if (last && last.under === u0) last.d1 = Math.min(best.d, d + 1);
+      else spans.push({ d0: d, d1: Math.min(best.d, d + 1), under: u0 });
+    }
+    for (const span of spans) {
+      const [p, q] = [from.clone().addScaledVector(along, span.d0), from.clone().addScaledVector(along, span.d1)];
+      if (span.under) {
+        // (The plates: a strip a hand proud of the slab, a joint every 3 m.)
+        for (let d = span.d0; d < span.d1 - 0.05; d += 3) {
+          const len = Math.min(3, span.d1 - d) - 0.06;
+          const g = new THREE.BoxGeometry(len, 0.07, 3.2);
+          g.rotateY(turn);
+          const m = from.clone().addScaledVector(along, d + len / 2 + 0.03);
+          g.translate(m.x, y0 + 0.035, m.z);
+          parts.buildings.push(tag(g, PLATE, [y0, 0.07, STYLE.plain, 0.5]));
+        }
+        continue;
+      }
+      for (let k = -1; k <= 1; k++) {
+        const [a0, a1] = [p.clone().addScaledVector(side, 0.75 * k), q.clone().addScaledVector(side, 0.75 * k)];
+        parts.tank.push(pipe(a0, a1, 0.28));
+        // (Down into the trench at each end that meets one.)
+        if (span.d0 > 0) parts.tank.push(pipe(a0, new THREE.Vector3(a0.x, y0, a0.z), 0.28));
+        if (span.d1 < best.d) parts.tank.push(pipe(a1, new THREE.Vector3(a1.x, y0, a1.z), 0.28));
+      }
+      const n = Math.floor((span.d1 - span.d0) / 8);
+      for (let i = 1; i < n; i++) {
+        const m = p.clone().lerp(q, i / n);
+        const g = new THREE.BoxGeometry(0.3, 1.3, 2.6);
+        g.rotateY(turn);
+        g.translate(m.x, y0 + 0.65, m.z);
+        parts.buildings.push(tag(g, STAND, [y0, 1.3, STYLE.plain, 0.5]));
+      }
     }
   }
 }
